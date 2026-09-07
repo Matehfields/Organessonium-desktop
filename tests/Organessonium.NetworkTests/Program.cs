@@ -20,6 +20,8 @@ internal static class Program
         ("customKeyExportImportAndMismatch", CustomKeyExportImportAndMismatchAsync),
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
+        ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
+        ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -319,6 +321,74 @@ internal static class Program
         }
 
         return TestOutcome.Pass();
+    }
+
+    private static Task<TestOutcome> FolderSerialRoundTripAsync()
+    {
+        var codec = new FolderSerialCodec();
+        var generatedAt = DateTimeOffset.Parse("2026-09-07T15:00:00Z");
+        var serial = new FolderSerial
+        {
+            FolderId = "root",
+            ParentFolderId = "root",
+            FolderName = "root",
+            GeneratedAt = generatedAt,
+            Aggregate = new FolderSerialAggregate
+            {
+                TotalItems = 1,
+                FileCount = 1,
+                FolderCount = 0,
+                TotalBytes = 42,
+                ImageCount = 1,
+                VideoCount = 0,
+                TypeCounts = new Dictionary<string, long> { ["jpg"] = 1 }
+            },
+            Children =
+            [
+                new FolderSerialEntry
+                {
+                    Id = "file-id",
+                    NamesMessageId = "names-message-id",
+                    ParentFolderId = "root",
+                    Name = "foto.jpg",
+                    ThreadId = "thread-id",
+                    MimeType = "image/jpeg",
+                    UploadedAt = generatedAt,
+                    PreviewMessageId = "preview-id",
+                    Encryption = new EncryptionMetadata
+                    {
+                        Version = 1,
+                        Mode = EncryptionModes.Standard,
+                        Salt = "NyasiAVslEKTO__DCbEeKg"
+                    }
+                }
+            ]
+        };
+
+        var restored = codec.DecodeFolder(codec.EncodeFolder(serial));
+        var child = restored.Children.SingleOrDefault();
+        var valid = restored.FolderId == serial.FolderId &&
+                    restored.GeneratedAt == generatedAt &&
+                    restored.Aggregate.TotalBytes == 42 &&
+                    child?.Id == "file-id" &&
+                    child.Encryption?.Salt == "NyasiAVslEKTO__DCbEeKg" &&
+                    child.MimeType == "image/jpeg";
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o serial OSER não voltou com a estrutura esperada"));
+    }
+
+    private static Task<TestOutcome> SerialMessageEnvelopeProtocolAsync()
+    {
+        var content = SerialMessageEnvelope.Encode("folder-id", "Fotos", new string('a', 64));
+        var parsed = SerialMessageEnvelope.TryParse(content, out var envelope);
+        var rejected = !SerialMessageEnvelope.TryParse(
+            "{\"schema\":1,\"entryType\":\"folderSerial\",\"folderId\":\"folder-id\",\"sha256\":\"bad\"}",
+            out _);
+        var valid = parsed && rejected && envelope.FolderId == "folder-id" && envelope.FolderName == "Fotos";
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o envelope do canal serial não correspondeu ao padrão existente"));
     }
 
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)

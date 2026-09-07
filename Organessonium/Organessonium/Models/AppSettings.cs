@@ -13,6 +13,9 @@ public sealed class AppSettings
     [JsonPropertyName("appsForumId")]
     public string AppsForumId { get; set; } = "";
 
+    [JsonPropertyName("serialChannelId")]
+    public string SerialChannelId { get; set; } = "";
+
     [JsonPropertyName("theme")]
     public string Theme { get; set; } = "system";
 
@@ -89,6 +92,7 @@ public sealed class AppSettings
             BotToken = BotToken,
             NamesChannelId = NamesChannelId,
             AppsForumId = AppsForumId,
+            SerialChannelId = SerialChannelId,
             Theme = Theme,
             CardSize = CardSize,
             Language = Language,

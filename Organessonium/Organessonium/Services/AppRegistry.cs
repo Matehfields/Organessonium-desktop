@@ -8,12 +8,14 @@ public sealed class AppRegistry
     private readonly SettingsStore _store;
     private readonly AppSettings _settings;
     private readonly MetadataService _metadata = new();
+    private readonly SerialIndexService _serials;
 
     public AppRegistry(DiscordApiClient discord, SettingsStore store, AppSettings settings)
     {
         _discord = discord;
         _store = store;
         _settings = settings;
+        _serials = new SerialIndexService(discord, store, settings);
     }
 
     public async Task<List<AppEntry>> LoadAsync(
@@ -21,37 +23,73 @@ public sealed class AppRegistry
         Func<int, Task>? onProgress = null,
         Func<IReadOnlyList<AppEntry>, Task>? onBatch = null)
     {
-var envelopes = new List<MetadataEnvelope>();
+        var cached = _store.LoadCachedEntries();
+        try
+        {
+            var fastEntries = await _serials.LoadFastEntriesAsync(cached, cancellationToken);
+            if (fastEntries.Count > 0 && onBatch != null)
+            {
+                await onBatch(fastEntries);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.SerialIndex", ex, _settings.SerialChannelId);
+        }
+
+        var messages = await _discord.GetMessagesInParallelAsync(
+            _settings.NamesChannelId,
+            Math.Clamp(_settings.SearchWorkers, 1, 8),
+            cancellationToken);
+        var botMessages = messages.Where(message => message.Author?.Bot == true).ToArray();
+        var envelopes = new List<MetadataEnvelope>(botMessages.Length);
         var sentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
-        await _discord.GetMessagesInParallelAsync(
-            _settings.NamesChannelId,
-            workers,
-            cancellationToken,
-            async batch =>
+        var metadataBatchSize = Math.Max(100, workers * 100);
+        for (var offset = 0; offset < botMessages.Length; offset += metadataBatchSize)
+        {
+            var batch = botMessages
+                .Skip(offset)
+                .Take(metadataBatchSize)
+                .ToArray();
+            var resolved = await _metadata.ReadEnvelopesInParallelAsync(batch, workers, cancellationToken);
+            envelopes.AddRange(resolved);
+
+            if (onBatch != null)
             {
-                var botMessages = batch.Where(message => message.Author?.Bot == true).ToArray();
-                var resolved = await _metadata.ReadEnvelopesInParallelAsync(botMessages, workers, cancellationToken);
-                envelopes.AddRange(resolved);
-
-                if (onBatch != null)
+                var current = _metadata.ToAppEntries(envelopes);
+                var added = ReadyForProgressiveSend(current, sentIds);
+                if (added.Count > 0)
                 {
-                    var current = _metadata.ToAppEntries(envelopes);
-                    var added = ReadyForProgressiveSend(current, sentIds);
-                    if (added.Count > 0)
-                    {
-                        await onBatch(added);
-                    }
+                    await onBatch(added);
                 }
+            }
 
-                if (onProgress != null)
-                {
-                    await onProgress(envelopes.Count);
-                }
-            });
+            if (onProgress != null)
+            {
+                await onProgress(envelopes.Count);
+            }
+        }
 
         var list = _metadata.ToAppEntries(envelopes);
         _store.CacheEntries(list);
+        try
+        {
+            await _serials.SynchronizeAsync(list, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.SerialIndexSync", ex, _settings.SerialChannelId);
+        }
+
         return list;
     }
 

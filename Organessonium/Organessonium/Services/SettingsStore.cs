@@ -16,6 +16,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         DataDirectory = ResolveDataDirectory();
         AppLogger.Configure(DataDirectory);
         PreviewCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Previews"));
+        SerialCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Serials"));
         ThumbnailCache.Configure(PreviewCacheDirectory);
         WebViewDataDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "WebView"));
         TransfersDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Transfers"));
@@ -27,6 +28,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
     public DirectoryInfo DataDirectory { get; }
     public DirectoryInfo PreviewCacheDirectory { get; }
+    public DirectoryInfo SerialCacheDirectory { get; }
     public DirectoryInfo WebViewDataDirectory { get; }
     public DirectoryInfo TransfersDirectory { get; }
     public string DatabasePath { get; }
@@ -90,6 +92,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.BotToken = Get(values, "botToken", settings.BotToken);
             settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
             settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
+            settings.SerialChannelId = Get(values, "serialChannelId", settings.SerialChannelId);
             settings.Theme = Get(values, "theme", settings.Theme);
             settings.CardSize = Get(values, "cardSize", settings.CardSize);
             settings.Language = Get(values, "language", settings.Language);
@@ -131,6 +134,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "botToken", settings.BotToken);
             Upsert(connection, "namesChannelId", settings.NamesChannelId);
             Upsert(connection, "appsForumId", settings.AppsForumId);
+            Upsert(connection, "serialChannelId", settings.SerialChannelId);
             Upsert(connection, "theme", settings.Theme);
             Upsert(connection, "cardSize", settings.CardSize);
             Upsert(connection, "language", settings.Language);
@@ -449,6 +453,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.BotToken = Get(values, "botToken", settings.BotToken);
         settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
         settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
+        settings.SerialChannelId = Get(values, "serialChannelId", settings.SerialChannelId);
         settings.Theme = Get(values, "theme", settings.Theme);
         settings.CardSize = Get(values, "cardSize", settings.CardSize);
         settings.Language = Get(values, "language", settings.Language);

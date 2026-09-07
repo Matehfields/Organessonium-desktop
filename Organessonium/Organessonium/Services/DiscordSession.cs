@@ -44,6 +44,15 @@ public sealed class DiscordSession : IAsyncDisposable
             throw new InvalidOperationException("Fórum apps não encontrado ou não é um canal de fórum.");
         }
 
+        if (!string.IsNullOrWhiteSpace(settings.SerialChannelId))
+        {
+            var serial = await Api.GetChannelAsync(settings.SerialChannelId.Trim(), cancellationToken);
+            if (serial.Type is not (0 or 5))
+            {
+                throw new InvalidOperationException("Canal serial não encontrado ou não é um canal de texto.");
+            }
+        }
+
         await StartPresenceAsync(settings.BotToken.Trim(), proxy, cancellationToken);
     }
 

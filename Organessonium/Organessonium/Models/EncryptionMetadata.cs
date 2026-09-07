@@ -42,13 +42,17 @@ public sealed class EncryptionMetadata
     [JsonPropertyName("salt")]
     public string Salt { get; set; } = "";
 
+    [JsonPropertyName("keyId")]
+    public string? KeyId { get; set; }
+
     public EncryptionMetadata Clone()
     {
         return new EncryptionMetadata
         {
             Version = Version,
             Mode = Mode,
-            Salt = Salt
+            Salt = Salt,
+            KeyId = KeyId
         };
     }
 }

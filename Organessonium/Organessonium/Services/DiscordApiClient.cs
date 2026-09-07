@@ -516,6 +516,42 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
+    public async Task<byte[]> DownloadAttachmentBytesAsync(
+        DiscordAttachmentDto attachment,
+        CancellationToken cancellationToken = default)
+    {
+        Exception? lastError = null;
+        foreach (var url in new[] { attachment.Url, attachment.ProxyUrl }
+                     .Where(value => !string.IsNullOrWhiteSpace(value))
+                     .Distinct(StringComparer.Ordinal))
+        {
+            try
+            {
+                using var response = await _http.GetAsync(
+                    url,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                }
+
+                lastError = new HttpRequestException(
+                    $"Download do anexo retornou HTTP {(int)response.StatusCode}.");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw new InvalidOperationException("Não foi possível baixar o anexo do serial.", lastError);
+    }
+
     public async Task DeleteChannelAsync(string channelId, CancellationToken cancellationToken = default)
     {
         using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}"), cancellationToken);

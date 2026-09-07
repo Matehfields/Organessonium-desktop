@@ -1,6 +1,7 @@
 const inpToken = document.getElementById('inp-token');
 const inpNames = document.getElementById('inp-names');
 const inpForum = document.getElementById('inp-forum');
+const inpSerial = document.getElementById('inp-serial');
 const btnConnect = document.getElementById('btn-connect');
 const btnToggleToken = document.getElementById('btn-toggle-token');
 const btnGuide = document.getElementById('btn-guide');
@@ -38,10 +39,14 @@ const SETUP_I18N = {
         namesHint:'Canal de texto usado como índice de arquivos',
         forum:'Fórum de arquivos files',
         forumHint:'Canal do tipo Fórum usado para armazenar os arquivos',
+        serial:'Canal de seriais serial',
+        serialHint:'Canal de texto usado para armazenar os seriais das pastas',
         namesId:'ID do canal names',
         namesIdHint:'ID do canal de texto usado como índice de arquivos',
         forumId:'ID do fórum files',
         forumIdHint:'ID do canal do tipo Fórum usado para armazenar os arquivos',
+        serialId:'ID do canal serial',
+        serialIdHint:'ID do canal de texto usado para armazenar os seriais das pastas',
         createChannels:'Criar canais automaticamente',
         connect:'Conectar',
         guide:'Como criar o bot e configurar o Discord passo a passo',
@@ -50,8 +55,9 @@ const SETUP_I18N = {
         connectingDiscord:'Conectando ao Discord...',
         tokenRequired:'Insira o token do bot.',
         namesRequired:'Informe um nome para o canal de índice.',
-        forumRequired:'Informe um nome para o fórum de arquivos.'
-,idsRequired:'Informe os dois IDs dos canais.'
+        forumRequired:'Informe um nome para o fórum de arquivos.',
+        serialRequired:'Informe um nome para o canal de seriais.',
+        idsRequired:'Informe os três IDs dos canais.'
         ,invalidIds:'Os IDs devem conter apenas números e ter entre 16 e 22 dígitos.'
         ,proxyTitle:'Rede e proxy'
         ,proxyMode:'Modo de conexão'
@@ -89,10 +95,14 @@ const SETUP_I18N = {
         namesHint:'Text channel used as the file index',
         forum:'Files forum files',
         forumHint:'Forum channel used to store files',
+        serial:'Serial channel serial',
+        serialHint:'Text channel used to store folder serials',
         namesId:'names channel ID',
         namesIdHint:'ID of the text channel used as the file index',
         forumId:'files forum ID',
         forumIdHint:'ID of the forum channel used to store files',
+        serialId:'serial channel ID',
+        serialIdHint:'ID of the text channel used to store folder serials',
         createChannels:'Create channels automatically',
         connect:'Connect',
         guide:'How to create the bot and configure Discord step by step ->',
@@ -101,8 +111,9 @@ const SETUP_I18N = {
         connectingDiscord:'Connecting to Discord...',
         tokenRequired:'Enter the bot token.',
         namesRequired:'Enter a name for the index channel.',
-        forumRequired:'Enter a name for the files forum.'
-        ,idsRequired:'Enter both channel IDs.'
+        forumRequired:'Enter a name for the files forum.',
+        serialRequired:'Enter a name for the serial channel.'
+        ,idsRequired:'Enter all three channel IDs.'
         ,invalidIds:'IDs must contain only numbers and be between 16 and 22 digits long.'
         ,proxyTitle:'Network and proxy'
         ,proxyMode:'Connection mode'
@@ -183,9 +194,11 @@ function applySetupPreferences() {
     labels[0].textContent = setupText('token');
     labels[1].innerHTML = setupText('names').replace('names', '<code>names</code>');
     labels[2].innerHTML = setupText('forum').replace('files', '<code>files</code>');
+    labels[3].innerHTML = setupText('serial').replace('serial', '<code>serial</code>');
     hints[0].textContent = setupText('tokenHint');
     hints[1].textContent = setupText('namesHint');
     hints[2].textContent = setupText('forumHint');
+    hints[3].textContent = setupText('serialHint');
 btnCreateChannels.textContent = setupText('createChannels');
     btnCustomChannelNames.textContent = setupText('customNames');
     btnChannelIds.textContent = setupText('useIds');
@@ -238,11 +251,13 @@ function prefillSetupFields(saved) {
     const token = typeof saved.botToken === 'string' ? saved.botToken : '';
     const namesId = typeof saved.namesChannelId === 'string' ? saved.namesChannelId : '';
     const forumId = typeof saved.appsForumId === 'string' ? saved.appsForumId : '';
+    const serialId = typeof saved.serialChannelId === 'string' ? saved.serialChannelId : '';
     if (token && !inpToken.value) inpToken.value = token;
-    if (namesId || forumId) {
+    if (namesId || forumId || serialId) {
         channelInputMode = 'ids';
         inpNames.value = namesId;
         inpForum.value = forumId;
+        inpSerial.value = serialId;
         channelFields.classList.remove('hidden');
         channelActions.classList.add('hidden');
         setupPrefilled = true;
@@ -323,6 +338,7 @@ btnCustomChannelNames.addEventListener('click', () => {
     channelInputMode = 'names';
     if (!inpNames.value.trim() || /^\d+$/.test(inpNames.value.trim())) inpNames.value = 'names';
     if (!inpForum.value.trim() || /^\d+$/.test(inpForum.value.trim())) inpForum.value = 'files';
+    if (!inpSerial.value.trim() || /^\d+$/.test(inpSerial.value.trim())) inpSerial.value = 'serial';
     channelFields.classList.remove('hidden');
     channelActions.classList.add('hidden');
     applyChannelFieldMode();
@@ -333,6 +349,7 @@ btnChannelIds.addEventListener('click', () => {
     channelInputMode = 'ids';
     if (inpNames.value.trim() === 'names') inpNames.value = '';
     if (inpForum.value.trim() === 'files') inpForum.value = '';
+    if (inpSerial.value.trim() === 'serial') inpSerial.value = '';
     channelFields.classList.remove('hidden');
     channelActions.classList.add('hidden');
     applyChannelFieldMode();
@@ -372,7 +389,7 @@ window._onProxyTestResult = function(success, message, protocol) {
     proxyTestResult.classList.remove('hidden');
 };
 
-[inpToken, inpNames, inpForum].forEach(inp =>
+[inpToken, inpNames, inpForum, inpSerial].forEach(inp =>
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') tryConnect(false); })
 );
 
@@ -387,14 +404,16 @@ function tryConnect(allowCreate) {
     const token  = inpToken.value.trim();
     const names  = channelInputMode === 'auto' ? 'names' : inpNames.value.trim();
     const forum  = channelInputMode === 'auto' ? 'files' : inpForum.value.trim();
+    const serial = channelInputMode === 'auto' ? 'serial' : inpSerial.value.trim();
 if (!token)  { showErr(setupText('tokenRequired')); return; }
     if (channelInputMode === 'ids') {
-        if (!names || !forum) { showErr(setupText('idsRequired')); return; }
-        if (!/^\d{16,22}$/.test(names) || !/^\d{16,22}$/.test(forum)) { showErr(setupText('invalidIds')); return; }
+        if (!names || !forum || !serial) { showErr(setupText('idsRequired')); return; }
+        if (!/^\d{16,22}$/.test(names) || !/^\d{16,22}$/.test(forum) || !/^\d{16,22}$/.test(serial)) { showErr(setupText('invalidIds')); return; }
     }
     if (!names)  { showErr(setupText('namesRequired')); return; }
     if (!forum)  { showErr(setupText('forumRequired')); return; }
-    window.bridge.connect(token, names, forum, !!allowCreate, JSON.stringify(collectProxySettings()));
+    if (!serial)  { showErr(setupText('serialRequired')); return; }
+    window.bridge.connect(token, names, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()));
 }
 
 function applyChannelFieldMode() {
@@ -403,12 +422,16 @@ function applyChannelFieldMode() {
     const ids = channelInputMode === 'ids';
     labels[1].innerHTML = setupText(ids ? 'namesId' : 'names').replace('names', '<code>names</code>');
     labels[2].innerHTML = setupText(ids ? 'forumId' : 'forum').replace('files', '<code>files</code>');
+    labels[3].innerHTML = setupText(ids ? 'serialId' : 'serial').replace('serial', '<code>serial</code>');
     hints[1].textContent = setupText(ids ? 'namesIdHint' : 'namesHint');
     hints[2].textContent = setupText(ids ? 'forumIdHint' : 'forumHint');
+    hints[3].textContent = setupText(ids ? 'serialIdHint' : 'serialHint');
     inpNames.placeholder = ids ? '123456789012345678' : 'names';
     inpForum.placeholder = ids ? '123456789012345678' : 'files';
+    inpSerial.placeholder = ids ? '123456789012345678' : 'serial';
     inpNames.inputMode = ids ? 'numeric' : 'text';
     inpForum.inputMode = ids ? 'numeric' : 'text';
+    inpSerial.inputMode = ids ? 'numeric' : 'text';
 }
 
 function showErr(msg) {
