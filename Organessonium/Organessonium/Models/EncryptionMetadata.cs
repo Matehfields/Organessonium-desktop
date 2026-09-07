@@ -53,6 +53,40 @@ public sealed class EncryptionMetadata
     }
 }
 
+internal static class EncryptionMetadataCodec
+{
+    public static string EncodeSalt(byte[] value)
+    {
+        return Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    public static byte[] DecodeSalt(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new FormatException("Salt de criptografia vazio.");
+        }
+
+        var normalized = value;
+        if (normalized.Length % 4 == 1 || normalized.Any(character => !IsBase64UrlCharacter(character)))
+        {
+            throw new FormatException("Salt de criptografia não está em Base64URL sem padding.");
+        }
+
+        var padding = (4 - normalized.Length % 4) % 4;
+        var standard = normalized.Replace('-', '+').Replace('_', '/');
+        return Convert.FromBase64String(standard + new string('=', padding));
+    }
+
+    private static bool IsBase64UrlCharacter(char value)
+    {
+        return value is >= 'A' and <= 'Z' ||
+               value is >= 'a' and <= 'z' ||
+               value is >= '0' and <= '9' ||
+               value is '-' or '_';
+    }
+}
+
 public sealed record EncryptedPayloadContext(
     string FileId,
     EncryptionMetadata Encryption,

@@ -425,7 +425,7 @@ public sealed class MetadataService
                     Require(EncryptionModes.IsSupported(file.Encryption.Mode), "modo de criptografia inválido.");
                     try
                     {
-                        Require(Convert.FromBase64String(file.Encryption.Salt).Length >= 16, "salt de criptografia inválido.");
+                        Require(EncryptionMetadataCodec.DecodeSalt(file.Encryption.Salt).Length >= 16, "salt de criptografia inválido.");
                     }
                     catch (FormatException)
                     {

@@ -15,8 +15,10 @@ internal static class Program
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
         ("encryptedPayloadTamperAndTruncation", EncryptedPayloadTamperAndTruncationAsync),
         ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
+        ("urlSafeEncryptionSaltCompatibility", UrlSafeEncryptionSaltCompatibilityAsync),
         ("customKeyExportImportAndMismatch", CustomKeyExportImportAndMismatchAsync),
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
+        ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -170,6 +172,31 @@ internal static class Program
         return Task.FromResult(valid ? TestOutcome.Pass() : TestOutcome.Fail("prévia ou vídeo 480p não voltou idêntico"));
     }
 
+    private static Task<TestOutcome> UrlSafeEncryptionSaltCompatibilityAsync()
+    {
+        var service = CreateEncryptionService(out _);
+        var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+        var generatedSaltIsCanonical = encryption.Salt.Length > 0 &&
+            encryption.Salt.All(character => char.IsLetterOrDigit(character) || character is '-' or '_');
+        if (!generatedSaltIsCanonical)
+        {
+            return Task.FromResult(TestOutcome.Fail("o salt novo não foi gravado em Base64URL sem padding"));
+        }
+
+        encryption.Salt = "NyasiAVslEKTO__DCbEeKg";
+        var original = RandomNumberGenerator.GetBytes(4096);
+        var context = new EncryptedPayloadContext("file-url-safe-salt", encryption, EncryptedPayloadRoles.Original, 0);
+        var payload = service.EncryptBytes(original, context);
+        var restored = service.DecryptBytes(payload, context);
+        var matches = CryptographicOperations.FixedTimeEquals(original, restored);
+        CryptographicOperations.ZeroMemory(original);
+        CryptographicOperations.ZeroMemory(payload);
+        CryptographicOperations.ZeroMemory(restored);
+        return Task.FromResult(matches
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o salt base64url não foi aceito na criptografia"));
+    }
+
     private static async Task<TestOutcome> CustomKeyExportImportAndMismatchAsync()
     {
         var serviceA = CreateEncryptionService(out _);
@@ -221,6 +248,52 @@ internal static class Program
         {
             try { payload.Attachment?.Delete(); } catch { }
         }
+    }
+
+    private static async Task<TestOutcome> UrlSafeEncryptedMetadataIsLoadedAsync()
+    {
+        var messages = new[]
+        {
+            new DiscordMessageDto
+            {
+                Id = "1542915922841436287",
+                Content = """
+                    {"fileId":"5mqlhvddv3errvi7c2sa4zp2qeo9g2t2","threadId":"1542915920857661451","name":"Documento (2).pdf","mimeType":"application/pdf","sizeBytes":17803,"uploadedAt":"2026-08-28T15:17:02Z","batchId":"k7opmdfl3v","parentFolderId":"root","chunks":["1542915920857661451"],"encryption":{"version":1,"mode":"standard","salt":"NyasiAVslEKTO__DCbEeKg"},"schemaVersion":2,"entryType":"file"}
+                    """
+            },
+            new DiscordMessageDto
+            {
+                Id = "1543972701318684816",
+                Content = """
+                    {"fileId":"hi6iv49u6u0e0jzjwnr7pspn3ndm5k3c","threadId":"1543972697506316288","name":"IMG_20260403_140807.jpg","mimeType":"image/jpeg","sizeBytes":3161925,"uploadedAt":"2026-08-31T13:16:16Z","batchId":"yqzrf3n1xt","parentFolderId":"root","chunks":["1543972697506316288"],"preview":{"thumbnailMessageId":"1543972700282822786"},"encryption":{"version":1,"mode":"standard","salt":"cPEsp9RSk8AZKL7p-OPicw"},"schemaVersion":2,"entryType":"file"}
+                    """
+            }
+        };
+        var service = new MetadataService();
+        foreach (var message in messages)
+        {
+            var envelope = await service.ReadEnvelopeAsync(message);
+            if (envelope?.Entry is not FileMetadata file || file.Encryption == null)
+            {
+                return TestOutcome.Fail("metadata criptografada em base64url não foi carregada");
+            }
+        }
+
+        var standardContent = messages[0].Content.Replace(
+            "NyasiAVslEKTO__DCbEeKg",
+            "AAECAwQFBgcICQoLDA0ODw==",
+            StringComparison.Ordinal);
+        var standardEnvelope = await service.ReadEnvelopeAsync(new DiscordMessageDto
+        {
+            Id = "standard-salt-must-be-rejected",
+            Content = standardContent
+        });
+        if (standardEnvelope != null)
+        {
+            return TestOutcome.Fail("metadata em Base64 padrão foi aceita, mas o formato do servidor é Base64URL");
+        }
+
+        return TestOutcome.Pass();
     }
 
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)

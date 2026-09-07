@@ -30,7 +30,7 @@ public sealed class EncryptionService
         {
             Version = EncryptionMetadata.CurrentVersion,
             Mode = EncryptionModes.Normalize(mode),
-            Salt = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16))
+            Salt = EncryptionMetadataCodec.EncodeSalt(RandomNumberGenerator.GetBytes(16))
         };
     }
 
@@ -223,7 +223,7 @@ public sealed class EncryptionService
         byte[] salt;
         try
         {
-            salt = Convert.FromBase64String(encryption.Salt);
+            salt = EncryptionMetadataCodec.DecodeSalt(encryption.Salt);
         }
         catch (FormatException ex)
         {

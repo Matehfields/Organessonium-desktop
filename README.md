@@ -106,9 +106,11 @@ Todo novo attachment binário do Organessônium passa por `EncryptionService` an
 "encryption": {
   "version": 1,
   "mode": "standard",
-  "salt": "base64-do-salt-por-arquivo"
+  "salt": "base64url-sem-padding-do-salt-por-arquivo"
 }
 ```
+
+O `salt` usa exclusivamente Base64URL sem padding, com os caracteres `A-Z`, `a-z`, `0-9`, `-` e `_`. Esse é o formato gravado nas mensagens do servidor e usado tanto na validação do índice quanto na derivação da chave.
 
 O blob `OESB` v1 contém magic, versão, flags, nonce GCM de 96 bits, tamanho plaintext, ciphertext e tag de autenticação. O nonce é gerado por CSPRNG para cada payload. A chave por arquivo é derivada por HKDF-SHA-256 a partir da master key, `fileId` e do salt aleatório do arquivo; os chunks usam AAD que inclui `fileId`, papel do payload e índice do chunk. Assim, trocar, truncar ou reordenar payloads invalida a autenticação AES-256-GCM.
 
