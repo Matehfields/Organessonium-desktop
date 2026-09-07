@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Organessônium</title>
+    <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<header class="topbar">
+    <div class="topbar-brand">
+        <span class="logo-omega">Ω</span>
+            <span class="brand-name">Organessônium</span>
+    </div>
+    <div class="nav-search-group">
+        <button id="btn-back"    class="btn-nav" disabled><span data-icon="arrow_back"    data-size="20"></span></button>
+        <button id="btn-forward" class="btn-nav" disabled><span data-icon="arrow_forward" data-size="20"></span></button>
+        <div class="search-wrap">
+            <span class="search-icon-wrap" data-icon="search" data-size="18"></span>
+            <input id="search-input" type="text" placeholder="Pesquisar em Organessônium..." autocomplete="off"/>
+        </div>
+        <div id="path-crumbs" class="path-crumbs"></div>
+    </div>
+    <div class="topbar-actions">
+        <div class="view-toggle" role="group">
+            <button id="btn-grid" class="btn-view active"><span data-icon="grid_view"></span></button>
+            <button id="btn-list" class="btn-view"><span data-icon="view_list"></span></button>
+        </div>
+        <div class="sort-wrap">
+            <button id="btn-sort" class="btn-secondary">
+                <span data-icon="sort" data-size="17"></span>
+                <span id="sort-label">Nome</span>
+                <span data-icon="expand_more" data-size="15"></span>
+            </button>
+            <div id="sort-menu" class="dropdown hidden" role="menu">
+                <button data-sort="name-asc">Nome A→Z</button>
+                <button data-sort="name-desc">Nome Z→A</button>
+                <button data-sort="size-desc">Maior tamanho</button>
+                <button data-sort="size-asc">Menor tamanho</button>
+                <button data-sort="date-desc">Mais recente</button>
+                <button data-sort="date-asc">Mais antigo</button>
+            </div>
+        </div>
+        <button id="btn-refresh"       class="btn-icon" title="Atualizar"><span data-icon="refresh"></span></button>
+        <button id="btn-new-folder"    class="btn-icon" title="Nova pasta"><span data-icon="create_new_folder"></span></button>
+        <button id="btn-upload-folder" class="btn-icon" title="Enviar pasta"><span data-icon="folder_open"></span></button>
+        <button id="btn-upload"        class="btn-primary"><span data-icon="upload" data-size="17"></span> Enviar</button>
+        <button id="btn-settings"      class="btn-icon"  title="Configurações"><span data-icon="settings"></span></button>
+    </div>
+</header>
+
+<main id="main-area" role="main" aria-label="Arquivos">
+    <div id="drag-overlay" class="drag-overlay hidden">
+        <div class="drag-content">
+            <span class="drag-icon-wrap" data-icon="cloud_upload" data-size="96"></span>
+            <p class="drag-text">Solte para fazer upload</p>
+        </div>
+    </div>
+    <div id="files-grid" class="files-grid" role="listbox" aria-label="Arquivos"></div>
+    <div id="files-list" class="files-list hidden" role="table"></div>
+    <div id="empty-state" class="empty-state hidden">
+        <span data-icon="upload" data-size="64"></span>
+        <p id="empty-title">Nenhum arquivo aqui</p>
+        <small id="empty-help">Arraste arquivos ou clique em "Enviar"</small>
+    </div>
+</main>
+
+<footer class="statusbar" role="status" aria-live="polite">
+    <span id="status-text">Carregando...</span>
+    <div id="status-loader" class="loader hidden"></div>
+    <div class="status-right"><span id="storage-display"></span></div>
+</footer>
+
+<!-- ─── Selection bar ──────────────────────────────────────────────────────── -->
+<div id="selection-bar" class="selection-bar hidden" role="toolbar" aria-live="polite">
+    <span id="selection-count" class="sel-count">0 selecionados</span>
+    <div class="sel-actions">
+        <button id="sel-download" class="sel-btn"><span data-icon="download" data-size="16"></span> <span id="sel-download-text">Baixar</span></button>
+        <button id="sel-move"     class="sel-btn"><span data-icon="drive_file_move" data-size="16"></span> <span id="sel-move-text">Mover</span></button>
+        <button id="sel-delete"   class="sel-btn sel-btn-danger"><span data-icon="delete" data-size="16"></span> <span id="sel-delete-text">Apagar</span></button>
+    </div>
+    <button id="sel-clear" class="sel-close"><span data-icon="close" data-size="16"></span></button>
+</div>
+
+<!-- ─── Preview ──────────────────────────────────────────────────────────── -->
+<div id="preview-overlay" class="preview-overlay hidden" role="dialog" aria-modal="true" aria-label="Prévia">
+    <div class="preview-topbar">
+        <span id="preview-filename" class="preview-filename"></span>
+        <div class="preview-topbar-actions">
+            <div id="preview-zoom-controls" class="preview-zoom-controls hidden">
+                <button id="preview-zoom-out"   class="preview-btn" title="Zoom −"><span data-icon="remove"     data-size="18"></span></button>
+                <span   id="preview-zoom-label" class="preview-zoom-label">100%</span>
+                <button id="preview-zoom-in"    class="preview-btn" title="Zoom +"><span data-icon="add"        data-size="18"></span></button>
+                <button id="preview-zoom-reset" class="preview-btn" title="Ajustar a tela"><span data-icon="zoom_out_map" data-size="18"></span></button>
+            </div>
+            <button id="preview-dl"    class="preview-btn" title="Baixar"><span data-icon="download"  data-size="20"></span></button>
+            <button id="preview-close" class="preview-btn" title="Fechar"><span data-icon="close"     data-size="20"></span></button>
+        </div>
+    </div>
+    <div class="preview-stage">
+        <button id="preview-prev" class="preview-nav-btn" disabled><span data-icon="arrow_back"    data-size="28"></span></button>
+        <div id="preview-body" class="preview-body">
+            <div id="preview-spinner" class="preview-spinner"></div>
+        </div>
+        <button id="preview-next" class="preview-nav-btn" disabled><span data-icon="arrow_forward" data-size="28"></span></button>
+    </div>
+    <div class="preview-footer">
+        <span id="preview-position"></span>
+        <span id="preview-filesize"></span>
+    </div>
+</div>
+
+<!-- ─── Ops panel ────────────────────────────────────────────────────────── -->
+<div id="ops-panel" class="ops-panel hidden">
+    <div class="ops-header">
+        <span class="ops-title" id="ops-title">Transferências</span>
+        <button id="ops-toggle" class="ops-btn" aria-expanded="true"><span data-icon="expand_more" data-size="18"></span></button>
+        <button id="ops-close"  class="ops-btn"><span data-icon="close"  data-size="15"></span></button>
+    </div>
+    <div id="ops-body" class="ops-body">
+        <div id="ops-list" class="ops-list"></div>
+    </div>
+</div>
+
+<!-- ─── Context menu ─────────────────────────────────────────────────────── -->
+<div id="ctx-menu" class="ctx-menu hidden" role="menu">
+    <button id="ctx-open"     class="ctx-item"><span data-icon="open_in_new"     data-size="17"></span> <span id="ctx-open-text">Abrir</span></button>
+    <button id="ctx-download" class="ctx-item"><span data-icon="download"        data-size="17"></span> <span id="ctx-dl-label">Baixar</span></button>
+    <button id="ctx-move"     class="ctx-item"><span data-icon="drive_file_move" data-size="17"></span> <span id="ctx-move-text">Mover</span></button>
+    <button id="ctx-rename"   class="ctx-item"><span data-icon="description"     data-size="17"></span> <span id="ctx-rename-text">Renomear</span></button>
+    <div id="ctx-folder-colors" class="ctx-colors hidden" aria-label="Cor da pasta">
+        <button data-folder-color="#C4C7C5" style="--swatch:#C4C7C5" title="Cinza"></button>
+        <button data-folder-color="#F28B82" style="--swatch:#F28B82" title="Vermelho"></button>
+        <button data-folder-color="#FDD663" style="--swatch:#FDD663" title="Amarelo"></button>
+        <button data-folder-color="#81C995" style="--swatch:#81C995" title="Verde"></button>
+        <button data-folder-color="#C58AF9" style="--swatch:#C58AF9" title="Roxo"></button>
+        <button data-folder-color="#FFB74D" style="--swatch:#FFB74D" title="Laranja"></button>
+        <button id="ctx-folder-color-custom" class="ctx-color-custom" title="Cor personalizada"><span data-icon="add" data-size="15"></span></button>
+    </div>
+    <div id="ctx-item-sep" class="ctx-sep"></div>
+    <button id="ctx-new-folder"    class="ctx-item"><span data-icon="create_new_folder" data-size="17"></span> <span id="ctx-new-folder-text">Nova pasta</span></button>
+    <button id="ctx-upload"        class="ctx-item"><span data-icon="upload"            data-size="17"></span> <span id="ctx-upload-text">Enviar</span></button>
+    <button id="ctx-upload-folder" class="ctx-item"><span data-icon="folder_open"       data-size="17"></span> <span id="ctx-upload-folder-text">Enviar pasta</span></button>
+    <button id="ctx-refresh"       class="ctx-item"><span data-icon="refresh"           data-size="17"></span> <span id="ctx-refresh-text">Atualizar</span></button>
+    <div id="ctx-view-sep" class="ctx-sep"></div>
+    <button id="ctx-grid"          class="ctx-item"><span data-icon="grid_view"         data-size="17"></span> <span id="ctx-grid-text">Grade</span></button>
+    <button id="ctx-list"          class="ctx-item"><span data-icon="view_list"         data-size="17"></span> <span id="ctx-list-text">Lista</span></button>
+    <button id="ctx-clear"         class="ctx-item"><span data-icon="deselect"          data-size="17"></span> <span id="ctx-clear-text">Limpar seleção</span></button>
+    <button id="ctx-settings"      class="ctx-item"><span data-icon="settings"          data-size="17"></span> <span id="ctx-settings-text">Configurações</span></button>
+    <button id="ctx-close-tab"     class="ctx-item"><span data-icon="close"             data-size="17"></span> <span id="ctx-close-tab-text">Fechar guia</span></button>
+    <button id="ctx-close-others"  class="ctx-item"><span data-icon="deselect"          data-size="17"></span> <span id="ctx-close-others-text">Fechar outras guias</span></button>
+    <button id="ctx-delete"   class="ctx-item ctx-danger"><span data-icon="delete" data-size="17"></span> <span id="ctx-delete-text">Apagar</span></button>
+</div>
+
+<!-- ─── Modal: nova pasta ─────────────────────────────────────────────────── -->
+<div id="rename-overlay" class="modal-overlay hidden">
+    <div class="modal-box">
+        <h3 id="rename-modal-title">Renomear</h3>
+        <input id="rename-name-input" type="text" class="modal-input" placeholder="Nome" maxlength="180"/>
+        <div class="modal-actions">
+            <button id="rename-cancel"  class="btn-secondary">Cancelar</button>
+            <button id="rename-confirm" class="btn-primary">Renomear</button>
+        </div>
+    </div>
+</div>
+
+<div id="folder-overlay" class="modal-overlay hidden">
+    <div class="modal-box">
+        <h3 id="folder-modal-title">Nova pasta</h3>
+        <input id="folder-name-input" type="text" class="modal-input" placeholder="Nome da pasta" maxlength="80"/>
+        <div class="modal-actions">
+            <button id="folder-cancel"  class="btn-secondary">Cancelar</button>
+            <button id="folder-confirm" class="btn-primary">Criar</button>
+        </div>
+    </div>
+</div>
+
+<div id="folder-color-overlay" class="modal-overlay hidden">
+    <div class="modal-box folder-color-modal">
+        <h3 id="folder-color-title">Cor personalizada</h3>
+        <div class="folder-color-picker-row">
+            <input id="folder-color-picker" type="color" value="#C4C7C5" aria-label="Cor"/>
+            <div class="folder-color-field">
+                <label id="folder-color-hex-label" for="folder-color-hex">Hexadecimal</label>
+                <input id="folder-color-hex" class="modal-input" type="text" value="#C4C7C5" maxlength="7" spellcheck="false"/>
+            </div>
+        </div>
+        <div class="folder-color-field">
+            <span id="folder-color-rgb-label">RGB</span>
+            <div class="folder-color-rgb">
+                <label>R<input id="folder-color-r" class="modal-input" type="number" min="0" max="255" value="196"/></label>
+                <label>G<input id="folder-color-g" class="modal-input" type="number" min="0" max="255" value="199"/></label>
+                <label>B<input id="folder-color-b" class="modal-input" type="number" min="0" max="255" value="197"/></label>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button id="folder-color-cancel" class="btn-secondary">Cancelar</button>
+            <button id="folder-color-apply" class="btn-primary">Aplicar</button>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Modal: mover ──────────────────────────────────────────────────────── -->
+<div id="move-overlay" class="modal-overlay hidden">
+    <div class="modal-box modal-wide">
+        <h3 id="move-modal-title">Mover para...</h3>
+        <div id="move-tree" class="move-tree"></div>
+        <div class="modal-actions">
+            <button id="move-cancel"  class="btn-secondary">Cancelar</button>
+            <button id="move-confirm" class="btn-primary">Mover aqui</button>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Modal: confirmar ─────────────────────────────────────────────────── -->
+<div id="confirm-overlay" class="modal-overlay hidden">
+    <div class="modal-box">
+        <h3 id="confirm-title">Confirmar</h3>
+        <p  id="confirm-message" class="confirm-message"></p>
+        <div class="modal-actions">
+            <button id="confirm-cancel" class="btn-secondary">Cancelar</button>
+            <button id="confirm-ok"     class="btn-danger">Apagar</button>
+        </div>
+    </div>
+</div>
+
+<!-- ─── Settings ──────────────────────────────────────────────────────────── -->
+<!-- Editor: link -->
+<div id="upload-conflict-overlay" class="modal-overlay hidden">
+    <div class="modal-box modal-wide upload-conflict-modal">
+        <h3 id="upload-conflict-title">Arquivo já existe</h3>
+        <p id="upload-conflict-message" class="modal-message"></p>
+        <small id="upload-conflict-detail" class="modal-help"></small>
+        <label id="upload-conflict-apply-wrap" class="modal-check hidden">
+            <input id="upload-conflict-apply" type="checkbox"/>
+            <span id="upload-conflict-apply-text">Fazer isso para todos</span>
+        </label>
+        <div class="modal-actions upload-conflict-actions">
+            <button id="upload-conflict-skip" class="btn-secondary" type="button">Pular</button>
+            <button id="upload-conflict-keep" class="btn-secondary" type="button">Manter os dois</button>
+            <button id="upload-conflict-overwrite" class="btn-primary" type="button">Gravar por cima</button>
+        </div>
+    </div>
+</div>
+
+<div id="editor-link-overlay" class="modal-overlay hidden">
+    <div class="modal-box editor-link-modal">
+        <h3 id="editor-link-title">Inserir link</h3>
+        <label class="modal-label" id="editor-link-text-label" for="editor-link-text">Texto</label>
+        <input id="editor-link-text" type="text" class="modal-input" maxlength="240"/>
+        <label class="modal-label" id="editor-link-url-label" for="editor-link-url">URL</label>
+        <input id="editor-link-url" type="url" class="modal-input" placeholder="https://"/>
+        <div class="modal-actions">
+            <button id="editor-link-cancel" class="btn-secondary">Cancelar</button>
+            <button id="editor-link-confirm" class="btn-primary">Inserir</button>
+        </div>
+    </div>
+</div>
+
+<!-- Editor: imagem -->
+<div id="editor-image-overlay" class="modal-overlay hidden">
+    <div class="modal-box modal-wide editor-image-modal">
+        <h3 id="editor-image-title">Inserir imagem</h3>
+        <div class="editor-image-tabs" role="tablist">
+            <button id="editor-image-tab-local" class="active" data-image-tab="local" type="button">PC</button>
+            <button id="editor-image-tab-drive" data-image-tab="drive" type="button">Drive</button>
+            <button id="editor-image-tab-url" data-image-tab="url" type="button">URL</button>
+        </div>
+        <section class="editor-image-pane" data-image-pane="local">
+            <p id="editor-image-local-help" class="confirm-message">Escolha uma imagem local para anexar ao mesmo post do Markdown.</p>
+            <button id="editor-image-local-choose" class="btn-primary" type="button"><span data-icon="upload" data-size="16"></span> <span id="editor-image-local-choose-text">Escolher imagem</span></button>
+        </section>
+        <section class="editor-image-pane hidden" data-image-pane="drive">
+            <p id="editor-image-drive-help" class="confirm-message">Escolha uma imagem já salva no app.</p>
+            <div id="editor-image-drive-list" class="editor-image-drive-list"></div>
+        </section>
+        <section class="editor-image-pane hidden" data-image-pane="url">
+            <label class="modal-label" id="editor-image-url-label" for="editor-image-url">URL da imagem</label>
+            <input id="editor-image-url" type="url" class="modal-input" placeholder="https://"/>
+        </section>
+        <label class="modal-label" id="editor-image-alt-label" for="editor-image-alt">Texto alternativo</label>
+        <input id="editor-image-alt" type="text" class="modal-input" maxlength="160"/>
+        <div id="editor-image-status" class="editor-image-status"></div>
+        <div class="modal-actions">
+            <button id="editor-image-cancel" class="btn-secondary">Cancelar</button>
+            <button id="editor-image-confirm" class="btn-primary">Inserir</button>
+        </div>
+    </div>
+</div>
+
+<div id="settings-overlay" class="settings-overlay hidden"></div>
+<aside id="settings-panel" class="settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
+    <div class="settings-header">
+        <h2 id="settings-title">Configurações</h2>
+        <button id="settings-close" class="ops-btn"><span data-icon="close" data-size="18"></span></button>
+    </div>
+    <div class="settings-body">
+        <section class="settings-section">
+            <h3 id="settings-appearance-title">Aparência</h3>
+            <div class="setting-row">
+                <label id="setting-language-label" for="setting-language">Idioma</label>
+                <select id="setting-language" class="setting-select native-hidden" aria-hidden="true" tabindex="-1">
+                    <option value="system">Sistema</option>
+                    <option value="pt-BR">Português</option>
+                    <option value="en">English</option>
+                </select>
+                <div id="language-select" class="language-select" role="combobox" aria-expanded="false" aria-controls="language-menu" tabindex="0">
+                    <button id="language-select-button" class="language-select-button" type="button">
+                        <span id="language-current">Português</span>
+                        <span data-icon="expand_more" data-size="16"></span>
+                    </button>
+                    <div id="language-menu" class="language-menu hidden" role="listbox">
+                        <button type="button" data-language="system" role="option">Sistema</button>
+                        <button type="button" data-language="pt-BR" role="option">Português</button>
+                        <button type="button" data-language="en" role="option">English</button>
+                    </div>
+                </div>
+            </div>
+            <div class="setting-row">
+                <label id="setting-theme-label">Tema</label>
+                <div class="theme-btns">
+                    <button class="theme-btn active" data-theme-value="system"><span data-icon="settings" data-size="15"></span> <span id="theme-system-text">Sistema</span></button>
+                    <button class="theme-btn" data-theme-value="dark"><span  data-icon="dark_mode"  data-size="15"></span> <span id="theme-dark-text">Escuro</span></button>
+                    <button class="theme-btn"         data-theme-value="light"><span data-icon="light_mode" data-size="15"></span> <span id="theme-light-text">Claro</span></button>
+                </div>
+            </div>
+            <div class="setting-row">
+                <label id="setting-card-size-label">Tamanho dos cards</label>
+                <div class="card-size-btns">
+                    <button class="card-size-btn" data-size="small"><span id="card-size-small-text">Pequeno</span></button>
+                    <button class="card-size-btn active" data-size="medium"><span id="card-size-medium-text">Médio</span></button>
+                    <button class="card-size-btn" data-size="large"><span id="card-size-large-text">Grande</span></button>
+                </div>
+            </div>
+        </section>
+        <section class="settings-section">
+            <h3 id="settings-preview-title">Prévias</h3>
+            <div class="setting-row">
+                <label id="setting-preview-label" for="setting-preview">Ativar prévias</label>
+                <label class="toggle">
+                    <input type="checkbox" id="setting-preview" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-video-preview-quality-label">Qualidade de vídeo</label>
+                <div class="card-size-btns" id="video-preview-quality-buttons">
+                    <button class="card-size-btn video-quality-btn" data-video-quality="low"><span id="video-preview-low-text">480p</span></button>
+                    <button class="card-size-btn video-quality-btn" data-video-quality="original"><span id="video-preview-original-text">Original</span></button>
+                </div>
+                <small id="setting-video-preview-quality-help">Usa a prévia 480p para carregar vídeos mais rápido.</small>
+            </div>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-cache-label">Cache</label>
+                    <small id="setting-cache-help">Limpa prévias e imagens salvas localmente.</small>
+                    <small id="setting-cache-size">0 B</small>
+                </div>
+                <button id="btn-clear-cache" class="btn-secondary" type="button">Limpar cache</button>
+            </div>
+        </section>
+        <section class="settings-section">
+            <h3 id="settings-performance-title">Desempenho</h3>
+            <div class="setting-row">
+                <label id="setting-animations-label" for="setting-animations">Ativar animações</label>
+                <label class="toggle">
+                    <input type="checkbox" id="setting-animations" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-hardware-label" for="setting-hardware">Aceleração por hardware</label>
+                    <small id="setting-hardware-help">Reinicie o app para aplicar.</small>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" id="setting-hardware" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+        </section>
+        <section class="settings-section">
+            <h3 id="settings-uploads-title">Uploads</h3>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-upload-files"><span id="setting-upload-files-label">Arquivos simultâneos</span> <span id="upload-files-val" class="setting-val">3</span></label>
+                <input id="setting-upload-files" type="range" min="1" max="8" value="3" class="setting-range"/>
+            </div>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-upload-threads"><span id="setting-upload-threads-label">Partes simultâneas</span> <span id="upload-thr-val" class="setting-val">4</span></label>
+                <input id="setting-upload-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
+            </div>
+        </section>
+        <section class="settings-section">
+            <h3 id="settings-downloads-title">Downloads</h3>
+            <div class="setting-row">
+                <label class="threads-label">Threads <span id="thr-val" class="setting-val">4</span></label>
+                <input id="setting-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-dlpath-label" for="setting-dlpath">Pasta de downloads</label>
+                <div class="path-row">
+                    <input id="setting-dlpath"  type="text" class="setting-input" placeholder="Padrão: pede ao baixar" readonly/>
+                    <button id="btn-choose-dl"  class="btn-secondary">Escolher</button>
+                </div>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-tmppath-label" for="setting-tmppath">Pasta temporária</label>
+                <div class="path-row">
+                    <input id="setting-tmppath" type="text" class="setting-input" placeholder="Padrão: pasta do download" readonly/>
+                    <button id="btn-choose-tmp" class="btn-secondary">Escolher</button>
+                </div>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-datapath-label" for="setting-datapath">Pasta de dados</label>
+                <div class="path-row">
+                    <input id="setting-datapath" type="text" class="setting-input" placeholder="Padrão: AppData" readonly/>
+                    <button id="btn-choose-data" class="btn-secondary">Escolher</button>
+                </div>
+                <small id="setting-datapath-help">Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.</small>
+            </div>
+        </section>
+<section class="settings-section">
+            <h3 id="settings-network-title">Rede e proxy</h3>
+            <div class="setting-row col">
+                <label id="setting-proxy-mode-label" for="setting-proxy-mode">Modo de conexão</label>
+                <select id="setting-proxy-mode" class="setting-input">
+                    <option value="automatic">Automático (usar configuração do sistema)</option>
+                    <option value="disabled">Desativado (conexão direta)</option>
+                    <option value="manual">Manual</option>
+                </select>
+                <small id="setting-proxy-mode-help">O proxy é usado para falar com o Discord. Mude aqui se estiver atrás de um firewall ou rede corporativa.</small>
+            </div>
+            <div id="setting-proxy-manual" class="proxy-manual hidden">
+                <div class="setting-row col">
+                    <label id="setting-proxy-host-label" for="setting-proxy-host">Endereço do proxy</label>
+                    <input id="setting-proxy-host" type="text" class="setting-input" placeholder="proxy.exemplo.com" autocomplete="off"/>
+                </div>
+                <div class="setting-row col">
+                    <label id="setting-proxy-port-label" for="setting-proxy-port">Porta</label>
+                    <input id="setting-proxy-port" type="number" class="setting-input" min="1" max="65535" placeholder="8080" autocomplete="off"/>
+                </div>
+                <div class="setting-row col">
+                    <label id="setting-proxy-protocol-label" for="setting-proxy-protocol">Protocolo</label>
+                    <select id="setting-proxy-protocol" class="setting-input">
+                        <option value="auto">Detectar automaticamente</option>
+                        <option value="http">HTTP</option>
+                        <option value="https">HTTPS (CONNECT)</option>
+                        <option value="socks5">SOCKS5</option>
+                        <option value="socks4a">SOCKS4a</option>
+                        <option value="socks4">SOCKS4</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <label id="setting-proxy-auth-label" for="setting-proxy-auth">Requer autenticação</label>
+                    <label class="toggle">
+                        <input type="checkbox" id="setting-proxy-auth"/>
+                        <span class="toggle-track"></span>
+                    </label>
+                </div>
+                <div id="setting-proxy-auth-fields" class="proxy-auth hidden">
+                    <div class="setting-row col">
+                        <label id="setting-proxy-user-label" for="setting-proxy-user">Usuário</label>
+                        <input id="setting-proxy-user" type="text" class="setting-input" autocomplete="off"/>
+                    </div>
+                    <div class="setting-row col">
+                        <label id="setting-proxy-pass-label" for="setting-proxy-pass">Senha</label>
+                        <input id="setting-proxy-pass" type="password" class="setting-input" autocomplete="off"/>
+                    </div>
+                </div>
+                <div class="setting-row proxy-test-row">
+                    <button id="btn-test-proxy" class="btn-secondary" type="button">Testar conexão com o proxy</button>
+                    <div id="proxy-test-result" class="proxy-test-result hidden"></div>
+                </div>
+            </div>
+        </section>
+        <section class="settings-section">
+            <h3 id="settings-connection-title">Conexão</h3>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-logout-label">Sair do bot</label>
+                    <small id="setting-logout-help">Remove o token e os IDs salvos neste computador.</small>
+                </div>
+                <button id="btn-logout" class="btn-danger" type="button">Sair</button>
+            </div>
+        </section>
+    </div>
+</aside>
+
+<script src="bridge.js"></script>
+<script src="icons.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

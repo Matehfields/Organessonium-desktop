@@ -1,0 +1,23 @@
+# Build output
+**/bin/
+**/obj/
+
+# IDE and local tooling state
+.vs/
+.idea/
+.vscode/
+.agents/
+.codex/
+**/*.csproj.user
+
+# Local application data and SQLite sidecars
+**/OrganessoniumData/
+**/organessonium.db
+**/organessonium.db-shm
+**/organessonium.db-wal
+**/organessonium.db-journal
+
+# Runtime logs and temporary files
+**/Logs/
+*.log
+*.tmp
