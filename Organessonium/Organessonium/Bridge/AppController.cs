@@ -463,8 +463,6 @@ public sealed class AppController : IAsyncDisposable
                 await _bridge.CallAsync("_onCachedAppsLoaded", cached);
             }
 
-            await _bridge.CallAsync("_onRegistryLoadProgress", 0);
-
             var registry = Registry();
             var apps = await registry.LoadAsync(
                 onProgress: count => _bridge.CallAsync("_onRegistryLoadProgress", count),
@@ -517,6 +515,33 @@ public sealed class AppController : IAsyncDisposable
 
         return "metadata:" + app.MetadataMessageId;
     }
+
+    private List<AppEntry> CurrentLocalEntries()
+    {
+        return _loadedApps.Count > 0
+            ? _loadedApps.ToList()
+            : _store.LoadCachedEntries();
+    }
+
+    private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            entry.Normalize();
+        }
+
+        registry.CacheEntries(entries);
+        _loadedApps = entries;
+        await _bridge.CallAsync("_onLocalAppsChanged", entries);
+        await _bridge.CallAsync("_onStatus", "Atualizando índice...", true);
+        await registry.SynchronizeSerialsAsync(entries);
+    }
+
+    private Task SetBackgroundActivityAsync(string message, bool active)
+    {
+        return _bridge.CallAsync("_onBackgroundActivity", message, active);
+    }
+
     private async Task LoadVisibleThumbnailsAsync(string visibleIdsJson)
     {
         var settings = _store.Load();
@@ -1180,14 +1205,23 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
-        var clean = PathRules.CleanFileName(name.Trim());
-        var registry = Registry();
-        var all = await registry.LoadAsync();
-        var folder = AppEntry.Folder(clean, _currentPath);
-        folder.ParentFolderId = FolderIdForPath(all, _currentPath);
-        await registry.AddEntryAsync(folder);
-        await _bridge.CallAsync("_onStatus", "OK Pasta criada.", false);
-        await LoadAppsAsync();
+        await SetBackgroundActivityAsync("Em andamento...", true);
+        try
+        {
+            var clean = PathRules.CleanFileName(name.Trim());
+            var registry = Registry();
+            var all = CurrentLocalEntries();
+            var folder = AppEntry.Folder(clean, _currentPath);
+            folder.ParentFolderId = FolderIdForPath(all, _currentPath);
+            await registry.AddEntryAsync(folder);
+            all.Add(folder);
+            await PublishLocalRegistryAsync(registry, all);
+            await _bridge.CallAsync("_onStatus", "OK Pasta criada.", false);
+        }
+        finally
+        {
+            await SetBackgroundActivityAsync("", false);
+        }
     }
 
     private async Task MoveItemsAsync(string idsJson, string newPath)
@@ -2616,32 +2650,41 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task DeleteAppAsync(string threadId, string metadataMessageId)
     {
-        var registry = Registry();
-        var all = await registry.LoadAsync();
-        var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
-        if (entry != null)
+        await SetBackgroundActivityAsync("Em andamento...", true);
+        try
         {
-            var result = await DeleteEntriesWithProgressAsync(registry, all, [entry]);
-            if (result.Failed > 0)
+            var registry = Registry();
+            var all = CurrentLocalEntries();
+            var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
+            if (entry != null)
             {
-                await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
-                await LoadAppsAsync();
-                return;
+                var result = await DeleteEntriesWithProgressAsync(registry, all, [entry]);
+                await PublishLocalRegistryAsync(registry, all);
+                if (result.Failed > 0)
+                {
+                    await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
+                    return;
+                }
             }
-        }
-        else
-        {
-            if (!string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal))
+            else
             {
-                await Downloader().DeleteThreadAsync(threadId);
-                ThumbnailCache.Remove(threadId);
+                if (!string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal))
+                {
+                    await Downloader().DeleteThreadAsync(threadId);
+                    ThumbnailCache.Remove(threadId);
+                }
+
+                await registry.DeleteEntryAsync(new AppEntry { MetadataMessageId = metadataMessageId });
+                all.RemoveAll(app => app.MetadataMessageId == metadataMessageId);
+                await PublishLocalRegistryAsync(registry, all);
             }
 
-            await registry.DeleteEntryAsync(new AppEntry { MetadataMessageId = metadataMessageId });
+            await _bridge.CallAsync("_onStatus", "OK Item apagado.", false);
         }
-
-        await _bridge.CallAsync("_onStatus", "OK Item apagado.", false);
-        await LoadAppsAsync();
+        finally
+        {
+            await SetBackgroundActivityAsync("", false);
+        }
     }
 
     private async Task DeleteItemsAsync(string idsJson)
@@ -2653,31 +2696,38 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
-        var registry = Registry();
-        var all = await registry.LoadAsync();
-        var selected = ids
-            .Select(id => all.FirstOrDefault(a => a.MetadataMessageId == id))
-            .Where(entry => entry != null)
-            .Cast<AppEntry>()
-            .ToList();
-
-        if (selected.Count == 0)
+        await SetBackgroundActivityAsync("Em andamento...", true);
+        try
         {
-            await ErrorAsync("Nenhum item encontrado para apagar.");
-            return;
-        }
+            var registry = Registry();
+            var all = CurrentLocalEntries();
+            var selected = ids
+                .Select(id => all.FirstOrDefault(a => a.MetadataMessageId == id))
+                .Where(entry => entry != null)
+                .Cast<AppEntry>()
+                .ToList();
 
-        var result = await DeleteEntriesWithProgressAsync(registry, all, selected);
-        if (result.Failed == 0)
-        {
-            await _bridge.CallAsync("_onStatus", $"OK {result.Deleted} item(ns) apagado(s).", false);
-        }
-        else
-        {
-            await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
-        }
+            if (selected.Count == 0)
+            {
+                await ErrorAsync("Nenhum item encontrado para apagar.");
+                return;
+            }
 
-        await LoadAppsAsync();
+            var result = await DeleteEntriesWithProgressAsync(registry, all, selected);
+            await PublishLocalRegistryAsync(registry, all);
+            if (result.Failed == 0)
+            {
+                await _bridge.CallAsync("_onStatus", $"OK {result.Deleted} item(ns) apagado(s).", false);
+            }
+            else
+            {
+                await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
+            }
+        }
+        finally
+        {
+            await SetBackgroundActivityAsync("", false);
+        }
     }
 
     private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
@@ -2705,6 +2755,7 @@ public sealed class AppController : IAsyncDisposable
             {
                 await DeleteStoredEntryAsync(registry, file);
                 deletedFiles++;
+                all.Remove(file);
             }
             catch (Exception ex)
             {
@@ -2738,6 +2789,7 @@ public sealed class AppController : IAsyncDisposable
             {
                 await registry.DeleteEntryAsync(folder);
                 deletedFolders++;
+                all.Remove(folder);
             }
             catch (Exception ex)
             {

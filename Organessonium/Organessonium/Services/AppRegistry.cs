@@ -24,12 +24,27 @@ public sealed class AppRegistry
         Func<IReadOnlyList<AppEntry>, Task>? onBatch = null)
     {
         var cached = _store.LoadCachedEntries();
+        var progressFloor = cached.Count;
+        if (onProgress != null)
+        {
+            await onProgress(progressFloor);
+        }
+
         try
         {
             var fastEntries = await _serials.LoadFastEntriesAsync(cached, cancellationToken);
             if (fastEntries.Count > 0 && onBatch != null)
             {
                 await onBatch(fastEntries);
+            }
+
+            if (fastEntries.Count > 0)
+            {
+                progressFloor = Math.Max(progressFloor, fastEntries.Count);
+                if (onProgress != null)
+                {
+                    await onProgress(progressFloor);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -41,10 +56,27 @@ public sealed class AppRegistry
             AppLogger.Error("Registry.SerialIndex", ex, _settings.SerialChannelId);
         }
 
+        var seenServerMessages = new HashSet<string>(StringComparer.Ordinal);
+        var serverBotMessageCount = 0;
         var messages = await _discord.GetMessagesInParallelAsync(
             _settings.NamesChannelId,
             Math.Clamp(_settings.SearchWorkers, 1, 8),
-            cancellationToken);
+            cancellationToken,
+            async batch =>
+            {
+                foreach (var message in batch)
+                {
+                    if (message.Author?.Bot == true && seenServerMessages.Add(message.Id))
+                    {
+                        serverBotMessageCount++;
+                    }
+                }
+
+                if (onProgress != null && serverBotMessageCount > 0)
+                {
+                    await onProgress(Math.Max(progressFloor, serverBotMessageCount));
+                }
+            });
         var botMessages = messages.Where(message => message.Author?.Bot == true).ToArray();
         var envelopes = new List<MetadataEnvelope>(botMessages.Length);
         var sentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -71,7 +103,7 @@ public sealed class AppRegistry
 
             if (onProgress != null)
             {
-                await onProgress(envelopes.Count);
+                await onProgress(Math.Max(progressFloor, envelopes.Count));
             }
         }
 
@@ -154,6 +186,24 @@ public sealed class AppRegistry
     public List<AppEntry> LoadCached()
     {
         return _store.LoadCachedEntries();
+    }
+
+    public void CacheEntries(IEnumerable<AppEntry> entries)
+    {
+        var list = entries.ToList();
+        foreach (var entry in list)
+        {
+            entry.Normalize();
+        }
+
+        _store.CacheEntries(list);
+    }
+
+    public Task SynchronizeSerialsAsync(
+        IEnumerable<AppEntry> entries,
+        CancellationToken cancellationToken = default)
+    {
+        return _serials.SynchronizeAsync(entries, cancellationToken);
     }
 
     public async Task<string> AddEntryAsync(

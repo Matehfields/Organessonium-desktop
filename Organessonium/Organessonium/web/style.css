@@ -997,6 +997,27 @@ html[data-motion="reduced"] *{
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 
+.background-activity{
+    position:fixed;left:18px;bottom:42px;z-index:210;
+    display:flex;align-items:center;gap:11px;
+    width:min(300px,calc(100vw - 36px));min-height:48px;padding:0 8px 0 14px;
+    background:var(--surface2);border:1px solid var(--border);border-radius:3px;
+    box-shadow:0 8px 24px rgba(0,0,0,.38);
+}
+.background-activity-spinner{
+    flex:0 0 auto;width:14px;height:14px;border:2px solid var(--border);
+    border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;
+}
+.background-activity-text{
+    min-width:0;flex:1;color:var(--text-primary);font-size:12px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.background-activity-close{
+    flex:0 0 auto;width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+    border:0;border-radius:50%;background:transparent;color:var(--text-secondary);cursor:pointer;
+}
+.background-activity-close:hover{background:var(--surface3);color:var(--text-primary);}
+
 /* ─── Selection bar ──────────────────────────────────────────────────────── */
 .selection-bar{
     position:fixed;bottom:28px;left:50%;transform:translateX(-50%);

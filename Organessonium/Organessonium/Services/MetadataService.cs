@@ -215,38 +215,22 @@ public sealed class MetadataService
             return [];
         }
 
-        using var semaphore = new SemaphoreSlim(Math.Max(1, maxConcurrency), Math.Max(1, maxConcurrency));
         var results = new MetadataEnvelope?[messages.Count];
-        var tasks = new Task[messages.Count];
-        for (var i = 0; i < messages.Count; i++)
-        {
-            var index = i;
-            tasks[index] = ReadEnvelopeTrackedAsync(messages[index], results, index, semaphore, cancellationToken);
-        }
-
-        await Task.WhenAll(tasks);
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, messages.Count),
+            new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Math.Max(1, maxConcurrency)
+            },
+            async (index, token) =>
+            {
+                results[index] = await ReadEnvelopeAsync(messages[index], token);
+            });
         return results
             .Where(envelope => envelope != null)
             .Cast<MetadataEnvelope>()
             .ToList();
-    }
-
-    private async Task ReadEnvelopeTrackedAsync(
-        DiscordMessageDto message,
-        MetadataEnvelope?[] results,
-        int index,
-        SemaphoreSlim semaphore,
-        CancellationToken cancellationToken)
-    {
-        await semaphore.WaitAsync(cancellationToken);
-        try
-        {
-            results[index] = await ReadEnvelopeAsync(message, cancellationToken);
-        }
-        finally
-        {
-            semaphore.Release();
-        }
     }
 
     public List<AppEntry> ToAppEntries(IReadOnlyList<MetadataEnvelope> envelopes)

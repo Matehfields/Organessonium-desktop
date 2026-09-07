@@ -124,7 +124,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             var newestMs = (ulong.Parse(newest[0].Id) >> 22) + DiscordEpochMilliseconds;
             var windowMs = (double)(newestMs + 1 - DiscordEpochMilliseconds) / workers;
             var gate = new SemaphoreSlim(1);
-            var pacer = new AsyncPacer(SearchRequestMinSpacing);
             var tasks = new List<Task<List<DiscordMessageDto>>>(workers);
             for (var worker = 0; worker < workers; worker++)
             {
@@ -132,7 +131,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 var endMs = worker == workers - 1
                     ? newestMs + 1
                     : DiscordEpochMilliseconds + (ulong)(windowMs * (worker + 1));
-                tasks.Add(FetchWindowAsync(channelId, startMs, endMs, gate, pacer, onBatch, cancellationToken));
+                tasks.Add(FetchWindowAsync(channelId, startMs, endMs, gate, onBatch, cancellationToken));
             }
 
             var windows = await Task.WhenAll(tasks);
@@ -159,7 +158,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         ulong startMs,
         ulong endMs,
         SemaphoreSlim gate,
-        AsyncPacer pacer,
         Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch,
         CancellationToken cancellationToken)
     {
@@ -169,7 +167,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         while (true)
         {
-            await pacer.WaitAsync(cancellationToken);
             var url = $"channels/{channelId}/messages?limit=100&before={before}";
 
             using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), cancellationToken);
@@ -208,61 +205,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     }
 
     private const ulong DiscordEpochMilliseconds = 1420070400000UL;
-
-    private static readonly TimeSpan SearchRequestMinSpacing = TimeSpan.FromMilliseconds(250);
-
-    private sealed class AsyncPacer
-    {
-        private readonly object _gate = new();
-        private TimeSpan _minInterval;
-        private long _nextSlot;
-        private int _successesSinceCooldown;
-
-        public AsyncPacer(TimeSpan minInterval)
-        {
-            _minInterval = minInterval;
-            _nextSlot = Environment.TickCount64;
-        }
-
-        public async Task WaitAsync(CancellationToken cancellationToken)
-        {
-            long delayMs;
-            lock (_gate)
-            {
-                var now = Environment.TickCount64;
-                delayMs = Math.Max(0, _nextSlot - now);
-                _nextSlot = Math.Max(now, _nextSlot) + (long)_minInterval.TotalMilliseconds;
-            }
-
-            if (delayMs > 0)
-            {
-                await Task.Delay(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
-            }
-        }
-
-        public void ReportCooldown()
-        {
-            lock (_gate)
-            {
-                _minInterval = TimeSpan.FromMilliseconds(Math.Min(2000, _minInterval.TotalMilliseconds * 1.5));
-                _successesSinceCooldown = 0;
-            }
-        }
-
-        public void ReportSuccess()
-        {
-            lock (_gate)
-            {
-                _successesSinceCooldown++;
-                if (_successesSinceCooldown >= 8)
-                {
-                    _successesSinceCooldown = 0;
-                    _minInterval = TimeSpan.FromMilliseconds(
-                        Math.Max(120, Math.Min(400, _minInterval.TotalMilliseconds * 0.8)));
-                }
-            }
-        }
-    }
 
     public async Task<IReadOnlyDictionary<string, DiscordMessageDto>> GetMessagesByIdsAsync(
         string channelId,

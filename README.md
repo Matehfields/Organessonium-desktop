@@ -22,6 +22,8 @@ Na inicialização, o app lê primeiro os seriais válidos já armazenados em `O
 
 Depois da varredura dos seriais, o canal `names` é lido por páginas em paralelo. O metadata de cada mensagem é desserializado em lotes usando os mesmos `SearchWorkers`, e os resultados são enviados progressivamente à interface. Ao final, essa leitura completa do `names` permanece autoritativa, atualiza `app_entries` e sincroniza apenas os seriais cujo conteúdo mudou. Mensagens de serial duplicadas ou hashes antigos são removidos durante a sincronização.
 
+O progresso da leitura começa com o cache local ou com os seriais disponíveis e é atualizado conforme cada página do Discord chega, sem esperar o fim da varredura. A paginação usa os workers configurados sem um limitador global artificial; o tratamento de rate limit do cliente continua ativo por rota. Ao criar uma pasta ou excluir itens, o app trabalha sobre a lista local já exibida, atualiza SQLite e interface imediatamente e sincroniza o canal `serial` sem iniciar uma nova varredura completa do `names`. Enquanto essa operação termina, a interface exibe o aviso `Em andamento...`, que pode ser ocultado sem cancelar a operação.
+
 ## Metadata publica
 
 A metadata publica fica no canal `names` do Discord. O app envia JSON inline minificado quando couber em uma mensagem; quando passar do limite de caracteres do Discord, envia um anexo `metadata.json` formatado.

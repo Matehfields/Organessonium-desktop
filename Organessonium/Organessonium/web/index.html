@@ -71,6 +71,14 @@
     <div class="status-right"><span id="storage-display"></span></div>
 </footer>
 
+<div id="background-activity" class="background-activity hidden" role="status" aria-live="polite">
+    <span class="background-activity-spinner" aria-hidden="true"></span>
+    <span id="background-activity-text" class="background-activity-text">Em andamento...</span>
+    <button id="background-activity-close" class="background-activity-close" type="button" title="Fechar" aria-label="Fechar">
+        <span data-icon="close" data-size="18"></span>
+    </button>
+</div>
+
 <!-- ─── Selection bar ──────────────────────────────────────────────────────── -->
 <div id="selection-bar" class="selection-bar hidden" role="toolbar" aria-live="polite">
     <span id="selection-count" class="sel-count">0 selecionados</span>

@@ -67,7 +67,7 @@ const I18N = {
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
         sortNameAsc:'Nome A-Z', sortNameDesc:'Nome Z-A', sortSizeDesc:'Maior tamanho',
         sortSizeAsc:'Menor tamanho', sortDateDesc:'Mais recente', sortDateAsc:'Mais antigo',
-        loading:'Carregando...', validatingServer:'Verificando alterações no servidor...', waiting:'Aguardando...', transfers:'Transferências',
+        loading:'Carregando...', validatingServer:'Verificando alterações no servidor...', backgroundInProgress:'Em andamento...', creatingFolder:'Criando pasta...', waiting:'Aguardando...', transfers:'Transferências',
         filesFound:v => v.count + ' arquivo(s) encontrado(s)...',
         uploadProgress:'Enviando', downloadProgress:'Baixando', deleteProgress:'Apagando', moveProgress:'Movendo',
         cancelTransfersTitle:'Cancelar transferência?',
@@ -195,7 +195,7 @@ const I18N = {
         sortName:'Name', sortSize:'Size', sortDate:'Date',
         sortNameAsc:'Name A-Z', sortNameDesc:'Name Z-A', sortSizeDesc:'Largest',
         sortSizeAsc:'Smallest', sortDateDesc:'Newest', sortDateAsc:'Oldest',
-        loading:'Loading...', validatingServer:'Checking for server changes...', waiting:'Waiting...', transfers:'Transfers',
+        loading:'Loading...', validatingServer:'Checking for server changes...', backgroundInProgress:'In progress...', creatingFolder:'Creating folder...', waiting:'Waiting...', transfers:'Transfers',
         filesFound:v => v.count + ' file(s) found...',
         uploadProgress:'Uploading', downloadProgress:'Downloading', deleteProgress:'Deleting', moveProgress:'Moving',
         cancelTransfersTitle:'Cancel transfer?',
@@ -418,6 +418,7 @@ function applyI18n() {
     setA11y('btn-new-folder', 'newFolder');
     setA11y('btn-upload-folder', 'uploadFolder');
     setA11y('btn-settings', 'settings');
+    setA11y('background-activity-close', 'close');
     $('btn-upload').lastChild.nodeValue = ' ' + t('upload');
     $('sort-label').textContent = sortLabel(sortMode);
     setA11y('preview-zoom-out', 'zoomOut');
@@ -661,6 +662,26 @@ window._onAppsLoaded = apps => {
     setStatus(t('loaded', { count:apps.length }), false);
     registryValidationUsesCache = false;
     scheduleVisibleThumbnails();
+};
+window._onLocalAppsChanged = apps => {
+    if (!Array.isArray(apps)) return;
+    allApps = apps;
+    syncOpenMarkdownApps();
+    render();
+    const total = allApps.reduce((sum, app) => sum + (app.sizeBytes || 0), 0);
+    storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
+    scheduleVisibleThumbnails();
+};
+window._onBackgroundActivity = (message, active) => {
+    const activity = $('background-activity');
+    if (!activity) return;
+    const text = $('background-activity-text');
+    if (active) {
+        if (text) text.textContent = message || t('backgroundInProgress');
+        activity.classList.remove('hidden');
+    } else {
+        activity.classList.add('hidden');
+    }
 };
 window._onLoggedOut = () => {
     window.location.href = 'setup.html';
@@ -2221,6 +2242,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Ops
     $('ops-toggle').addEventListener('click', toggleOpsMinimized);
     $('ops-close').addEventListener('click', requestCancelTransfers);
+    $('background-activity-close').addEventListener('click', () => $('background-activity').classList.add('hidden'));
 
     // Context
     $('ctx-open').addEventListener('click', () => { openContextTarget(); hideCtx(); });
@@ -4539,7 +4561,7 @@ function updateNavButtons() { btnBack.disabled = !historyBack.length; btnForward
 // ─── Modais simples ───────────────────────────────────────────────────────────
 function openFolderModal()  { folderInput.value=''; folderOverlay.classList.remove('hidden'); setTimeout(()=>folderInput.focus(),50); }
 function closeFolderModal() { folderOverlay.classList.add('hidden'); }
-function confirmFolder()    { const n=folderInput.value.trim(); if(!n) return; window.bridge.createFolder(n); closeFolderModal(); }
+function confirmFolder()    { const n=folderInput.value.trim(); if(!n) return; setStatus(t('creatingFolder'), true); window.bridge.createFolder(n); closeFolderModal(); }
 
 function normalizeHexColor(value) {
     const raw = String(value || '').trim().replace(/^#/, '');
