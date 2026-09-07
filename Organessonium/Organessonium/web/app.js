@@ -12,7 +12,7 @@ let uploadConflictState = null;
 let settings = {
     cardSize:'medium', downloadThreads:4, uploadThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
     previewEnabled:true, videoPreviewQuality:'low', language:'system',
-    animationsEnabled:true, hardwareAcceleration:true,
+    animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
 };
 let systemPreferences = { theme:detectBrowserTheme(), language:getInitialLanguage() };
@@ -111,6 +111,15 @@ const I18N = {
         cacheCleared:'Cache limpo.',
         performance:'Desempenho', enableAnimations:'Ativar animações',
         hardwareAcceleration:'Aceleração por hardware', requiresRestart:'Reinicie o app para aplicar.',
+        encryption:'Proteção dos arquivos', encryptionMode:'Modo de proteção', encryptionStandard:'Padrão', encryptionCustom:'Chave personalizada',
+        encryptionStandardHelp:'Gerenciada automaticamente pelo Organessônium.', encryptionPassphrase:'Senha da chave personalizada',
+        encryptionWarning:'Arquivos protegidos com uma chave personalizada só poderão ser recuperados com essa chave. Guarde o arquivo de recuperação em local seguro.',
+        encryptionConfirm:'Entendo que perder a chave impede a recuperação dos arquivos.', encryptionActivate:'Ativar chave personalizada',
+        encryptionExport:'Exportar chave de recuperação', encryptionImport:'Importar chave', encryptionReady:'Chave personalizada disponível neste dispositivo.',
+        encryptionNotReady:'Configure ou importe uma chave personalizada.', encryptionExportTitle:'Exportar chave de recuperação?',
+        encryptionExportWarning:'Qualquer pessoa que possuir este arquivo poderá acessar os arquivos protegidos por esta chave.',
+        encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
+        encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
         enablePreviews:'Ativar prévias', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -230,6 +239,15 @@ const I18N = {
         cacheCleared:'Cache cleared.',
         performance:'Performance', enableAnimations:'Enable animations',
         hardwareAcceleration:'Hardware acceleration', requiresRestart:'Restart the app to apply.',
+        encryption:'File protection', encryptionMode:'Protection mode', encryptionStandard:'Standard', encryptionCustom:'Custom key',
+        encryptionStandardHelp:'Managed automatically by Organessônium.', encryptionPassphrase:'Custom key passphrase',
+        encryptionWarning:'Files protected with a custom key can only be recovered with that key. Store the recovery file safely.',
+        encryptionConfirm:'I understand that losing the key prevents file recovery.', encryptionActivate:'Activate custom key',
+        encryptionExport:'Export recovery key', encryptionImport:'Import key', encryptionReady:'A custom key is available on this device.',
+        encryptionNotReady:'Configure or import a custom key.', encryptionExportTitle:'Export recovery key?',
+        encryptionExportWarning:'Anyone with this file can access files protected by this key.',
+        encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
+        encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
         enablePreviews:'Enable previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -461,6 +479,17 @@ function applyI18n() {
     setText('setting-animations-label', 'enableAnimations');
     setText('setting-hardware-label', 'hardwareAcceleration');
     setText('setting-hardware-help', 'requiresRestart');
+    setText('settings-encryption-title', 'encryption');
+    setText('setting-encryption-mode-label', 'encryptionMode');
+    setText('btn-encryption-standard', 'encryptionStandard');
+    setText('btn-encryption-custom', 'encryptionCustom');
+    setText('setting-encryption-standard-help', 'encryptionStandardHelp');
+    setText('setting-custom-passphrase-label', 'encryptionPassphrase');
+    setText('setting-custom-key-warning', 'encryptionWarning');
+    setText('setting-custom-key-confirmed-text', 'encryptionConfirm');
+    setText('btn-configure-custom-key', 'encryptionActivate');
+    setText('btn-export-custom-key', 'encryptionExport');
+    setText('btn-import-custom-key', 'encryptionImport');
     setText('settings-uploads-title', 'uploads');
     setText('setting-upload-files-label', 'simultaneousUploadFiles');
     setText('setting-upload-threads-label', 'simultaneousUploadParts');
@@ -1800,6 +1829,24 @@ window._onMarkdownImageCancelled = id => {
     }
     pendingPastedMarkdownImages.delete(id);
 };
+window._onEncryptedMarkdownImageReady = (id, reference, url) => {
+    const entry = markdownTabs.get(id);
+    if (!entry || !entry.editor || !reference || !url) return;
+    entry.editor.querySelectorAll('img').forEach(img => {
+        if (img.dataset.organessoniumImage === reference) {
+            img.src = url;
+            img.dataset.organessoniumReady = 'true';
+            delete img.dataset.organessoniumLoading;
+        }
+    });
+};
+window._onEncryptionSettingsChanged = (mode, customKeyAvailable) => {
+    settings.encryptionMode = mode === 'custom' ? 'custom' : 'standard';
+    settings.customKeyAvailable = customKeyAvailable === true;
+    syncEncryptionSettings();
+    setStatus(t('encryptionUpdated'), false);
+};
+window._onEncryptionKeyExported = () => setStatus(t('encryptionExport'), false);
 window._onDragOver  = () => dragOverlay.classList.remove('hidden');
 window._onDragLeave = () => dragOverlay.classList.add('hidden');
 window._onPathChosen = (type, path) => {
@@ -2225,6 +2272,35 @@ document.addEventListener('DOMContentLoaded', () => {
     $('setting-threads').addEventListener('input', e => { settings.downloadThreads=+e.target.value; $('thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-files').addEventListener('input', e => { settings.maxParallelUploads=+e.target.value; $('upload-files-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-threads').addEventListener('input', e => { settings.uploadThreads=+e.target.value; $('upload-thr-val').textContent=e.target.value; queueSettingsSave(); });
+    $('btn-encryption-standard')?.addEventListener('click', () => {
+        settings.encryptionMode = 'standard';
+        syncEncryptionSettings();
+        window.bridge.setEncryptionMode('standard');
+    });
+    $('btn-encryption-custom')?.addEventListener('click', () => {
+        settings.encryptionMode = 'custom';
+        syncEncryptionSettings();
+    });
+    $('btn-configure-custom-key')?.addEventListener('click', () => {
+        const confirmation = $('setting-custom-key-confirmed');
+        if (!confirmation?.checked) {
+            $('setting-custom-key-status').textContent = t('encryptionConfirm');
+            return;
+        }
+        const passphrase = $('setting-custom-passphrase').value;
+        if (!passphrase && settings.customKeyAvailable) {
+            window.bridge.setEncryptionMode('custom');
+            return;
+        }
+        window.bridge.configureCustomEncryption(passphrase, true);
+        $('setting-custom-passphrase').value = '';
+    });
+    $('btn-export-custom-key')?.addEventListener('click', () => {
+        askConfirm(t('encryptionExportTitle'), t('encryptionExportWarning'), () => window.bridge.exportCustomEncryptionKey(), 'encryptionProceed');
+    });
+    $('btn-import-custom-key')?.addEventListener('click', () => {
+        askConfirm(t('encryptionImportTitle'), t('encryptionImportWarning'), () => window.bridge.importCustomEncryptionKey(), 'encryptionProceed');
+    });
     $('setting-proxy-mode').addEventListener('change', e => {
         settings.proxy.proxyMode = e.target.value;
         applyProxySettingsVisibility();
@@ -3678,6 +3754,17 @@ function prepareEditorMedia(entry) {
     editor.querySelectorAll('img').forEach(img => {
         img.draggable = true;
         img.setAttribute('contenteditable', 'false');
+        const original = img.dataset.organessoniumImage || img.getAttribute('src') || '';
+        const isEncryptedAttachment = original.startsWith('organessonium-image://v1/');
+        const isEncryptedDriveImage = original.startsWith('organessonium-drive-image://');
+        if ((!isEncryptedAttachment && !isEncryptedDriveImage) || img.dataset.organessoniumReady === 'true' || img.dataset.organessoniumLoading === 'true') return;
+        img.dataset.organessoniumImage = original;
+        img.dataset.organessoniumLoading = 'true';
+        if (isEncryptedAttachment && window.bridge?.resolveEncryptedMarkdownImage) {
+            window.bridge.resolveEncryptedMarkdownImage(entry.id, entry.app.threadId || '', original);
+        } else if (isEncryptedDriveImage && window.bridge?.resolveEncryptedDriveMarkdownImage) {
+            window.bridge.resolveEncryptedDriveMarkdownImage(entry.id, original.slice('organessonium-drive-image://'.length));
+        }
     });
 }
 
@@ -3863,7 +3950,7 @@ function inlineMarkdown(node) {
     if (tag === 'em' || tag === 'i') return '*' + inner + '*';
     if (tag === 'code') return '`' + node.innerText.replace(/`/g, '\\`') + '`';
     if (tag === 'a') return '[' + (inner || node.href) + '](' + (node.getAttribute('href') || '') + ')';
-    if (tag === 'img') return '![' + (node.getAttribute('alt') || '') + '](' + (node.getAttribute('src') || '') + ')';
+    if (tag === 'img') return '![' + (node.getAttribute('alt') || '') + '](' + (node.dataset.organessoniumImage || node.getAttribute('src') || '') + ')';
     if (tag === 'br') return '\n';
     return inner;
 }
@@ -4813,6 +4900,8 @@ function loadSettings() {
     settings.cardSize = CARD_SIZES[settings.cardSize] ? settings.cardSize : 'medium';
     settings.uploadThreads = Math.max(1, Math.min(16, Number(settings.uploadThreads) || 4));
     settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
+    settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
+    settings.customKeyAvailable = settings.customKeyAvailable === true;
     applyTheme(settings.theme); applyCardSize(settings.cardSize);
     $('setting-threads').value=settings.downloadThreads; $('thr-val').textContent=settings.downloadThreads;
     $('setting-upload-files').value=settings.maxParallelUploads; $('upload-files-val').textContent=settings.maxParallelUploads;
@@ -4822,11 +4911,24 @@ function loadSettings() {
     $('setting-animations').checked=settings.animationsEnabled!==false;
     $('setting-hardware').checked=settings.hardwareAcceleration!==false;
     loadProxySettings();
+    syncEncryptionSettings();
     document.querySelectorAll('.theme-btn').forEach(b=>b.classList.toggle('active',b.dataset.themeValue===settings.theme));
     document.querySelectorAll('.card-size-btn[data-size]').forEach(b=>b.classList.toggle('active',b.dataset.size===(settings.cardSize||'medium')));
     document.querySelectorAll('.video-quality-btn').forEach(b=>b.classList.toggle('active',b.dataset.videoQuality===(settings.videoPreviewQuality||'low')));
     syncMotionPreference();
     applyI18n();
+}
+function syncEncryptionSettings() {
+    const customMode = settings.encryptionMode === 'custom';
+    const customAvailable = settings.customKeyAvailable === true;
+    const customPanel = $('setting-custom-key');
+    if (customPanel) customPanel.classList.toggle('hidden', !customMode);
+    $('btn-encryption-standard')?.classList.toggle('active', !customMode);
+    $('btn-encryption-custom')?.classList.toggle('active', customMode);
+    const exportButton = $('btn-export-custom-key');
+    if (exportButton) exportButton.disabled = !customAvailable;
+    const status = $('setting-custom-key-status');
+    if (status) status.textContent = customAvailable ? t('encryptionReady') : t('encryptionNotReady');
 }
 function loadProxySettings() {
     const proxy = settings.proxy || {};

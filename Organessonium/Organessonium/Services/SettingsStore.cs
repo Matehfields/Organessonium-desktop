@@ -4,7 +4,7 @@ using System.IO;
 
 namespace Organessonium.Services;
 
-public sealed class SettingsStore
+public sealed class SettingsStore : IEncryptionSecretStore
 {
     private const string DataFolderName = "OrganessoniumData";
     private const string DataPointerFileName = "OrganessoniumData.path";
@@ -108,6 +108,8 @@ public sealed class SettingsStore
             settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, 8);
             settings.MaxParallelDownloads = Math.Clamp(GetInt(values, "maxParallelDownloads", settings.MaxParallelDownloads), 1, 16);
             settings.SearchWorkers = Math.Clamp(GetInt(values, "searchWorkers", settings.SearchWorkers), 1, 8);
+            settings.EncryptionMode = EncryptionModes.Normalize(Get(values, "encryptionMode", settings.EncryptionMode));
+            settings.CustomKeyAvailable = !string.IsNullOrWhiteSpace(Get(values, EncryptionSettingKeys.ProtectedMasterKey, ""));
             settings.Proxy.Mode = NormalizeProxyMode(Get(values, "proxyMode", ProxyModeLabel(settings.Proxy.Mode)));
             settings.Proxy.Host = Get(values, "proxyHost", settings.Proxy.Host);
             settings.Proxy.Port = Math.Clamp(GetInt(values, "proxyPort", settings.Proxy.Port), 0, 65535);
@@ -147,6 +149,7 @@ public sealed class SettingsStore
             Upsert(connection, "maxParallelUploads", Math.Clamp(settings.MaxParallelUploads, 1, 8).ToString());
             Upsert(connection, "maxParallelDownloads", Math.Clamp(settings.MaxParallelDownloads, 1, 16).ToString());
             Upsert(connection, "searchWorkers", Math.Clamp(settings.SearchWorkers, 1, 8).ToString());
+            Upsert(connection, "encryptionMode", EncryptionModes.Normalize(settings.EncryptionMode));
             Upsert(connection, "proxyMode", ProxyModeLabel(settings.Proxy.Mode));
             Upsert(connection, "proxyHost", settings.Proxy.Host);
             Upsert(connection, "proxyPort", settings.Proxy.Port.ToString());
@@ -169,7 +172,8 @@ public sealed class SettingsStore
                 SELECT names_message_id, name, thread_id, uploaded_at, size_bytes, path, folder_color, type,
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
-                       file_id, folder_id, COALESCE(parent_folder_id, '')
+                       file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
+                       encryption_mode, encryption_salt
                 FROM app_entries
                 ORDER BY rowid
                 """;
@@ -198,6 +202,16 @@ public sealed class SettingsStore
                         FolderId = reader.GetString(17),
                         ParentFolderId = reader.GetString(18)
                     };
+                    var encryptionVersion = reader.GetInt32(19);
+                    if (encryptionVersion > 0)
+                    {
+                        entry.Encryption = new EncryptionMetadata
+                        {
+                            Version = encryptionVersion,
+                            Mode = reader.GetString(20),
+                            Salt = reader.GetString(21)
+                        };
+                    }
                     entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
                     entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
                     entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
@@ -299,10 +313,12 @@ public sealed class SettingsStore
                     INSERT INTO app_entries
                     (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
                      mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
-                     video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id)
+                     video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
+                     encryption_version, encryption_mode, encryption_salt)
                     VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
                      $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
-                     $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId)
+                     $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
+                     $encryptionVersion, $encryptionMode, $encryptionSalt)
                     """;
                 insert.Parameters.AddWithValue("$name", entry.Name);
                 insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
@@ -323,6 +339,9 @@ public sealed class SettingsStore
                 insert.Parameters.AddWithValue("$filedd", entry.FileId);
                 insert.Parameters.AddWithValue("$folderdd", entry.FolderId);
                 insert.Parameters.AddWithValue("$parentFolderId", (object?)entry.ParentFolderId ?? DBNull.Value);
+                insert.Parameters.AddWithValue("$encryptionVersion", entry.Encryption?.Version ?? 0);
+                insert.Parameters.AddWithValue("$encryptionMode", entry.Encryption?.Mode ?? "");
+                insert.Parameters.AddWithValue("$encryptionSalt", entry.Encryption?.Salt ?? "");
                 insert.ExecuteNonQuery();
             }
 
@@ -360,7 +379,10 @@ public sealed class SettingsStore
                 video_preview_size_bytes INTEGER NOT NULL DEFAULT 0,
                 file_id TEXT NOT NULL DEFAULT '',
                 folder_id TEXT NOT NULL DEFAULT '',
-                parent_folder_id TEXT
+                parent_folder_id TEXT,
+                encryption_version INTEGER NOT NULL DEFAULT 0,
+                encryption_mode TEXT NOT NULL DEFAULT '',
+                encryption_salt TEXT NOT NULL DEFAULT ''
             );
             """;
         cmd.ExecuteNonQuery();
@@ -383,6 +405,9 @@ public sealed class SettingsStore
         EnsureColumn(connection, "app_entries", "file_id", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "folder_id", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "parent_folder_id", "TEXT");
+        EnsureColumn(connection, "app_entries", "encryption_version", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "app_entries", "encryption_mode", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "encryption_salt", "TEXT NOT NULL DEFAULT ''");
     }
 
     private void MigrateIniIfNeeded()
@@ -431,6 +456,27 @@ public sealed class SettingsStore
         settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, 8);
         settings.MaxParallelDownloads = Math.Clamp(GetInt(values, "maxParallelDownloads", settings.MaxParallelDownloads), 1, 16);
         Save(settings);
+    }
+
+    string IEncryptionSecretStore.ReadEncryptionSecret(string key)
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT value FROM settings WHERE key = $key LIMIT 1";
+            command.Parameters.AddWithValue("$key", key);
+            return command.ExecuteScalar() as string ?? "";
+        }
+    }
+
+    void IEncryptionSecretStore.WriteEncryptionSecret(string key, string value)
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            Upsert(connection, key, value);
+        }
     }
 
     private SqliteConnection Open()

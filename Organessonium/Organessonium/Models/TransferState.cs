@@ -107,6 +107,9 @@ public sealed class TransferState
     [JsonPropertyName("videoPreview480pSizeBytes")]
     public long VideoPreview480pSizeBytes { get; set; }
 
+    [JsonPropertyName("encryption")]
+    public EncryptionMetadata? Encryption { get; set; }
+
     [JsonPropertyName("metadataMessageId")]
     public string? MetadataMessageId { get; set; }
 
@@ -141,6 +144,11 @@ public sealed class TransferState
         DownloadedChunks ??= [];
         PendingChunks ??= [];
         VideoPreview480pChunks ??= [];
+        if (Encryption != null)
+        {
+            Encryption.Mode = EncryptionModes.Normalize(Encryption.Mode);
+            Encryption.Salt ??= "";
+        }
     }
 
     public static string Now()

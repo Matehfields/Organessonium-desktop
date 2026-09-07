@@ -278,6 +278,8 @@ public sealed class MetadataService
                     .Where(id => !string.IsNullOrWhiteSpace(id))
                     .ToList() ?? [];
                 entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
+                entry.VideoPreviewSizeBytes = Math.Max(0, file.Preview?.Video480p?.SizeBytes ?? 0);
+                entry.Encryption = file.Encryption?.Clone();
                 break;
             case FolderMetadata folder:
                 entry = AppEntry.Folder(folder.Name, "/");
@@ -312,7 +314,8 @@ public sealed class MetadataService
             BatchId = entry.BatchId,
             ParentFolderId = NormalizeParentId(entry.ParentFolderId),
             Chunks = entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList(),
-            Preview = CreatePreviewMetadata(entry)
+            Preview = CreatePreviewMetadata(entry),
+            Encryption = entry.Encryption?.Clone()
         };
     }
 
@@ -416,6 +419,19 @@ public sealed class MetadataService
                     .Where(id => !string.IsNullOrWhiteSpace(id))
                     .ToList() ?? [];
                 Require(file.Chunks.Count > 0, "chunks do arquivo ausentes.");
+                if (file.Encryption != null)
+                {
+                    Require(file.Encryption.Version == EncryptionMetadata.CurrentVersion, "versão de criptografia inválida.");
+                    Require(EncryptionModes.IsSupported(file.Encryption.Mode), "modo de criptografia inválido.");
+                    try
+                    {
+                        Require(Convert.FromBase64String(file.Encryption.Salt).Length >= 16, "salt de criptografia inválido.");
+                    }
+                    catch (FormatException)
+                    {
+                        throw new InvalidOperationException("salt de criptografia inválido.");
+                    }
+                }
                 if (file.Preview != null)
                 {
                     var hasThumbnail = !string.IsNullOrWhiteSpace(file.Preview.ThumbnailMessageId);

@@ -391,6 +391,34 @@
             </div>
         </section>
         <section class="settings-section">
+            <h3 id="settings-encryption-title">Proteção dos arquivos</h3>
+            <div class="setting-row col">
+                <label id="setting-encryption-mode-label">Modo de proteção</label>
+                <div class="theme-btns encryption-mode-buttons" role="group" aria-labelledby="setting-encryption-mode-label">
+                    <button id="btn-encryption-standard" class="theme-btn" type="button">Padrão</button>
+                    <button id="btn-encryption-custom" class="theme-btn" type="button">Chave personalizada</button>
+                </div>
+                <small id="setting-encryption-standard-help">Gerenciada automaticamente pelo Organessônium.</small>
+            </div>
+            <div id="setting-custom-key" class="encryption-custom hidden">
+                <div class="setting-row col">
+                    <label id="setting-custom-passphrase-label" for="setting-custom-passphrase">Senha da chave personalizada</label>
+                    <input id="setting-custom-passphrase" type="password" class="setting-input" autocomplete="new-password"/>
+                </div>
+                <p id="setting-custom-key-warning" class="encryption-warning">Arquivos protegidos com uma chave personalizada só poderão ser recuperados com essa chave. Guarde o arquivo de recuperação em local seguro.</p>
+                <label class="modal-check encryption-confirmation">
+                    <input id="setting-custom-key-confirmed" type="checkbox"/>
+                    <span id="setting-custom-key-confirmed-text">Entendo que perder a chave impede a recuperação dos arquivos.</span>
+                </label>
+                <div class="encryption-actions">
+                    <button id="btn-configure-custom-key" class="btn-primary" type="button">Ativar chave personalizada</button>
+                    <button id="btn-export-custom-key" class="btn-secondary" type="button">Exportar chave de recuperação</button>
+                    <button id="btn-import-custom-key" class="btn-secondary" type="button">Importar chave</button>
+                </div>
+                <small id="setting-custom-key-status" class="encryption-status"></small>
+            </div>
+        </section>
+        <section class="settings-section">
             <h3 id="settings-downloads-title">Downloads</h3>
             <div class="setting-row">
                 <label class="threads-label">Threads <span id="thr-val" class="setting-val">4</span></label>

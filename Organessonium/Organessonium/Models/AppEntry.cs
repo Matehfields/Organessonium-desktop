@@ -60,6 +60,9 @@ public sealed class AppEntry
     [JsonPropertyName("videoPreviewSizeBytes")]
     public long VideoPreviewSizeBytes { get; set; }
 
+    [JsonPropertyName("encryption")]
+    public EncryptionMetadata? Encryption { get; set; }
+
     public static AppEntry File(string name, string threadId, string uploadedAt, long sizeBytes, string? path)
     {
         return new AppEntry
@@ -105,6 +108,11 @@ public sealed class AppEntry
         PreviewMessageId ??= "";
         VideoPreviewMessageId ??= "";
         VideoPreviewSizeBytes = Math.Max(0, VideoPreviewSizeBytes);
+        if (Encryption != null)
+        {
+            Encryption.Mode = EncryptionModes.Normalize(Encryption.Mode);
+            Encryption.Salt ??= "";
+        }
         if (Type == "file" && string.IsNullOrWhiteSpace(FileId))
         {
             FileId = Guid.NewGuid().ToString("N");

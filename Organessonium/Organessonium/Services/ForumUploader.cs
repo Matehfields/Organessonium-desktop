@@ -1,4 +1,5 @@
 using System.IO;
+using Organessonium.Models;
 
 namespace Organessonium.Services;
 
@@ -43,7 +44,8 @@ public sealed class ForumUploader
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
         int maxParallelParts = 1,
-        SemaphoreSlim? uploadGate = null)
+        SemaphoreSlim? uploadGate = null,
+        EncryptedPayloadContext? encryptedPayload = null)
     {
         if (parts.Count == 0)
         {
@@ -88,8 +90,10 @@ public sealed class ForumUploader
             var firstWasPending = string.IsNullOrWhiteSpace(chunkMessages[0]);
             var post = await InUploadSlotAsync(() => _discord.CreateForumPostWithFileDetailedAsync(
                 _forumId,
-                StripExtension(archiveFileName),
-                PartContent(batchId, 1, parts.Count),
+                encryptedPayload == null ? StripExtension(archiveFileName) : EncryptedThreadTitle(encryptedPayload.FileId),
+                encryptedPayload == null
+                    ? PartContent(batchId, 1, parts.Count)
+                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), parts.Count),
                 first,
                 cancellationToken,
                 onRateLimitWait));
@@ -126,7 +130,9 @@ public sealed class ForumUploader
                 {
                     var message = await InUploadSlotAsync(() => _discord.SendFileMessageAsync(
                         threadId,
-                        PartContent(batchId, index + 1, parts.Count),
+                        encryptedPayload == null
+                            ? PartContent(batchId, index + 1, parts.Count)
+                            : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), parts.Count),
                         parts[index],
                         cancellationToken,
                         onRateLimitWait));
@@ -156,7 +162,8 @@ public sealed class ForumUploader
         IReadOnlyList<FileInfo> parts,
         Action<int>? uploadedParts = null,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        EncryptedPayloadContext? encryptedPayload = null)
     {
         if (parts.Count == 0)
         {
@@ -171,7 +178,9 @@ public sealed class ForumUploader
         {
             var message = await _discord.SendFileMessageAsync(
                 threadId,
-                PartContent(batchId, i + 1, parts.Count),
+                encryptedPayload == null
+                    ? PartContent(batchId, i + 1, parts.Count)
+                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
                 onRateLimitWait);
@@ -220,7 +229,8 @@ public sealed class ForumUploader
         IReadOnlyList<FileInfo> parts,
         Action<int>? uploadedParts = null,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        EncryptedPayloadContext? encryptedPayload = null)
     {
         if (parts.Count == 0)
         {
@@ -234,7 +244,9 @@ public sealed class ForumUploader
         {
             var message = await _discord.SendFileMessageAsync(
                 threadId,
-                PreviewPartContent(kind, batchId, i + 1, parts.Count),
+                encryptedPayload == null
+                    ? PreviewPartContent(kind, batchId, i + 1, parts.Count)
+                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
                 onRateLimitWait);
@@ -249,6 +261,12 @@ public sealed class ForumUploader
     {
         var without = System.IO.Path.GetFileNameWithoutExtension(name);
         return string.IsNullOrWhiteSpace(without) ? name : without;
+    }
+
+    private static string EncryptedThreadTitle(string fileId)
+    {
+        var value = string.IsNullOrWhiteSpace(fileId) ? "payload" : fileId[..Math.Min(16, fileId.Length)];
+        return "payload-" + value;
     }
 
     private static string NewBatchId()

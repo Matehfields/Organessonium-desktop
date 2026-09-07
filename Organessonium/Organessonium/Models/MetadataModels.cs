@@ -46,6 +46,9 @@ public sealed class FileMetadata : MetadataEntry
 
     [JsonPropertyName("preview")]
     public PreviewMetadata? Preview { get; set; }
+
+    [JsonPropertyName("encryption")]
+    public EncryptionMetadata? Encryption { get; set; }
 }
 
 public sealed class FolderMetadata : MetadataEntry

@@ -2583,6 +2583,12 @@ html[data-motion="reduced"] *{
 .toggle input:checked + .toggle-track::after{transform:translateX(18px);}
 
 .path-row{display:flex;gap:6px;width:100%;}
+.encryption-mode-buttons{flex-wrap:wrap;}
+.encryption-custom{display:flex;flex-direction:column;gap:10px;padding-top:8px;}
+.encryption-warning{margin:0;font-size:12px;line-height:1.45;color:var(--text-secondary);}
+.encryption-confirmation{align-items:flex-start;line-height:1.4;}
+.encryption-actions{display:flex;flex-wrap:wrap;gap:8px;}
+.encryption-status{min-height:16px;font-size:11px;line-height:1.35;color:var(--text-muted);}
 .proxy-manual{margin-top:2px;display:flex;flex-direction:column;}
 .proxy-auth{margin-top:2px;display:flex;flex-direction:column;}
 .proxy-test-row{flex-wrap:wrap;}

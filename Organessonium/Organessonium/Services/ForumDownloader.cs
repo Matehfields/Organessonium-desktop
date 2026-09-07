@@ -6,20 +6,53 @@ using Organessonium.Models;
 
 namespace Organessonium.Services;
 
+public sealed class VerifiedPayloadSizeMismatchException : IOException
+{
+    public VerifiedPayloadSizeMismatchException(FileInfo recoveredFile, long expectedLength, long actualLength)
+        : base("A integridade criptográfica foi validada, mas o tamanho recuperado não corresponde aos metadados do arquivo.")
+    {
+        RecoveredFile = recoveredFile;
+        ExpectedLength = expectedLength;
+        ActualLength = actualLength;
+    }
+
+    public FileInfo RecoveredFile { get; }
+    public long ExpectedLength { get; }
+    public long ActualLength { get; }
+}
+
+public sealed class EncryptedPayloadIntegrityException : IOException
+{
+    public EncryptedPayloadIntegrityException(string encryptionMode, Exception? innerException = null)
+        : base(
+            EncryptionModes.Normalize(encryptionMode) == EncryptionModes.Custom
+                ? "Não foi possível autenticar este arquivo. Verifique se a chave de criptografia correta está configurada."
+                : "Não foi possível verificar a integridade deste arquivo.",
+            innerException)
+    {
+        EncryptionMode = EncryptionModes.Normalize(encryptionMode);
+    }
+
+    public string EncryptionMode { get; }
+}
+
 public sealed class ForumDownloader
 {
     private const int DownloadBufferSize = 1024 * 1024;
     private const int MaxChunkDownloadAttempts = 8;
+    private const int MaxEncryptedPayloadDownloadAttempts = 3;
     private const string PreviewPrefix = "ORG_PREVIEW|";
     private const string DartPreviewPrefix = "PREVIEW|";
     private const string DartVideoPreviewPrefix = "VIDEO_PREVIEW_480P|";
     private readonly DiscordApiClient _discord;
     private readonly AppSettings _settings;
+    private readonly EncryptionService _encryption;
 
-    public ForumDownloader(DiscordApiClient discord, AppSettings settings)
+    public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption)
     {
         _discord = discord;
         _settings = settings;
+        _encryption = encryption;
     }
 
     public async Task<FileInfo> DownloadAndAssembleAsync(
@@ -81,6 +114,11 @@ public sealed class ForumDownloader
         {
             if (entry.ChunkMessageIds.Count == 0)
             {
+                if (entry.Encryption != null)
+                {
+                    throw new InvalidOperationException("O metadata criptografado não contém referências aos payloads do arquivo.");
+                }
+
                 return await DownloadAndAssembleAsync(entry.ThreadId, destDir, onProgress, cancellationToken, onDetailedProgress);
             }
 
@@ -91,7 +129,9 @@ public sealed class ForumDownloader
                 destDir,
                 onProgress,
                 cancellationToken,
-                onDetailedProgress);
+                onDetailedProgress,
+                EncryptionContext(entry, EncryptedPayloadRoles.Original),
+                entry.SizeBytes);
         }
         catch (Exception ex) when (CanRecoverByBatch(entry, ex))
         {
@@ -138,7 +178,9 @@ public sealed class ForumDownloader
 
     private static bool CanRecoverByBatch(AppEntry entry, Exception ex)
     {
-        return ex is not OperationCanceledException && !string.IsNullOrWhiteSpace(entry.BatchId);
+        return ex is not OperationCanceledException &&
+               entry.Encryption == null &&
+               !string.IsNullOrWhiteSpace(entry.BatchId);
     }
     public async Task<FileInfo> DownloadAndAssembleAsync(
         AppEntry entry,
@@ -160,6 +202,7 @@ public sealed class ForumDownloader
         state.FileName = entry.Name;
         state.MimeType = entry.MimeType;
         state.SizeBytes = entry.SizeBytes;
+        state.Encryption = entry.Encryption?.Clone();
         state.TotalChunks = entry.ChunkMessageIds.Count;
         state.Chunks = entry.ChunkMessageIds
             .Select((messageId, index) =>
@@ -189,7 +232,10 @@ public sealed class ForumDownloader
 
         foreach (var part in parts)
         {
-            state.Chunks.First(chunk => chunk.Index == part.Index).SizeBytes = part.Size;
+            if (entry.Encryption == null)
+            {
+                state.Chunks.First(chunk => chunk.Index == part.Index).SizeBytes = part.Size;
+            }
         }
 
         if (parts.Count == 0)
@@ -218,7 +264,9 @@ public sealed class ForumDownloader
 
             var source = new FileInfo(chunk.TempChunkPath);
             source.Refresh();
-            if (!source.Exists || (part.Size > 0 && source.Length != part.Size))
+            if (!source.Exists ||
+                (entry.Encryption == null && part.Size > 0 && source.Length != part.Size) ||
+                (entry.Encryption != null && chunk.SizeBytes > 0 && source.Length != chunk.SizeBytes))
             {
                 chunk.Downloaded = false;
                 chunk.TempChunkPath = null;
@@ -284,7 +332,8 @@ public sealed class ForumDownloader
                         stateSaveGate.Release();
                     }
                 },
-                initialDownloadedBytes: existingBytes);
+                initialDownloadedBytes: existingBytes,
+                encryption: EncryptionContext(entry, EncryptedPayloadRoles.Original));
         }
         finally
         {
@@ -326,8 +375,13 @@ public sealed class ForumDownloader
             }
         }
 
-        outputFile.Refresh();
         try { tempDir.Delete(true); } catch { }
+        outputFile.Refresh();
+        if (entry.Encryption != null)
+        {
+            EnsureExpectedPlaintextLength(outputFile, entry.SizeBytes);
+        }
+
         return outputFile;
     }
     public async Task<FileInfo?> DownloadVideoPreview480Async(
@@ -348,7 +402,9 @@ public sealed class ForumDownloader
             destDir,
             _ => { },
             cancellationToken,
-            onProgress);
+            onProgress,
+            EncryptionContext(entry, EncryptedPayloadRoles.Video480p),
+            entry.VideoPreviewSizeBytes);
     }
 
     public async Task<FileInfo?> DownloadPreviewAndAssembleAsync(
@@ -518,7 +574,8 @@ public sealed class ForumDownloader
         string threadId,
         string messageId,
         Action<DownloadProgress>? onProgress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        EncryptedPayloadContext? encryption = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(messageId))
         {
@@ -532,7 +589,9 @@ public sealed class ForumDownloader
             return null;
         }
 
-        return await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken);
+        return encryption == null
+            ? await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken)
+            : await DownloadEncryptedAttachmentBytesAsync(attachment, encryption, onProgress, cancellationToken);
     }
 
     public async Task<FileInfo?> DownloadMessageAttachmentAsync(
@@ -540,7 +599,9 @@ public sealed class ForumDownloader
         string messageId,
         DirectoryInfo destDir,
         Action<DownloadProgress>? onProgress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        EncryptedPayloadContext? encryption = null,
+        string? outputName = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(messageId))
         {
@@ -554,7 +615,24 @@ public sealed class ForumDownloader
             return null;
         }
 
-        return await DownloadAttachmentToFileAsync(attachment, destDir, onProgress, cancellationToken);
+        if (encryption == null)
+        {
+            return await DownloadAttachmentToFileAsync(attachment, destDir, onProgress, cancellationToken);
+        }
+
+        var bytes = await DownloadEncryptedAttachmentBytesAsync(attachment, encryption, onProgress, cancellationToken);
+        try
+        {
+            destDir.Create();
+            var file = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? "preview.bin" : PathRules.CleanFileName(outputName)));
+            await File.WriteAllBytesAsync(file.FullName, bytes, cancellationToken);
+            file.Refresh();
+            return file;
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
+        }
     }
 
     private async Task<DiscordAttachmentDto?> FindMarkedPreviewAttachmentAsync(
@@ -589,6 +667,44 @@ public sealed class ForumDownloader
         var downloaded = await CopyWithProgressAsync(input, output, 0, total, attachment.FileName, onProgress, cancellationToken);
         onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, total));
         return output.ToArray();
+    }
+
+    private async Task<byte[]> DownloadEncryptedAttachmentBytesAsync(
+        DiscordAttachmentDto attachment,
+        EncryptedPayloadContext encryption,
+        Action<DownloadProgress>? onProgress,
+        CancellationToken cancellationToken)
+    {
+        Exception? last = null;
+        for (var attempt = 1; attempt <= MaxEncryptedPayloadDownloadAttempts; attempt++)
+        {
+            byte[]? encryptedBytes = null;
+            try
+            {
+                encryptedBytes = await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken);
+                return _encryption.DecryptBytes(encryptedBytes, encryption);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && attempt < MaxEncryptedPayloadDownloadAttempts)
+            {
+                last = ex;
+                AppLogger.Error("Download.EncryptedAttachmentRetry", ex, $"{encryption.FileId}:{encryption.Role}:{encryption.ChunkIndex}:attempt {attempt}");
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                last = ex;
+                break;
+            }
+            finally
+            {
+                if (encryptedBytes != null)
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(encryptedBytes);
+                }
+            }
+        }
+
+        throw new EncryptedPayloadIntegrityException(encryption.Encryption.Mode, last);
     }
 
     private static async Task<FileInfo?> DownloadAttachmentToFileAsync(
@@ -835,7 +951,9 @@ public sealed class ForumDownloader
         DirectoryInfo destDir,
         Action<string> onProgress,
         CancellationToken cancellationToken,
-        Action<DownloadProgress>? onDetailedProgress = null)
+        Action<DownloadProgress>? onDetailedProgress = null,
+        EncryptedPayloadContext? encryption = null,
+        long expectedPlaintextLength = -1)
     {
         var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken);
 
@@ -848,22 +966,39 @@ public sealed class ForumDownloader
         ValidateDestination(destDir, expectedBytes);
         var tempDir = ResolveTempDir(destDir, threadId + "_meta");
         tempDir.Create();
-        var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress);
-
-        destDir.Create();
-        var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? downloaded.Values.First().Name : outputName));
-        await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
+        try
         {
-            foreach (var part in downloaded.Values)
-            {
-                await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                await inStream.CopyToAsync(outStream, cancellationToken);
-            }
-        }
+            var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress, encryption: encryption);
 
-        try { tempDir.Delete(true); } catch { }
-        output.Refresh();
-        return output;
+            destDir.Create();
+            var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? downloaded.Values.First().Name : outputName));
+            await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
+            {
+                foreach (var part in downloaded.Values)
+                {
+                    await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
+                    await inStream.CopyToAsync(outStream, cancellationToken);
+                }
+            }
+
+            try { tempDir.Delete(true); } catch { }
+            output.Refresh();
+            if (encryption != null)
+            {
+                EnsureExpectedPlaintextLength(output, expectedPlaintextLength);
+            }
+
+            return output;
+        }
+        catch
+        {
+            if (encryption != null)
+            {
+                try { tempDir.Delete(true); } catch { }
+            }
+
+            throw;
+        }
     }
 
     private static bool IsPreviewMessage(string? content)
@@ -930,7 +1065,8 @@ public sealed class ForumDownloader
         CancellationToken cancellationToken,
         Action<DownloadProgress>? onDetailedProgress = null,
         Func<Part, FileInfo, Task>? onPartCompleted = null,
-        long initialDownloadedBytes = 0)
+        long initialDownloadedBytes = 0,
+        EncryptedPayloadContext? encryption = null)
     {
         if (parts.Count == 0)
         {
@@ -974,7 +1110,9 @@ public sealed class ForumDownloader
         async Task DownloadPartWithRetryAsync(Part part, FileInfo target)
         {
             Exception? last = null;
-            for (var attempt = 1; attempt <= MaxChunkDownloadAttempts; attempt++)
+            var maxAttempts = encryption == null ? MaxChunkDownloadAttempts : MaxEncryptedPayloadDownloadAttempts;
+            var encryptedTarget = encryption == null ? target : new FileInfo(target.FullName + ".encrypted");
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 var countedBytes = 0L;
                 var useProxy = attempt % 2 == 0 &&
@@ -983,31 +1121,35 @@ public sealed class ForumDownloader
                 var sourceUrl = useProxy ? part.ProxyUrl : part.Url;
                 try
                 {
-                    target.Directory?.Create();
-                    await using var outStream = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true);
-                    using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
-                    request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
-                    using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                    response.EnsureSuccessStatusCode();
-                    if (part.Size > 0 && response.Content.Headers.ContentLength == 0)
+                    encryptedTarget.Directory?.Create();
+                    await using (var outStream = new FileStream(encryptedTarget.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
                     {
-                        throw new IOException("Chunk recebido vazio do CDN: " + part.Name);
-                    }
-
-                    await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                    var buffer = new byte[DownloadBufferSize];
-                    while (true)
-                    {
-                        var read = await inStream.ReadAsync(buffer, cancellationToken);
-                        if (read <= 0)
+                        using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
+                        request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
+                        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                        response.EnsureSuccessStatusCode();
+                        if (part.Size > 0 && response.Content.Headers.ContentLength == 0)
                         {
-                            break;
+                            throw new IOException("Chunk recebido vazio do CDN: " + part.Name);
                         }
 
-                        await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                        countedBytes += read;
-                        var currentBytes = Interlocked.Add(ref downloadedBytes, read);
-                        ReportParallelProgress(currentBytes, part);
+                        await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                        var buffer = new byte[DownloadBufferSize];
+                        while (true)
+                        {
+                            var read = await inStream.ReadAsync(buffer, cancellationToken);
+                            if (read <= 0)
+                            {
+                                break;
+                            }
+
+                            await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                            countedBytes += read;
+                            var currentBytes = Interlocked.Add(ref downloadedBytes, read);
+                            ReportParallelProgress(currentBytes, part);
+                        }
+
+                        await outStream.FlushAsync(cancellationToken);
                     }
 
                     if (part.Size > 0 && countedBytes != part.Size)
@@ -1015,16 +1157,21 @@ public sealed class ForumDownloader
                         throw new IOException($"Chunk {part.Index + 1} incompleto. Esperado {part.Size} bytes, recebido {countedBytes} bytes.");
                     }
 
-                    await outStream.FlushAsync(cancellationToken);
-                    target.Refresh();
-                    if (!target.Exists || target.Length == 0)
+                    encryptedTarget.Refresh();
+                    if (!encryptedTarget.Exists || encryptedTarget.Length == 0)
                     {
                         throw new IOException("Chunk baixado estÃ¡ vazio: " + part.Name);
                     }
 
+                    if (encryption != null)
+                    {
+                        await _encryption.DecryptFileAsync(encryptedTarget, target, encryption.WithChunkIndex(part.Index), cancellationToken);
+                        TryDelete(encryptedTarget);
+                    }
+
                     return;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException && attempt < MaxChunkDownloadAttempts)
+                catch (Exception ex) when (ex is not OperationCanceledException && attempt < maxAttempts)
                 {
                     last = ex;
                     if (countedBytes > 0)
@@ -1033,6 +1180,7 @@ public sealed class ForumDownloader
                     }
 
                     TryDelete(target);
+                    TryDelete(encryptedTarget);
                     AppLogger.Error("Download.ChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}:{(useProxy ? "proxy" : "cdn")}");
                     var isEmptyResponse = ex is IOException io &&
                                           (io.Message.Contains("vazio", StringComparison.OrdinalIgnoreCase) ||
@@ -1051,8 +1199,14 @@ public sealed class ForumDownloader
                     }
 
                     TryDelete(target);
+                    TryDelete(encryptedTarget);
                     break;
                 }
+            }
+
+            if (encryption != null)
+            {
+                throw new EncryptedPayloadIntegrityException(encryption.Encryption.Mode, last);
             }
 
             throw new IOException($"NÃ£o foi possÃ­vel baixar a parte {part.Index + 1}/{parts.Count}.", last);
@@ -1154,6 +1308,29 @@ public sealed class ForumDownloader
         var cleanName = PathRules.CleanFileName(string.IsNullOrWhiteSpace(part.Name) ? "chunk.bin" : part.Name);
         return $"part_{part.Index:000000}_{cleanName}";
     }
+
+    private static EncryptedPayloadContext? EncryptionContext(AppEntry entry, string role)
+    {
+        return entry.Encryption == null
+            ? null
+            : new EncryptedPayloadContext(entry.FileId, entry.Encryption, role, 0);
+    }
+
+    private static void EnsureExpectedPlaintextLength(FileInfo file, long expectedLength)
+    {
+        if (expectedLength < 0)
+        {
+            return;
+        }
+
+        file.Refresh();
+        var actualLength = file.Exists ? file.Length : -1;
+        if (actualLength != expectedLength)
+        {
+            throw new VerifiedPayloadSizeMismatchException(file, expectedLength, actualLength);
+        }
+    }
+
     private static void ReportDetailedProgress(long downloaded, long total, string name, Action<DownloadProgress>? onProgress)
     {
         if (onProgress == null)

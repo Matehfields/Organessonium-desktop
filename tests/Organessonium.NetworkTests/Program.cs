@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using Organessonium.Models;
 using Organessonium.Services;
@@ -11,6 +12,11 @@ internal static class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
+        ("encryptedPayloadTamperAndTruncation", EncryptedPayloadTamperAndTruncationAsync),
+        ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
+        ("customKeyExportImportAndMismatch", CustomKeyExportImportAndMismatchAsync),
+        ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -66,6 +72,189 @@ internal static class Program
     {
         public static TestOutcome Pass() => new(true, "");
         public static TestOutcome Fail(string message) => new(false, message);
+    }
+
+    private static async Task<TestOutcome> EncryptedPayloadRoundTripAndChunksAsync()
+    {
+        var sourceDir = Directory.CreateTempSubdirectory("organessonium_crypto_test_");
+        try
+        {
+            var inputBytes = RandomNumberGenerator.GetBytes(280_000);
+            var input = new FileInfo(Path.Combine(sourceDir.FullName, "original.bin"));
+            await File.WriteAllBytesAsync(input.FullName, inputBytes);
+            var parts = await ArchiveSplitter.SplitAsync(input, maxPartBytes: 64 * 1024);
+            var service = CreateEncryptionService(out _);
+            var freshInstallService = CreateEncryptionService(out _);
+            var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+            using var staged = await service.StageFilesAsync(parts, "file-roundtrip", encryption, EncryptedPayloadRoles.Original);
+            if (staged.Files.Count < 2 || staged.Files.Any(part => !part.Name.StartsWith("chunk-", StringComparison.Ordinal) || !part.Name.EndsWith(".bin", StringComparison.Ordinal)))
+            {
+                return TestOutcome.Fail("as partes criptografadas não receberam nomes genéricos");
+            }
+
+            using var output = new MemoryStream();
+            byte[]? firstPayload = null;
+            foreach (var part in staged.Files.Select((file, index) => (file, index)))
+            {
+                var encrypted = await File.ReadAllBytesAsync(part.file.FullName);
+                if (part.index == 0)
+                {
+                    firstPayload = encrypted.ToArray();
+                }
+
+                var plaintext = freshInstallService.DecryptBytes(
+                    encrypted,
+                    new EncryptedPayloadContext("file-roundtrip", encryption, EncryptedPayloadRoles.Original, part.index));
+                await output.WriteAsync(plaintext);
+                CryptographicOperations.ZeroMemory(plaintext);
+                CryptographicOperations.ZeroMemory(encrypted);
+            }
+
+            var outputBytes = output.ToArray();
+            var matches = CryptographicOperations.FixedTimeEquals(inputBytes, outputBytes);
+            var hashesMatch = CryptographicOperations.FixedTimeEquals(
+                SHA256.HashData(inputBytes),
+                SHA256.HashData(outputBytes));
+            var nonceDiffers = firstPayload != null && staged.Files.Count > 1 &&
+                                !(await File.ReadAllBytesAsync(staged.Files[1].FullName)).AsSpan(6, 12).SequenceEqual(firstPayload.AsSpan(6, 12));
+            CryptographicOperations.ZeroMemory(firstPayload ?? []);
+            CryptographicOperations.ZeroMemory(outputBytes);
+            ArchiveSplitter.CleanupParts(parts, input);
+            return matches && hashesMatch && nonceDiffers
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("a reconstrução ou os nonces dos chunks não correspondeu ao esperado");
+        }
+        finally
+        {
+            try { sourceDir.Delete(true); } catch { }
+        }
+    }
+
+    private static Task<TestOutcome> EncryptedPayloadTamperAndTruncationAsync()
+    {
+        var service = CreateEncryptionService(out _);
+        var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+        var context = new EncryptedPayloadContext("file-tamper", encryption, EncryptedPayloadRoles.Original, 0);
+        var payload = service.EncryptBytes("conteúdo de teste"u8, context);
+        var tampered = payload.ToArray();
+        tampered[^1] ^= 0x01;
+        var tamperDetected = Throws<EncryptedPayloadAuthenticationException>(() => service.DecryptBytes(tampered, context));
+        var truncated = payload[..^1];
+        var truncationDetected = Throws<EncryptedPayloadFormatException>(() => service.DecryptBytes(truncated, context));
+        CryptographicOperations.ZeroMemory(payload);
+        CryptographicOperations.ZeroMemory(tampered);
+        CryptographicOperations.ZeroMemory(truncated);
+        return Task.FromResult(tamperDetected && truncationDetected
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("alteração ou truncamento não foi rejeitado"));
+    }
+
+    private static Task<TestOutcome> EncryptedPreviewAndVideoPayloadsAsync()
+    {
+        var service = CreateEncryptionService(out _);
+        var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+        var preview = RandomNumberGenerator.GetBytes(1_024);
+        var video = RandomNumberGenerator.GetBytes(4_096);
+        var previewPayload = service.EncryptBytes(preview, new EncryptedPayloadContext("file-preview", encryption, EncryptedPayloadRoles.Preview, 0));
+        var videoPayload = service.EncryptBytes(video, new EncryptedPayloadContext("file-preview", encryption, EncryptedPayloadRoles.Video480p, 0));
+        var previewRoundTrip = service.DecryptBytes(previewPayload, new EncryptedPayloadContext("file-preview", encryption, EncryptedPayloadRoles.Preview, 0));
+        var videoRoundTrip = service.DecryptBytes(videoPayload, new EncryptedPayloadContext("file-preview", encryption, EncryptedPayloadRoles.Video480p, 0));
+        var valid = CryptographicOperations.FixedTimeEquals(preview, previewRoundTrip) &&
+                    CryptographicOperations.FixedTimeEquals(video, videoRoundTrip);
+        CryptographicOperations.ZeroMemory(preview);
+        CryptographicOperations.ZeroMemory(video);
+        CryptographicOperations.ZeroMemory(previewPayload);
+        CryptographicOperations.ZeroMemory(videoPayload);
+        CryptographicOperations.ZeroMemory(previewRoundTrip);
+        CryptographicOperations.ZeroMemory(videoRoundTrip);
+        return Task.FromResult(valid ? TestOutcome.Pass() : TestOutcome.Fail("prévia ou vídeo 480p não voltou idêntico"));
+    }
+
+    private static async Task<TestOutcome> CustomKeyExportImportAndMismatchAsync()
+    {
+        var serviceA = CreateEncryptionService(out _);
+        serviceA.ConfigureCustomKey("senha de teste A");
+        var encryption = serviceA.CreateFileEncryption(EncryptionModes.Custom);
+        var context = new EncryptedPayloadContext("file-custom", encryption, EncryptedPayloadRoles.Original, 0);
+        var original = RandomNumberGenerator.GetBytes(4096);
+        var payload = serviceA.EncryptBytes(original, context);
+
+        var serviceB = CreateEncryptionService(out _);
+        serviceB.ConfigureCustomKey("senha de teste B");
+        var rejected = Throws<EncryptedPayloadAuthenticationException>(() => serviceB.DecryptBytes(payload, context));
+
+        var path = Path.Combine(Path.GetTempPath(), "organessonium-test-" + Guid.NewGuid().ToString("N") + ".organessonium-key");
+        try
+        {
+            await serviceA.ExportCustomKeyAsync(path);
+            var serviceImported = CreateEncryptionService(out _);
+            await serviceImported.ImportCustomKeyAsync(path);
+            var restored = serviceImported.DecryptBytes(payload, context);
+            var matches = CryptographicOperations.FixedTimeEquals(original, restored);
+            var replacementBlocked = Throws<InvalidOperationException>(() => serviceA.ConfigureCustomKey("senha diferente"));
+            CryptographicOperations.ZeroMemory(restored);
+            return rejected && matches && replacementBlocked
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("a chave personalizada não rejeitou a chave errada, falhou após a importação ou foi substituída sem aviso");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(original);
+            CryptographicOperations.ZeroMemory(payload);
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    private static async Task<TestOutcome> LegacyEntryHasNoEncryptionMetadataAsync()
+    {
+        var entry = AppEntry.File("legacy.txt", "thread", "2026-01-01T00:00:00Z", 1, "/");
+        entry.ChunkMessageIds = ["legacy-chunk-message"];
+        entry.ChunkCount = 1;
+        var payload = await new MetadataService().CreateWritePayloadAsync(entry);
+        try
+        {
+            return entry.Encryption == null && !payload.Content.Contains("\"encryption\"", StringComparison.Ordinal)
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("arquivo legado recebeu metadados de criptografia");
+        }
+        finally
+        {
+            try { payload.Attachment?.Delete(); } catch { }
+        }
+    }
+
+    private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)
+    {
+        store = new InMemoryEncryptionSecretStore();
+        return new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
+    }
+
+    private static bool Throws<TException>(Action action) where TException : Exception
+    {
+        try
+        {
+            action();
+            return false;
+        }
+        catch (TException)
+        {
+            return true;
+        }
+    }
+
+    private sealed class InMemoryEncryptionSecretStore : IEncryptionSecretStore
+    {
+        private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+
+        public string ReadEncryptionSecret(string key)
+        {
+            return _values.TryGetValue(key, out var value) ? value : "";
+        }
+
+        public void WriteEncryptionSecret(string key, string value)
+        {
+            _values[key] = value;
+        }
     }
 
     private static ProxySettings Manual(string host, int port, ProxyProtocol protocol, bool auth = false, string user = "", string pass = "")

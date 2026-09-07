@@ -67,6 +67,12 @@ public sealed class AppSettings
     [JsonPropertyName("searchWorkers")]
     public int SearchWorkers { get; set; } = 4;
 
+    [JsonPropertyName("encryptionMode")]
+    public string EncryptionMode { get; set; } = EncryptionModes.Standard;
+
+    [JsonPropertyName("customKeyAvailable")]
+    public bool CustomKeyAvailable { get; set; }
+
     [JsonPropertyName("proxy")]
     public ProxySettings Proxy { get; set; } = new();
 
@@ -101,6 +107,8 @@ public sealed class AppSettings
 MaxParallelUploads = MaxParallelUploads,
             MaxParallelDownloads = MaxParallelDownloads,
             SearchWorkers = SearchWorkers,
+            EncryptionMode = EncryptionMode,
+            CustomKeyAvailable = CustomKeyAvailable,
             Proxy = Proxy?.Clone() ?? new ProxySettings()
         };
     }

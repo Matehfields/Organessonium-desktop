@@ -6,17 +6,21 @@ public static class ArchiveSplitter
 {
     private const int SplitBytes = 10 * 1024 * 1024;
 
-    public static async Task<IReadOnlyList<FileInfo>> SplitAsync(FileInfo file, CancellationToken cancellationToken = default)
+    public static async Task<IReadOnlyList<FileInfo>> SplitAsync(
+        FileInfo file,
+        CancellationToken cancellationToken = default,
+        int? maxPartBytes = null)
     {
-        if (file.Length <= SplitBytes)
+        var partBytes = Math.Clamp(maxPartBytes ?? SplitBytes, 1024, SplitBytes);
+        if (file.Length <= partBytes)
         {
             return [file];
         }
 
         var tempDir = Directory.CreateTempSubdirectory("discord_split_");
         var parts = new List<FileInfo>();
-        await using var input = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, SplitBytes, true);
-        var buffer = new byte[SplitBytes];
+        await using var input = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, partBytes, true);
+        var buffer = new byte[partBytes];
         var partNumber = 1;
 
         while (true)

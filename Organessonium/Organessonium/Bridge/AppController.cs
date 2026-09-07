@@ -32,7 +32,7 @@ public sealed class AppController : IAsyncDisposable
     private const int SpreadsheetMaxColumns = 32;
     private const int SpreadsheetMaxSheets = 20;
     private const int PresentationMaxSlides = 80;
-    private const long MarkdownInlineImageLimit = 10L * 1024 * 1024;
+    private const long MarkdownInlineImageLimit = EncryptionService.MaximumPlaintextPayloadBytes;
     private readonly Window _owner;
     private readonly SettingsStore _store;
     private WebMessageBridge _bridge;
@@ -49,6 +49,7 @@ public sealed class AppController : IAsyncDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _transferOperations = new();
     private readonly SemaphoreSlim _registryLoadGate = new(1, 1);
     private readonly TransferManager _transferManager;
+    private readonly EncryptionService _encryption;
     private readonly PreviewFileServer _previewServer = new();
     private IReadOnlyList<AppEntry> _loadedApps = [];
     private DiscordSession? _session;
@@ -67,6 +68,7 @@ public sealed class AppController : IAsyncDisposable
         _onConnected = onConnected;
         _onThemeChanged = onThemeChanged ?? (_ => { });
         _transferManager = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
+        _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
     }
 
     public void SetSession(DiscordSession session)
@@ -175,6 +177,12 @@ public sealed class AppController : IAsyncDisposable
             case "uploadMarkdownImage": _ = RunAsync(() => UploadMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "uploadMarkdownImageData": _ = RunAsync(() => UploadMarkdownImageDataAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2), ArgString(args, 3))); return Task.CompletedTask;
             case "resolveMarkdownImage": _ = RunAsync(() => ResolveMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "resolveEncryptedMarkdownImage": _ = RunAsync(() => ResolveEncryptedMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2))); return Task.CompletedTask;
+            case "resolveEncryptedDriveMarkdownImage": _ = RunAsync(() => ResolveEncryptedDriveMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "configureCustomEncryption": return ConfigureCustomEncryptionAsync(ArgString(args, 0), ArgBool(args, 1, false));
+            case "setEncryptionMode": return SetEncryptionModeAsync(ArgString(args, 0));
+            case "exportCustomEncryptionKey": return ExportCustomEncryptionKeyAsync();
+            case "importCustomEncryptionKey": return ImportCustomEncryptionKeyAsync();
             case "saveSettings": SaveSettings(args); return Task.CompletedTask;
             case "testProxy": return TestProxyAsync(args);
             case "applyWindowTheme": _onThemeChanged(ArgString(args, 0, _store.Load().Theme)); return Task.CompletedTask;
@@ -569,7 +577,14 @@ public sealed class AppController : IAsyncDisposable
                             ? await downloader.DownloadMessageAttachmentBytesAsync(
                                 app.ThreadId,
                                 app.PreviewMessageId,
-                                cancellationToken: token)
+                                cancellationToken: token,
+                                encryption: app.Encryption == null
+                                    ? null
+                                    : new EncryptedPayloadContext(
+                                        app.FileId,
+                                        app.Encryption,
+                                        EncryptedPayloadRoles.Preview,
+                                        0))
                             : await downloader.DownloadMarkedPreviewBytesAsync(
                                 app.ThreadId,
                                 "PREVIEW|",
@@ -585,6 +600,11 @@ public sealed class AppController : IAsyncDisposable
                         }
                         else
                         {
+                            if (app.Encryption != null)
+                            {
+                                return;
+                            }
+
                             if (!ThumbnailCache.IsImage(app.Name) || app.SizeBytes > 10L * 1024 * 1024)
                             {
                                 return;
@@ -760,11 +780,17 @@ public sealed class AppController : IAsyncDisposable
             }
 
             var file = type == "markdown"
-                ? await Downloader().DownloadAndAssembleAsync(
-                    threadId,
-                    tempDir,
-                    _ => { },
-                    onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
+                ? entry != null
+                    ? await Downloader().DownloadAndAssembleAsync(
+                        entry,
+                        tempDir,
+                        _ => { },
+                        onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
+                    : await Downloader().DownloadAndAssembleAsync(
+                        threadId,
+                        tempDir,
+                        _ => { },
+                        onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
                 : await GetOrDownloadFullPreviewFileAsync(threadId, name, tempDir, "generic");
 
             switch (type)
@@ -982,6 +1008,11 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task<string?> GetOrCreateProgressiveVideoUrlAsync(AppEntry entry, DirectoryInfo tempDir)
     {
+        if (entry.Encryption != null)
+        {
+            return null;
+        }
+
         var existing = GetPreviewUrl(entry.ThreadId, "full");
         if (!string.IsNullOrWhiteSpace(existing))
         {
@@ -1060,7 +1091,15 @@ public sealed class AppController : IAsyncDisposable
                     threadId,
                     entry!.VideoPreviewMessageId,
                     tempDir,
-                    progress => ReportPreviewProgress(progress, "video480"))
+                    progress => ReportPreviewProgress(progress, "video480"),
+                    encryption: entry.Encryption == null
+                        ? null
+                        : new EncryptedPayloadContext(
+                            entry.FileId,
+                            entry.Encryption,
+                            EncryptedPayloadRoles.Video480p,
+                            0),
+                    outputName: "preview_480p_" + name)
             : await Downloader().DownloadMarkedPreviewFileAsync(
                 threadId,
                 "VIDEO_PREVIEW_480P|",
@@ -1734,9 +1773,15 @@ public sealed class AppController : IAsyncDisposable
         Func<long, Task>? onBytesUploaded = null)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
-        var parts = await ArchiveSplitter.SplitAsync(file, cancellationToken);
+        var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
+                                     existingTransferState?.UploadedChunks.Count > 0;
+        var parts = await ArchiveSplitter.SplitAsync(
+            file,
+            cancellationToken,
+            preserveLegacyTransfer ? null : EncryptionService.MaximumPlaintextPayloadBytes);
         var threadId = "";
         TransferState? transferState = existingTransferState;
+        EncryptedPayloadStaging? encryptedStaging = null;
         try
         {
             var parentFolderId = string.IsNullOrWhiteSpace(transferState?.TargetFolderId)
@@ -1752,6 +1797,8 @@ public sealed class AppController : IAsyncDisposable
                     parts.Count > 0 ? parts.Max(part => part.Length) : 0,
                     parts.Count,
                     cancellationToken);
+                transferState.FileId = Guid.NewGuid().ToString("N");
+                transferState.Encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
             }
             else
             {
@@ -1767,11 +1814,28 @@ public sealed class AppController : IAsyncDisposable
                 transferState.PendingChunks = Enumerable.Range(0, parts.Count)
                     .Except(transferState.UploadedChunks.Select(chunk => chunk.Index))
                     .ToList();
+                transferState.FileId = string.IsNullOrWhiteSpace(transferState.FileId)
+                    ? Guid.NewGuid().ToString("N")
+                    : transferState.FileId;
+                if (transferState.Encryption == null && transferState.UploadedChunks.Count == 0)
+                {
+                    transferState.Encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
+                }
             }
 
             transferState.FileName = name;
             await _transferManager.SaveAsync(transferState, cancellationToken);
             targetPath = PathRules.Normalize(string.IsNullOrWhiteSpace(transferState.TargetPath) ? targetPath : transferState.TargetPath);
+            if (transferState.Encryption != null)
+            {
+                encryptedStaging = await _encryption.StageFilesAsync(
+                    parts,
+                    transferState.FileId,
+                    transferState.Encryption,
+                    EncryptedPayloadRoles.Original,
+                    cancellationToken);
+            }
+            var uploadParts = encryptedStaging?.Files ?? parts;
 
             async Task ReportRateLimitWaitAsync(TimeSpan remaining)
             {
@@ -1795,15 +1859,15 @@ public sealed class AppController : IAsyncDisposable
             using var checkpointGate = new SemaphoreSlim(1, 1);
             var upload = await uploader.UploadResumableAsync(
                 name,
-                parts,
+                uploadParts,
                 transferState.ThreadId,
                 transferState.BatchId,
                 uploadedMap,
                 uploadedParts =>
                 {
-                    var partPercent = Percent(uploadedParts, parts.Count);
-                    var message = parts.Count > 1
-                        ? $"Parte {Math.Max(1, uploadedParts)}/{parts.Count}"
+                    var partPercent = Percent(uploadedParts, uploadParts.Count);
+                    var message = uploadParts.Count > 1
+                        ? $"Parte {Math.Max(1, uploadedParts)}/{uploadParts.Count}"
                         : "Enviando arquivo";
                     _ = ReportUploadItemProgressAsync(
                         opId,
@@ -1842,7 +1906,14 @@ public sealed class AppController : IAsyncDisposable
                 cancellationToken,
                 ReportRateLimitWaitAsync,
                 settings.UploadThreads,
-                uploadGate);
+                uploadGate,
+                transferState.Encryption == null
+                    ? null
+                    : new EncryptedPayloadContext(
+                        transferState.FileId,
+                        transferState.Encryption,
+                        EncryptedPayloadRoles.Original,
+                        0));
             threadId = upload.ThreadId;
 
             var previewIds = await TryUploadGeneratedPreviewAsync(
@@ -1858,10 +1929,19 @@ public sealed class AppController : IAsyncDisposable
                 ReportRateLimitWaitAsync,
                 cancellationToken,
                 transferState,
-                useBatchUi);
+                useBatchUi,
+                transferState.Encryption == null
+                    ? null
+                    : new EncryptedPayloadContext(
+                        transferState.FileId,
+                        transferState.Encryption,
+                        EncryptedPayloadRoles.Preview,
+                        0));
 
             var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
             var entry = AppEntry.File(name, threadId, now, file.Length, targetPath);
+            entry.FileId = transferState.FileId;
+            entry.Encryption = transferState.Encryption?.Clone();
             entry.ParentFolderId = parentFolderId;
             entry.BatchId = upload.BatchId;
             entry.ChunkCount = upload.ChunkCount;
@@ -1920,6 +2000,7 @@ public sealed class AppController : IAsyncDisposable
         }
         finally
         {
+            encryptedStaging?.Dispose();
             ArchiveSplitter.CleanupParts(parts, file);
         }
     }
@@ -1937,7 +2018,8 @@ public sealed class AppController : IAsyncDisposable
         Func<TimeSpan, Task> onRateLimitWait,
         CancellationToken cancellationToken,
         TransferState? transferState = null,
-        bool useBatchUi = false)
+        bool useBatchUi = false,
+        EncryptedPayloadContext? previewEncryption = null)
     {
         DirectoryInfo? tempDir = null;
         var previewMessageId = "";
@@ -1962,12 +2044,24 @@ public sealed class AppController : IAsyncDisposable
                 tempDir = Directory.CreateTempSubdirectory("organessonium_image_preview_");
                 var generated = new FileInfo(Path.Combine(tempDir.FullName, PreviewFileName(name, ".png")));
                 await File.WriteAllBytesAsync(generated.FullName, png, cancellationToken);
-                previewMessageId = await uploader.UploadPreviewFileToThreadAsync(
-                    threadId,
-                    "PREVIEW|" + StripExtension(name),
-                    generated,
-                    cancellationToken,
-                    onRateLimitWait: onRateLimitWait);
+                using (var encryptedPreview = previewEncryption == null
+                    ? null
+                    : await _encryption.StageFilesAsync(
+                        [generated],
+                        previewEncryption.FileId,
+                        previewEncryption.Encryption,
+                        EncryptedPayloadRoles.Preview,
+                        cancellationToken))
+                {
+                    previewMessageId = await uploader.UploadPreviewFileToThreadAsync(
+                        threadId,
+                        previewEncryption == null
+                            ? "PREVIEW|" + StripExtension(name)
+                            : EncryptedPayloadProtocol.Message(previewEncryption, 1),
+                        encryptedPreview?.Files[0] ?? generated,
+                        cancellationToken,
+                        onRateLimitWait: onRateLimitWait);
+                }
                 if (transferState != null)
                 {
                     transferState.ThumbnailMessageId = previewMessageId;
@@ -1995,7 +2089,8 @@ public sealed class AppController : IAsyncDisposable
                 throttle,
                 onRateLimitWait,
                 cancellationToken,
-                useBatchUi);
+                useBatchUi,
+                previewEncryption);
             if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
             {
                 transferState.ThumbnailMessageId = previewMessageId;
@@ -2041,7 +2136,10 @@ public sealed class AppController : IAsyncDisposable
                         throttle,
                         onRateLimitWait,
                         cancellationToken,
-                        useBatchUi);
+                        useBatchUi,
+                        previewEncryption == null
+                            ? null
+                            : previewEncryption with { Role = EncryptedPayloadRoles.Video480p });
                     videoPreviewChunkMessageIds = videoPreview.ChunkMessageIds;
                     videoPreviewMessageId = videoPreviewChunkMessageIds.FirstOrDefault() ?? "";
                     videoPreviewSizeBytes = videoPreview.SizeBytes;
@@ -2066,7 +2164,8 @@ public sealed class AppController : IAsyncDisposable
                             throttle,
                             onRateLimitWait,
                             cancellationToken,
-                            useBatchUi);
+                            useBatchUi,
+                            previewEncryption);
                         if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
                         {
                             transferState.ThumbnailMessageId = previewMessageId;
@@ -2116,17 +2215,34 @@ public sealed class AppController : IAsyncDisposable
         UiThrottle throttle,
         Func<TimeSpan, Task> onRateLimitWait,
         CancellationToken cancellationToken,
-        bool useBatchUi)
+        bool useBatchUi,
+        EncryptedPayloadContext? videoEncryption)
     {
-        var previewParts = await ArchiveSplitter.SplitAsync(generated, cancellationToken);
+        var previewParts = await ArchiveSplitter.SplitAsync(
+            generated,
+            cancellationToken,
+            videoEncryption == null ? null : EncryptionService.MaximumPlaintextPayloadBytes);
+        EncryptedPayloadStaging? encryptedPreview = null;
         try
         {
-            if (previewParts.Count == 1 && SamePath(previewParts[0], generated))
+            if (videoEncryption != null)
+            {
+                encryptedPreview = await _encryption.StageFilesAsync(
+                    previewParts,
+                    videoEncryption.FileId,
+                    videoEncryption.Encryption,
+                    EncryptedPayloadRoles.Video480p,
+                    cancellationToken);
+            }
+            var payloadParts = encryptedPreview?.Files ?? previewParts;
+            if (payloadParts.Count == 1)
             {
                 var messageId = await uploader.UploadPreviewFileToThreadAsync(
                     threadId,
-                    "VIDEO_PREVIEW_480P|" + StripExtension(originalName),
-                    generated,
+                    videoEncryption == null
+                        ? "VIDEO_PREVIEW_480P|" + StripExtension(originalName)
+                        : EncryptedPayloadProtocol.Message(videoEncryption, 1),
+                    payloadParts[0],
                     cancellationToken,
                     onRateLimitWait: onRateLimitWait);
                 return new VideoPreviewUploadResult(generated.Length, [messageId]);
@@ -2135,11 +2251,11 @@ public sealed class AppController : IAsyncDisposable
             var chunks = await uploader.UploadPreviewToThreadAsync(
                 threadId,
                 "video-480",
-                previewParts,
+                payloadParts,
                 uploadedParts =>
                 {
-                    var percent = Percent(uploadedParts, previewParts.Count);
-                    var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{previewParts.Count}";
+                    var percent = Percent(uploadedParts, payloadParts.Count);
+                    var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{payloadParts.Count}";
                     _ = ReportUploadItemProgressAsync(
                         opId,
                         fileIndex,
@@ -2151,11 +2267,13 @@ public sealed class AppController : IAsyncDisposable
                         useBatchUi);
                 },
                 cancellationToken,
-                onRateLimitWait: onRateLimitWait);
+                onRateLimitWait: onRateLimitWait,
+                encryptedPayload: videoEncryption);
             return new VideoPreviewUploadResult(generated.Length, chunks);
         }
         finally
         {
+            encryptedPreview?.Dispose();
             ArchiveSplitter.CleanupParts(previewParts, generated);
         }
     }
@@ -2172,7 +2290,8 @@ public sealed class AppController : IAsyncDisposable
         UiThrottle throttle,
         Func<TimeSpan, Task> onRateLimitWait,
         CancellationToken cancellationToken,
-        bool useBatchUi)
+        bool useBatchUi,
+        EncryptedPayloadContext? previewEncryption)
     {
         try
         {
@@ -2196,10 +2315,20 @@ public sealed class AppController : IAsyncDisposable
             }
 
             ThumbnailCache.Store(threadId, await File.ReadAllBytesAsync(thumbnail.FullName, cancellationToken));
+            using var encryptedThumbnail = previewEncryption == null
+                ? null
+                : await _encryption.StageFilesAsync(
+                    [thumbnail],
+                    previewEncryption.FileId,
+                    previewEncryption.Encryption,
+                    EncryptedPayloadRoles.Preview,
+                    cancellationToken);
             var messageId = await uploader.UploadPreviewFileToThreadAsync(
                 threadId,
-                "PREVIEW|" + StripExtension(originalName),
-                thumbnail,
+                previewEncryption == null
+                    ? "PREVIEW|" + StripExtension(originalName)
+                    : EncryptedPayloadProtocol.Message(previewEncryption, 1),
+                encryptedThumbnail?.Files[0] ?? thumbnail,
                 cancellationToken,
                 onRateLimitWait: onRateLimitWait);
             await ReportUploadItemProgressAsync(
@@ -2225,7 +2354,7 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task StartDownloadAsync(string threadId, string name)
+    private async Task StartDownloadAsync(string threadId, string name, DirectoryInfo? selectedDestination = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || threadId.StartsWith("folder_", StringComparison.Ordinal))
         {
@@ -2233,7 +2362,7 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
-        var dest = await ResolveDownloadDirectoryAsync("Salvar em...");
+        var dest = selectedDestination ?? await ResolveDownloadDirectoryAsync("Salvar em...");
         if (dest == null)
         {
             return;
@@ -2294,6 +2423,18 @@ public sealed class AppController : IAsyncDisposable
 
                 await OpsUpdateAsync(opId, "cancelled", "Cancelado");
             }
+            catch (VerifiedPayloadSizeMismatchException mismatch)
+            {
+                if (transferState != null)
+                {
+                    await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, CancellationToken.None);
+                }
+
+                var opened = await OfferOpenVerifiedSizeMismatchAsync(mismatch);
+                var completedBytes = Interlocked.Read(ref totalDownloadBytes);
+                await OpsTransferMetricsAsync(opId, "download", 1, 1, completedBytes, completedBytes);
+                await OpsUpdateAsync(opId, "done", opened ? "Concluído com aviso; arquivo aberto." : "Concluído com aviso.");
+            }
             catch (Exception ex)
             {
                 if (transferState != null)
@@ -2302,6 +2443,11 @@ public sealed class AppController : IAsyncDisposable
                 }
 
                 await OpsUpdateAsync(opId, "error", ex.Message);
+                if (ex is EncryptedPayloadIntegrityException integrity &&
+                    await OfferRetryEncryptedDownloadAsync(integrity))
+                {
+                    await StartDownloadAsync(threadId, name, dest);
+                }
             }
             finally
             {
@@ -2334,6 +2480,7 @@ public sealed class AppController : IAsyncDisposable
             await OpsAddAsync(opId, "download", $"{folderName} ({toDownload.Count} arquivo(s))");
             var cancellationToken = BeginTransferOperation(opId);
             var done = 0;
+            var failed = 0;
             var totalBytes = toDownload.Sum(app => Math.Max(0, app.SizeBytes));
             long downloadedBytes = 0;
             await OpsTransferMetricsAsync(opId, "download", 0, toDownload.Count, 0, totalBytes);
@@ -2394,6 +2541,19 @@ public sealed class AppController : IAsyncDisposable
 
                         throw;
                     }
+                    catch (VerifiedPayloadSizeMismatchException mismatch)
+                    {
+                        if (transferState != null)
+                        {
+                            await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, CancellationToken.None);
+                        }
+
+                        await OfferOpenVerifiedSizeMismatchAsync(mismatch);
+                        var measuredTotal = Math.Max(Math.Max(0, app.SizeBytes), Math.Max(Interlocked.Read(ref currentFileTotal), Interlocked.Read(ref currentFileBytes)));
+                        Interlocked.Exchange(ref downloadedBytes, completedBeforeFile + measuredTotal);
+                        done++;
+                        await OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, Interlocked.Read(ref downloadedBytes), totalBytes);
+                    }
                     catch (Exception ex)
                     {
                         if (transferState != null)
@@ -2401,11 +2561,24 @@ public sealed class AppController : IAsyncDisposable
                             await _transferManager.FailAsync(transferState, ex, CancellationToken.None);
                         }
 
+                        if (ex is EncryptedPayloadIntegrityException integrity &&
+                            await OfferRetryEncryptedDownloadAsync(integrity))
+                        {
+                            i--;
+                            continue;
+                        }
+
+                        failed++;
                         Debug.WriteLine("[FolderDL] " + ex.Message);
                     }
                 }
 
-                await OpsUpdateAsync(opId, "done", $"{done}/{toDownload.Count} baixados");
+                await OpsUpdateAsync(
+                    opId,
+                    failed == 0 ? "done" : "error",
+                    failed == 0
+                        ? $"{done}/{toDownload.Count} baixados"
+                        : $"{done}/{toDownload.Count} baixados; {failed} falharam.");
             }
             catch (OperationCanceledException)
             {
@@ -2743,25 +2916,52 @@ public sealed class AppController : IAsyncDisposable
             await File.WriteAllTextAsync(file.FullName, markdown ?? "", Encoding.UTF8);
 
             var settings = _store.Load();
-            var parts = await ArchiveSplitter.SplitAsync(file);
+            var encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
+            var fileId = Guid.NewGuid().ToString("N");
+            var parts = await ArchiveSplitter.SplitAsync(
+                file,
+                cancellationToken: default,
+                maxPartBytes: EncryptionService.MaximumPlaintextPayloadBytes);
             try
             {
+                using var encryptedParts = await _encryption.StageFilesAsync(
+                    parts,
+                    fileId,
+                    encryption,
+                    EncryptedPayloadRoles.Original);
+                var encryptedPayload = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.Original, 0);
                 var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
                 var canReuseThread = !string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal);
                 ForumUploadResult uploadResult;
                 try
                 {
                     uploadResult = canReuseThread
-                        ? await uploader.UploadToThreadAsync(threadId, safeName, parts)
-                        : await uploader.UploadAsync(safeName, parts);
+                        ? await uploader.UploadToThreadAsync(threadId, safeName, encryptedParts.Files, encryptedPayload: encryptedPayload)
+                        : await uploader.UploadResumableAsync(
+                            safeName,
+                            encryptedParts.Files,
+                            "",
+                            "",
+                            new Dictionary<int, string>(),
+                            cancellationToken: default,
+                            encryptedPayload: encryptedPayload);
                 }
                 catch (DiscordApiException ex) when (canReuseThread && ((int)ex.StatusCode == 403 || (int)ex.StatusCode == 404))
                 {
-                    uploadResult = await uploader.UploadAsync(safeName, parts);
+                    uploadResult = await uploader.UploadResumableAsync(
+                        safeName,
+                        encryptedParts.Files,
+                        "",
+                        "",
+                        new Dictionary<int, string>(),
+                        cancellationToken: default,
+                        encryptedPayload: encryptedPayload);
                 }
                 var newThreadId = uploadResult.ThreadId;
                 var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
                 var updated = AppEntry.File(safeName, newThreadId, now, file.Length, path);
+                updated.FileId = fileId;
+                updated.Encryption = encryption;
                 updated.BatchId = uploadResult.BatchId;
                 updated.ChunkCount = uploadResult.ChunkCount;
                 updated.ChunkMessageIds = uploadResult.ChunkMessageIds.ToList();
@@ -2932,11 +3132,23 @@ var registry = Registry();
     {
         await _bridge.CallAsync("_onStatus", "Enviando imagem do Markdown...", true);
         var api = RequireApi();
+        var settings = _store.Load();
+        var encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
+        var fileId = Guid.NewGuid().ToString("N");
+        var context = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.MarkdownImage, 0);
         DiscordMessageDto message;
         try
         {
             await api.UnarchiveThreadAsync(threadId);
-            message = await api.SendFileMessageAsync(threadId, "\U0001F5BC Imagem do Markdown: " + CleanUploadName(file.Name), file);
+            using var staged = await _encryption.StageFilesAsync(
+                [file],
+                fileId,
+                encryption,
+                EncryptedPayloadRoles.MarkdownImage);
+            message = await api.SendFileMessageAsync(
+                threadId,
+                EncryptedPayloadProtocol.Message(context, 1),
+                staged.Files[0]);
         }
         finally
         {
@@ -2951,12 +3163,13 @@ var registry = Registry();
         }
 
         var attachment = message.Attachments.FirstOrDefault();
-        if (attachment == null || string.IsNullOrWhiteSpace(attachment.Url))
+        if (attachment == null)
         {
-            throw new InvalidOperationException("Discord não retornou URL da imagem.");
+            throw new InvalidOperationException("Discord não retornou o anexo da imagem.");
         }
 
-        await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = attachment.Url, name = attachment.FileName });
+        var reference = new MarkdownEncryptedImageReference(fileId, encryption, message.Id, GuessFileMime(file.Name));
+        await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = reference.ToUrl(), name = file.Name });
     }
 
     private async Task ResolveMarkdownImageAsync(string tabId, string threadId)
@@ -2974,14 +3187,20 @@ var registry = Registry();
 
         try
         {
+            var all = await Registry().LoadAsync();
+            var image = all.FirstOrDefault(app => app.ThreadId == threadId);
+            if (image?.Encryption != null)
+            {
+                await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = "organessonium-drive-image://" + threadId, name = image.Name });
+                return;
+            }
+
             var url = await Downloader().GetFirstAttachmentUrlAsync(threadId);
             if (string.IsNullOrWhiteSpace(url))
             {
                 throw new InvalidOperationException("Nenhum anexo encontrado para esta imagem.");
             }
 
-            var all = await Registry().LoadAsync();
-            var image = all.FirstOrDefault(app => app.ThreadId == threadId);
             await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url, name = image?.Name ?? "imagem" });
         }
         catch (Exception ex)
@@ -2998,6 +3217,142 @@ var registry = Registry();
             mainWindow.SetBridgeFullscreen(enabled);
         }
     }
+
+    private async Task ResolveEncryptedMarkdownImageAsync(string tabId, string threadId, string value)
+    {
+        if (!MarkdownEncryptedImageReference.TryParse(value, out var reference))
+        {
+            throw new InvalidOperationException("A referência da imagem criptografada é inválida.");
+        }
+
+        var bytes = await Downloader().DownloadMessageAttachmentBytesAsync(
+            threadId,
+            reference.MessageId,
+            encryption: new EncryptedPayloadContext(
+                reference.FileId,
+                reference.Encryption,
+                EncryptedPayloadRoles.MarkdownImage,
+                0));
+        if (bytes is not { Length: > 0 })
+        {
+            throw new InvalidOperationException("Não foi possível abrir a imagem criptografada.");
+        }
+
+        var url = _previewServer.RegisterBytes(bytes, reference.MimeType);
+        await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, value, url);
+    }
+
+    private async Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageThreadId)
+    {
+        var image = (_loadedApps.Count > 0 ? _loadedApps : await Registry().LoadAsync())
+            .FirstOrDefault(app => app.ThreadId == imageThreadId && app.Encryption != null);
+        if (image == null)
+        {
+            throw new InvalidOperationException("Não foi possível localizar a imagem criptografada.");
+        }
+
+        var tempDir = Directory.CreateTempSubdirectory("organessonium_markdown_image_");
+        _previewDirs["markdown-image-" + NewId()] = tempDir;
+        var file = await Downloader().DownloadAndAssembleAsync(image, tempDir, _ => { });
+        var url = _previewServer.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
+        await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, "organessonium-drive-image://" + imageThreadId, url);
+    }
+
+    private async Task ConfigureCustomEncryptionAsync(string passphrase, bool acknowledged)
+    {
+        if (!acknowledged)
+        {
+            throw new InvalidOperationException("Confirme que entende a recuperação necessária da chave personalizada.");
+        }
+
+        _encryption.ConfigureCustomKey(passphrase);
+        var settings = _store.Load();
+        settings.EncryptionMode = EncryptionModes.Custom;
+        settings.CustomKeyAvailable = _encryption.HasCustomKey;
+        _store.Save(settings);
+        await _bridge.SetSettingsAsync(settings);
+        await _bridge.CallAsync("_onEncryptionSettingsChanged", settings.EncryptionMode, settings.CustomKeyAvailable);
+    }
+
+    private async Task SetEncryptionModeAsync(string mode)
+    {
+        var normalized = EncryptionModes.Normalize(mode);
+        if (normalized == EncryptionModes.Custom && !_encryption.HasCustomKey)
+        {
+            throw new InvalidOperationException("Configure ou importe uma chave personalizada antes de ativá-la.");
+        }
+
+        var settings = _store.Load();
+        settings.EncryptionMode = normalized;
+        settings.CustomKeyAvailable = _encryption.HasCustomKey;
+        _store.Save(settings);
+        await _bridge.SetSettingsAsync(settings);
+        await _bridge.CallAsync("_onEncryptionSettingsChanged", settings.EncryptionMode, settings.CustomKeyAvailable);
+    }
+
+    private async Task ExportCustomEncryptionKeyAsync()
+    {
+        if (!_encryption.HasCustomKey)
+        {
+            throw new InvalidOperationException("Nenhuma chave personalizada está configurada.");
+        }
+
+        string? selected = null;
+        await _owner.Dispatcher.InvokeAsync(() =>
+        {
+            var dialog = new SaveFileDialog
+            {
+                Title = "Exportar chave de recuperação",
+                Filter = "Chave de recuperação do Organessônium|*.organessonium-key",
+                DefaultExt = ".organessonium-key",
+                AddExtension = true,
+                FileName = "organessonium-recovery.organessonium-key"
+            };
+            if (dialog.ShowDialog(_owner) == true)
+            {
+                selected = dialog.FileName;
+            }
+        });
+
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            return;
+        }
+
+        await _encryption.ExportCustomKeyAsync(selected);
+        await _bridge.CallAsync("_onEncryptionKeyExported");
+    }
+
+    private async Task ImportCustomEncryptionKeyAsync()
+    {
+        string? selected = null;
+        await _owner.Dispatcher.InvokeAsync(() =>
+        {
+            var dialog = new OpenFileDialog
+            {
+                Title = "Importar chave de recuperação",
+                Filter = "Chave de recuperação do Organessônium|*.organessonium-key"
+            };
+            if (dialog.ShowDialog(_owner) == true)
+            {
+                selected = dialog.FileName;
+            }
+        });
+
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            return;
+        }
+
+        await _encryption.ImportCustomKeyAsync(selected);
+        var settings = _store.Load();
+        settings.EncryptionMode = EncryptionModes.Custom;
+        settings.CustomKeyAvailable = _encryption.HasCustomKey;
+        _store.Save(settings);
+        await _bridge.SetSettingsAsync(settings);
+        await _bridge.CallAsync("_onEncryptionSettingsChanged", settings.EncryptionMode, settings.CustomKeyAvailable);
+    }
+
     private void SaveSettings(JsonElement[] args)
     {
         var settings = _store.Load();
@@ -3123,7 +3478,7 @@ var registry = Registry();
 
     private ForumDownloader Downloader()
     {
-        return new ForumDownloader(RequireApi(), _store.Load());
+        return new ForumDownloader(RequireApi(), _store.Load(), _encryption);
     }
 
     private DiscordApiClient RequireApi()
@@ -3352,6 +3707,13 @@ var registry = Registry();
                     CancellationToken.None);
                 await OpsUpdateAsync(opId, "cancelled", "Cancelado");
             }
+            catch (VerifiedPayloadSizeMismatchException mismatch)
+            {
+                await _transferManager.CompleteAsync(state, settings.KeepTransferHistory, CancellationToken.None);
+                await OfferOpenVerifiedSizeMismatchAsync(mismatch);
+                resumed++;
+                await OpsUpdateAsync(opId, "done", "Concluído com aviso.");
+            }
             catch (Exception ex)
             {
                 AppLogger.Error("Transfer.Resume", ex, state.TransferId);
@@ -3366,6 +3728,167 @@ var registry = Registry();
 
         await LoadAppsAsync();
         await _bridge.CallAsync("_onStatus", $"{resumed}/{states.Count} transferência(s) retomada(s).", false);
+    }
+
+    private async Task<bool> OfferRetryEncryptedDownloadAsync(EncryptedPayloadIntegrityException integrity)
+    {
+        var shouldRetry = false;
+        await _owner.Dispatcher.InvokeAsync(() =>
+        {
+            var dialog = new Window
+            {
+                Owner = _owner,
+                Title = "Organessônium",
+                Width = 500,
+                SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize,
+                ShowInTaskbar = false
+            };
+
+            var panel = new System.Windows.Controls.StackPanel
+            {
+                Margin = new Thickness(24),
+                Width = 452
+            };
+            panel.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = integrity.EncryptionMode == EncryptionModes.Custom
+                    ? "Não foi possível autenticar este arquivo. Verifique se a chave de criptografia correta está configurada."
+                    : "Não foi possível verificar a integridade deste arquivo.",
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 14
+            });
+            panel.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = "O download foi tentado três vezes com dados novos. Nenhum conteúdo foi aberto.",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 0),
+                Opacity = 0.72
+            });
+
+            var buttons = new System.Windows.Controls.StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 22, 0, 0)
+            };
+            var closeButton = new System.Windows.Controls.Button
+            {
+                Content = "Fechar",
+                MinWidth = 88,
+                IsCancel = true
+            };
+            closeButton.Click += (_, _) => dialog.DialogResult = false;
+            var retryButton = new System.Windows.Controls.Button
+            {
+                Content = "Tentar novamente",
+                MinWidth = 136,
+                Margin = new Thickness(8, 0, 0, 0),
+                IsDefault = true
+            };
+            retryButton.Click += (_, _) =>
+            {
+                shouldRetry = true;
+                dialog.DialogResult = true;
+            };
+            buttons.Children.Add(closeButton);
+            buttons.Children.Add(retryButton);
+            panel.Children.Add(buttons);
+            dialog.Content = panel;
+            dialog.ShowDialog();
+        });
+        return shouldRetry;
+    }
+
+    private async Task<bool> OfferOpenVerifiedSizeMismatchAsync(VerifiedPayloadSizeMismatchException mismatch)
+    {
+        var shouldOpen = false;
+        await _owner.Dispatcher.InvokeAsync(() =>
+        {
+            mismatch.RecoveredFile.Refresh();
+            if (!mismatch.RecoveredFile.Exists)
+            {
+                return;
+            }
+
+            var dialog = new Window
+            {
+                Owner = _owner,
+                Title = "Organessônium",
+                Width = 500,
+                SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                ResizeMode = ResizeMode.NoResize,
+                ShowInTaskbar = false
+            };
+
+            var panel = new System.Windows.Controls.StackPanel
+            {
+                Margin = new Thickness(24),
+                Width = 452
+            };
+            panel.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = "A integridade criptográfica foi validada, mas os metadados do arquivo não correspondem ao conteúdo recuperado.",
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 14
+            });
+            panel.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = $"Esperado: {mismatch.ExpectedLength:N0} bytes\nRecuperado: {mismatch.ActualLength:N0} bytes",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 0),
+                Opacity = 0.72
+            });
+
+            var buttons = new System.Windows.Controls.StackPanel
+            {
+                Orientation = System.Windows.Controls.Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 22, 0, 0)
+            };
+            var closeButton = new System.Windows.Controls.Button
+            {
+                Content = "Fechar",
+                MinWidth = 88,
+                IsCancel = true
+            };
+            closeButton.Click += (_, _) => dialog.DialogResult = false;
+            var openButton = new System.Windows.Controls.Button
+            {
+                Content = "Abrir mesmo assim",
+                MinWidth = 148,
+                Margin = new Thickness(8, 0, 0, 0),
+                IsDefault = true
+            };
+            openButton.Click += (_, _) =>
+            {
+                shouldOpen = true;
+                dialog.DialogResult = true;
+            };
+            buttons.Children.Add(closeButton);
+            buttons.Children.Add(openButton);
+            panel.Children.Add(buttons);
+            dialog.Content = panel;
+            dialog.ShowDialog();
+        });
+
+        if (!shouldOpen)
+        {
+            return false;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(mismatch.RecoveredFile.FullName) { UseShellExecute = true });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Download.OpenVerifiedSizeMismatch", ex, mismatch.RecoveredFile.FullName);
+            return false;
+        }
     }
 
     private async Task ReportUploadItemProgressAsync(
