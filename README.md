@@ -130,7 +130,7 @@ Para payloads criptografados, cada tentativa baixa o ciphertext para um arquivo 
 
 Uma falha de autenticação nunca entrega plaintext. Em modo personalizado, a interface informa que a chave configurada pode estar incorreta. Quando a autenticação passa, mas apenas o tamanho do metadata diverge, o app preserva o arquivo validado e oferece `Abrir mesmo assim` em um diálogo nativo.
 
-Entradas legadas sem `encryption` seguem exatamente o caminho anterior de download e continuam acessíveis. Previews descriptografadas podem usar o cache de previews já existente; ciphertext e plaintext temporários não são reutilizados entre tentativas. A reprodução progressiva existente fica restrita a vídeos legados, pois payloads criptografados precisam ser autenticados antes de expor bytes ao player.
+Entradas legadas sem `encryption` seguem exatamente o caminho anterior de download e continuam acessíveis. O cache de previews armazena somente plaintext: se encontrar um arquivo iniciado por `ORGAESGC`, o app o invalida e refaz o download descriptografado. Ciphertext e plaintext temporários não são reutilizados entre tentativas. A reprodução progressiva existente fica restrita a vídeos legados, pois payloads criptografados precisam ser autenticados antes de expor bytes ao player.
 
 ## Persistência local
 

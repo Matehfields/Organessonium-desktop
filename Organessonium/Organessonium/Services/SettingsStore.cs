@@ -282,7 +282,18 @@ public sealed class SettingsStore : IEncryptionSecretStore
         lock (_lock)
         {
             var file = PreviewCacheFile(threadId, slot, name, false);
-            return file is { Exists: true, Length: > 0 } ? file : null;
+            if (file is not { Exists: true, Length: > 0 })
+            {
+                return null;
+            }
+
+            if (IsEncryptedPreviewCache(file))
+            {
+                TryDelete(file);
+                return null;
+            }
+
+            return file;
         }
     }
 
@@ -862,6 +873,21 @@ public sealed class SettingsStore : IEncryptionSecretStore
         catch
         {
             // Cache cleanup should never block the app.
+        }
+    }
+
+    private static bool IsEncryptedPreviewCache(FileInfo file)
+    {
+        try
+        {
+            using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var header = new byte[8];
+            return stream.Read(header, 0, header.Length) == header.Length &&
+                   EncryptionService.LooksLikeEncryptedEnvelope(header);
+        }
+        catch
+        {
+            return false;
         }
     }
 

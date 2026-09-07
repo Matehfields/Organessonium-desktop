@@ -55,6 +55,12 @@ public static class ThumbnailCache
         try
         {
             var bytes = File.ReadAllBytes(file.FullName);
+            if (EncryptionService.LooksLikeEncryptedEnvelope(bytes))
+            {
+                TryDelete(file);
+                return null;
+            }
+
             var dataUrl = "data:" + DetectImageMime(bytes) + ";base64," + Convert.ToBase64String(bytes);
             Memory[threadId] = dataUrl;
             return dataUrl;

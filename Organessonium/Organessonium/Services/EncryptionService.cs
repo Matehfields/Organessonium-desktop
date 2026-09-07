@@ -26,6 +26,12 @@ public sealed class EncryptionService
 
     public bool HasCustomKey => _customKeyProvider.HasStoredKey;
 
+    public static bool LooksLikeEncryptedEnvelope(ReadOnlySpan<byte> payload)
+    {
+        return payload.Length >= EnvelopeMagic.Length &&
+               payload[..EnvelopeMagic.Length].SequenceEqual(EnvelopeMagic);
+    }
+
     public EncryptionMetadata CreateFileEncryption(string mode)
     {
         return new EncryptionMetadata
@@ -195,8 +201,7 @@ public sealed class EncryptionService
 
     public byte[] DecryptBytes(ReadOnlySpan<byte> payload, EncryptedPayloadContext context)
     {
-        if (payload.Length < EnvelopeOverheadBytes ||
-            !payload[..EnvelopeMagic.Length].SequenceEqual(EnvelopeMagic))
+        if (payload.Length < EnvelopeOverheadBytes || !LooksLikeEncryptedEnvelope(payload))
         {
             throw new EncryptedPayloadFormatException("O payload criptografado não possui um envelope válido.");
         }
