@@ -1901,7 +1901,7 @@ window._opsAdd = (id, type, name) => {
             <div class="op-name">${esc(truncate(name,34))}</div>
             <div class="op-msg" id="op-msg-${id}">${esc(t('waiting'))}</div>
             <div class="op-eta hidden" id="op-eta-${id}"></div>
-            <div class="op-progress"><div class="op-progress-bar" id="op-progress-${id}" style="width:0%"></div></div>
+            <div class="op-progress-line"><div class="op-progress"><div class="op-progress-bar" id="op-progress-${id}" style="width:0%"></div></div><span class="op-percent" id="op-percent-${id}">0%</span></div>
         </div>`;
     opsList.appendChild(item);
     opsList.scrollTop = opsList.scrollHeight;
@@ -1926,13 +1926,14 @@ window._opsUploadBatch = (id, names) => {
             <div class="op-file-name" title="${esc(name)}">${esc(name)}</div>
             <div class="op-file-detail" id="op-file-detail-${id}-${index}">${esc(t('queuedUpload'))}</div>
         </div>
+        <span class="op-file-percent" id="op-file-percent-${id}-${index}">0%</span>
         <span class="op-file-progress queued" id="op-file-progress-${id}-${index}" style="--progress:0" aria-label="0%"></span>
     </div>`).join('');
     item.innerHTML = `<div class="op-batch-summary">
             <span id="op-msg-${id}">${esc(t('startingUploads'))}</span>
             <button type="button" class="op-batch-cancel">${esc(t('cancelUpload'))}</button>
         </div>
-        <div class="op-batch-track"><span id="op-progress-${id}" style="width:0%"></span></div>
+        <div class="op-batch-track-line"><div class="op-batch-track"><span id="op-progress-${id}" style="width:0%"></span></div><span class="op-percent" id="op-percent-${id}">0%</span></div>
         <div class="op-file-list">${rows}</div>`;
     item.querySelector('.op-batch-cancel').addEventListener('click', e => {
         e.stopPropagation();
@@ -1952,10 +1953,18 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     if (detail && message) detail.textContent = message;
     const indicator = $('op-file-progress-' + id + '-' + fileIndex);
     if (!indicator) return;
-    const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
-    if (Number(percent) >= 0) {
+    const incomingPercent = Number(percent);
+    const previousPercent = Math.max(0, Number(row.dataset.progress) || 0);
+    const hasProgress = Number.isFinite(incomingPercent) && incomingPercent >= 0;
+    const safePercent = hasProgress
+        ? Math.max(previousPercent, Math.min(100, incomingPercent))
+        : previousPercent;
+    if (hasProgress) {
+        row.dataset.progress = String(safePercent);
         indicator.style.setProperty('--progress', safePercent);
         indicator.setAttribute('aria-label', safePercent + '%');
+        const percentEl = $('op-file-percent-' + id + '-' + fileIndex);
+        if (percentEl) percentEl.textContent = safePercent + '%';
     }
     indicator.className = 'op-file-progress ' + normalizedStatus;
     if (normalizedStatus === 'done') indicator.innerHTML = icon('check',15);
@@ -1963,6 +1972,7 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     else if (normalizedStatus === 'error') indicator.innerHTML = icon('error',15);
     else if (normalizedStatus === 'cancelled') indicator.innerHTML = icon('block',15);
     else indicator.innerHTML = '';
+    refreshBatchProgress(id);
 };
 
 window._opsUpdate = (id, status, msg) => {
@@ -1991,6 +2001,12 @@ window._opsUpdate = (id, status, msg) => {
                     window._opsUploadFileProgress(id, Number(row.id.split('-').pop()), 'error', -1, msg);
                 }
             });
+        } else if (status === 'waiting') {
+            item.querySelectorAll('.op-file-row').forEach(row => {
+                if (!['done','error','cancelled'].includes(row.dataset.fileStatus)) {
+                    window._opsUploadFileProgress(id, Number(row.id.split('-').pop()), 'waiting', -1, msg);
+                }
+            });
         }
         refreshOpsTitle();
         return;
@@ -2004,6 +2020,8 @@ window._opsUpdate = (id, status, msg) => {
     } else if (status==='cancelled') {
         if (iconEl) { iconEl.className='op-icon error'; iconEl.innerHTML=icon('block',17); }
         setTimeout(()=>{ transferRateStates.delete(id); item.remove(); if(!opsList.children.length) opsPanel.classList.add('hidden'); refreshOpsTitle(); },3500);
+    } else if (status==='waiting' && iconEl) {
+        iconEl.className='op-icon waiting'; iconEl.innerHTML=icon('schedule',17);
     } else if (status==='error' && iconEl) {
         iconEl.className='op-icon error'; iconEl.innerHTML=icon('error',17);
     }
@@ -2022,17 +2040,18 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     const total = Math.max(0, Number(totalBytes) || 0);
     let state = transferRateStates.get(id);
     if (!state) {
-        state = { lastBytes:reportedBytes, highWaterBytes:reportedBytes, lastTime:now, speed:0 };
+        state = { highWaterBytes:reportedBytes, samples:[[now, reportedBytes]], speed:0 };
         transferRateStates.set(id, state);
-    } else if (reportedBytes >= state.highWaterBytes) {
-        state.highWaterBytes = reportedBytes;
-        const elapsed = now - state.lastTime;
-        if (elapsed >= 180) {
-            const instant = (reportedBytes - state.lastBytes) / (elapsed / 1000);
-            state.speed = state.speed > 0 ? state.speed * .62 + instant * .38 : instant;
-            state.lastBytes = reportedBytes;
-            state.lastTime = now;
-        }
+    } else {
+        state.highWaterBytes = Math.max(state.highWaterBytes, reportedBytes);
+        state.samples.push([now, state.highWaterBytes]);
+        const cutoff = now - 60000;
+        while (state.samples.length > 1 && state.samples[1][0] <= cutoff) state.samples.shift();
+        const baseline = state.samples[0];
+        const elapsed = now - baseline[0];
+        state.speed = elapsed >= 1000
+            ? Math.max(0, state.highWaterBytes - baseline[1]) / (elapsed / 1000)
+            : 0;
     }
     const bytes = state.highWaterBytes;
     const completed = Math.max(Number(item.dataset.metricCompleted) || 0, Number(completedItems) || 0);
@@ -2066,8 +2085,23 @@ window._onInterruptedTransfers = count => {
 function setOpProgress(id, percent) {
     const bar = $('op-progress-'+id);
     if (!bar) return;
-    const safe = Math.max(0, Math.min(100, Number(percent) || 0));
+    const item = $('op-' + id);
+    const incoming = Math.max(0, Math.min(100, Number(percent) || 0));
+    const current = Math.max(0, Number(item?.dataset.progress) || 0);
+    const safe = item?.classList.contains('op-batch') ? Math.max(current, incoming) : incoming;
+    if (item) item.dataset.progress = String(safe);
     bar.style.width = safe + '%';
+    const percentEl = $('op-percent-' + id);
+    if (percentEl) percentEl.textContent = safe + '%';
+}
+
+function refreshBatchProgress(id) {
+    const item = $('op-' + id);
+    if (!item || !item.classList.contains('op-batch')) return;
+    const rows = Array.from(item.querySelectorAll('.op-file-row'));
+    if (!rows.length) return;
+    const total = rows.reduce((sum, row) => sum + Math.max(0, Number(row.dataset.progress) || 0), 0);
+    setOpProgress(id, total / rows.length);
 }
 
 function formatTransferRate(bytesPerSecond) {

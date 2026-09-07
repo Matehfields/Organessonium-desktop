@@ -156,6 +156,178 @@ public sealed class ForumUploader
         return new ForumUploadResult(threadId, batchId, parts.Count, chunkMessages);
     }
 
+    public async Task<ForumUploadResult> UploadResumableGeneratedAsync(
+        string archiveFileName,
+        int totalParts,
+        Func<int, Task<PreparedUploadPart>> preparePart,
+        string existingThreadId,
+        string existingBatchId,
+        IReadOnlyDictionary<int, string> uploadedChunkMessages,
+        Action<int>? uploadedParts = null,
+        Func<ForumUploadedChunk, Task>? onChunkUploaded = null,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        int maxParallelParts = 1,
+        SemaphoreSlim? uploadGate = null,
+        EncryptedPayloadContext? encryptedPayload = null,
+        Action<FileInfo>? cleanupPart = null)
+    {
+        if (totalParts <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(totalParts));
+        }
+
+        ArgumentNullException.ThrowIfNull(preparePart);
+
+        var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
+        var threadId = existingThreadId ?? "";
+        var chunkMessages = Enumerable.Repeat("", totalParts).ToArray();
+        foreach (var pair in uploadedChunkMessages)
+        {
+            if (pair.Key >= 0 && pair.Key < chunkMessages.Length && !string.IsNullOrWhiteSpace(pair.Value))
+            {
+                chunkMessages[pair.Key] = pair.Value;
+            }
+        }
+
+        var completed = chunkMessages.Count(id => !string.IsNullOrWhiteSpace(id));
+        uploadedParts?.Invoke(completed);
+
+        async Task<T> InUploadSlotAsync<T>(Func<Task<T>> action)
+        {
+            if (uploadGate == null)
+            {
+                return await action();
+            }
+
+            await uploadGate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                uploadGate.Release();
+            }
+        }
+
+        void CleanupPart(PreparedUploadPart? prepared)
+        {
+            if (prepared == null || cleanupPart == null)
+            {
+                return;
+            }
+
+            try
+            {
+                cleanupPart(prepared.File);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Discord.CleanupGeneratedPart", ex, prepared.File.FullName);
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(threadId))
+        {
+            var firstWasPending = string.IsNullOrWhiteSpace(chunkMessages[0]);
+            PreparedUploadPart? first = null;
+            try
+            {
+                var post = await InUploadSlotAsync(async () =>
+                {
+                    first = await preparePart(0);
+                    return await _discord.CreateForumPostWithFileDetailedAsync(
+                        _forumId,
+                        encryptedPayload == null ? StripExtension(archiveFileName) : EncryptedThreadTitle(encryptedPayload.FileId),
+                        encryptedPayload == null
+                            ? PartContent(batchId, 1, totalParts)
+                            : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), totalParts),
+                        first!.File,
+                        cancellationToken,
+                        onRateLimitWait);
+                });
+                threadId = post.ThreadId;
+                chunkMessages[0] = post.MessageId;
+                if (onChunkUploaded != null)
+                {
+                    await onChunkUploaded(new ForumUploadedChunk(
+                        threadId,
+                        batchId,
+                        0,
+                        post.MessageId,
+                        first!.File.Length,
+                        first.LogicalSizeBytes));
+                }
+
+                if (firstWasPending)
+                {
+                    completed = Interlocked.Increment(ref completed);
+                }
+                uploadedParts?.Invoke(completed);
+            }
+            finally
+            {
+                CleanupPart(first);
+            }
+        }
+        else
+        {
+            await _discord.UnarchiveThreadAsync(threadId, cancellationToken, onRateLimitWait);
+        }
+
+        var pending = Enumerable.Range(0, totalParts)
+            .Where(index => string.IsNullOrWhiteSpace(chunkMessages[index]))
+            .ToArray();
+        if (pending.Length > 0)
+        {
+            var parallelism = Math.Min(Math.Clamp(maxParallelParts, 1, 16), pending.Length);
+            using var localGate = new SemaphoreSlim(parallelism, parallelism);
+            var uploads = pending.Select(async index =>
+            {
+                await localGate.WaitAsync(cancellationToken);
+                PreparedUploadPart? prepared = null;
+                try
+                {
+                    var message = await InUploadSlotAsync(async () =>
+                    {
+                        prepared = await preparePart(index);
+                        return await _discord.SendFileMessageAsync(
+                            threadId,
+                            encryptedPayload == null
+                                ? PartContent(batchId, index + 1, totalParts)
+                                : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), totalParts),
+                            prepared!.File,
+                            cancellationToken,
+                            onRateLimitWait);
+                    });
+                    chunkMessages[index] = message.Id;
+                    if (onChunkUploaded != null)
+                    {
+                        await onChunkUploaded(new ForumUploadedChunk(
+                            threadId,
+                            batchId,
+                            index,
+                            message.Id,
+                            prepared!.File.Length,
+                            prepared.LogicalSizeBytes));
+                    }
+
+                    var current = Interlocked.Increment(ref completed);
+                    uploadedParts?.Invoke(current);
+                }
+                finally
+                {
+                    CleanupPart(prepared);
+                    localGate.Release();
+                }
+            });
+            await Task.WhenAll(uploads);
+        }
+
+        return new ForumUploadResult(threadId, batchId, totalParts, chunkMessages);
+    }
+
     public async Task<ForumUploadResult> UploadToThreadAsync(
         string threadId,
         string archiveFileName,
@@ -296,4 +468,7 @@ public sealed record ForumUploadedChunk(
     string BatchId,
     int Index,
     string MessageId,
-    long SizeBytes);
+    long SizeBytes,
+    long LogicalSizeBytes = -1);
+
+public sealed record PreparedUploadPart(FileInfo File, long LogicalSizeBytes);

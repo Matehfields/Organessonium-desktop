@@ -121,6 +121,59 @@ public sealed class EncryptionService
         }
     }
 
+    public async Task EncryptFileRangeAsync(
+        FileInfo source,
+        long offset,
+        int length,
+        FileInfo destination,
+        EncryptedPayloadContext context,
+        CancellationToken cancellationToken = default)
+    {
+        if (offset < 0 || length < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+
+        var plaintext = GC.AllocateUninitializedArray<byte>(length);
+        try
+        {
+            await using var input = new FileStream(
+                source.FullName,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                128 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            input.Position = offset;
+            var readTotal = 0;
+            while (readTotal < plaintext.Length)
+            {
+                var read = await input.ReadAsync(plaintext.AsMemory(readTotal), cancellationToken);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException("O arquivo mudou enquanto o chunk era preparado.");
+                }
+
+                readTotal += read;
+            }
+
+            var encrypted = EncryptBytes(plaintext, context);
+            try
+            {
+                destination.Directory?.Create();
+                await File.WriteAllBytesAsync(destination.FullName, encrypted, cancellationToken);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(encrypted);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+        }
+    }
+
     public async Task DecryptFileAsync(
         FileInfo source,
         FileInfo destination,

@@ -13,6 +13,7 @@ internal static class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
+        ("encryptedFileRangeRoundTrip", EncryptedFileRangeRoundTripAsync),
         ("encryptedPayloadMessageProtocol", EncryptedPayloadMessageProtocolAsync),
         ("encryptedPayloadTamperAndTruncation", EncryptedPayloadTamperAndTruncationAsync),
         ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
@@ -153,6 +154,53 @@ internal static class Program
         return Task.FromResult(tamperDetected && truncationDetected
             ? TestOutcome.Pass()
             : TestOutcome.Fail("alteração ou truncamento não foi rejeitado"));
+    }
+
+    private static async Task<TestOutcome> EncryptedFileRangeRoundTripAsync()
+    {
+        var sourceDir = Directory.CreateTempSubdirectory("organessonium_range_test_");
+        try
+        {
+            var inputBytes = RandomNumberGenerator.GetBytes(2 * EncryptionService.MaximumPlaintextPayloadBytes + 321);
+            var input = new FileInfo(Path.Combine(sourceDir.FullName, "original.bin"));
+            await File.WriteAllBytesAsync(input.FullName, inputBytes);
+            var service = CreateEncryptionService(out _);
+            var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+            var totalParts = ArchiveSplitter.GetPartCount(inputBytes.LongLength, EncryptionService.MaximumPlaintextPayloadBytes);
+            using var output = new MemoryStream();
+
+            for (var index = 0; index < totalParts; index++)
+            {
+                var offset = (long)index * EncryptionService.MaximumPlaintextPayloadBytes;
+                var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, inputBytes.LongLength - offset);
+                var target = new FileInfo(Path.Combine(sourceDir.FullName, $"chunk-{index + 1}.bin"));
+                var context = new EncryptedPayloadContext(
+                    "file-range",
+                    encryption,
+                    EncryptedPayloadRoles.Original,
+                    index,
+                    totalParts);
+                await service.EncryptFileRangeAsync(input, offset, length, target, context);
+                var payload = await File.ReadAllBytesAsync(target.FullName);
+                var restored = service.DecryptBytes(payload, context);
+                await output.WriteAsync(restored);
+                CryptographicOperations.ZeroMemory(payload);
+                CryptographicOperations.ZeroMemory(restored);
+                target.Delete();
+            }
+
+            var outputBytes = output.ToArray();
+            var matches = CryptographicOperations.FixedTimeEquals(inputBytes, outputBytes);
+            CryptographicOperations.ZeroMemory(inputBytes);
+            CryptographicOperations.ZeroMemory(outputBytes);
+            return matches
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("a leitura e criptografia por faixa não reconstruíram o arquivo");
+        }
+        finally
+        {
+            try { sourceDir.Delete(true); } catch { }
+        }
     }
 
     private static Task<TestOutcome> EncryptedPayloadMessageProtocolAsync()

@@ -16,6 +16,7 @@ public sealed class DiscordApiClient : IDisposable
 
     private readonly HttpClient _http;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _routeReadyAt = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _routeLocks = new(StringComparer.Ordinal);
 
 public DiscordApiClient(string botToken)
         : this(botToken, NetworkConfig.Current.CreateClient())
@@ -25,6 +26,7 @@ public DiscordApiClient(string botToken)
     public DiscordApiClient(string botToken, HttpClient http)
     {
         _http = http;
+        _http.Timeout = Timeout.InfiniteTimeSpan;
         _http.BaseAddress = new Uri("https://discord.com/api/v10/");
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bot", botToken);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Organessonium-CSharp/1.0");
@@ -517,6 +519,10 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     public void Dispose()
     {
         _http.Dispose();
+        foreach (var gate in _routeLocks.Values)
+        {
+            gate.Dispose();
+        }
     }
 
     private static MultipartFormDataContent BuildForumThreadContent(string title, string content, FileInfo file)
@@ -567,47 +573,56 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         {
             using var request = requestFactory();
             var routeKey = BuildRouteKey(request);
-            await WaitForRouteAsync(routeKey, onRateLimitWait, cancellationToken);
-
-            HttpResponseMessage response;
+            var routeLock = _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1));
+            await routeLock.WaitAsync(cancellationToken);
             try
             {
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            }
-            catch (HttpRequestException) when (attempt < 11)
-            {
-                await WaitTransientRetryAsync(attempt, cancellationToken);
-                continue;
-            }
-            catch (HttpRequestException ex)
-            {
-                throw new DiscordApiException(HttpStatusCode.ServiceUnavailable, "Falha de rede ao falar com o Discord: " + ex.Message, ex);
-            }
+                await WaitForRouteAsync(routeKey, onRateLimitWait, cancellationToken);
 
-            if ((int)response.StatusCode != 429)
-            {
-                if (response.IsSuccessStatusCode)
+                HttpResponseMessage response;
+                try
                 {
-                    TrackRouteLimit(routeKey, response);
-                    return response;
+                    response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 }
-
-                var statusCode = response.StatusCode;
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                response.Dispose();
-                if (IsTransientStatus(statusCode) && attempt < 11)
+                catch (HttpRequestException) when (attempt < 11)
                 {
                     await WaitTransientRetryAsync(attempt, cancellationToken);
                     continue;
                 }
+                catch (HttpRequestException ex)
+                {
+                    throw new DiscordApiException(HttpStatusCode.ServiceUnavailable, "Falha de rede ao falar com o Discord: " + ex.Message, ex);
+                }
 
-                throw new DiscordApiException(statusCode, body);
+                if ((int)response.StatusCode != 429)
+                {
+                    if (response.IsSuccessStatusCode)
+                    {
+                        TrackRouteLimit(routeKey, response);
+                        return response;
+                    }
+
+                    var statusCode = response.StatusCode;
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    response.Dispose();
+                    if (IsTransientStatus(statusCode) && attempt < 11)
+                    {
+                        await WaitTransientRetryAsync(attempt, cancellationToken);
+                        continue;
+                    }
+
+                    throw new DiscordApiException(statusCode, body);
+                }
+
+                var retry = await ResolveRetryAfterAsync(response, cancellationToken);
+                _routeReadyAt[routeKey] = DateTimeOffset.UtcNow.Add(retry);
+                response.Dispose();
+                await WaitWithProgressAsync(retry, onRateLimitWait, cancellationToken);
             }
-
-            var retry = await ResolveRetryAfterAsync(response, cancellationToken);
-            _routeReadyAt[routeKey] = DateTimeOffset.UtcNow.Add(retry);
-            response.Dispose();
-            await WaitWithProgressAsync(retry, onRateLimitWait, cancellationToken);
+            finally
+            {
+                routeLock.Release();
+            }
         }
 
         throw new DiscordApiException(HttpStatusCode.TooManyRequests, "Discord rate limit persistiu após várias tentativas.");

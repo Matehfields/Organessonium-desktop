@@ -2212,9 +2212,10 @@ html[data-motion="reduced"] *{
 .op-batch-cancel:hover{color:var(--text-primary);}
 .op-batch-track{height:2px;background:var(--surface3);overflow:hidden;}
 .op-batch-track span{display:block;height:100%;background:var(--accent);transition:width .2s ease;}
+.op-batch-track-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center;padding:0 14px 0 16px;background:var(--surface2);}
 .op-file-list{display:flex;flex-direction:column;}
 .op-file-row{
-    display:grid;grid-template-columns:22px minmax(0,1fr) 24px;
+    display:grid;grid-template-columns:22px minmax(0,1fr) 38px 24px;
     gap:10px;align-items:center;min-height:54px;padding:7px 14px 7px 16px;
     border-bottom:1px solid var(--border);
 }
@@ -2227,8 +2228,9 @@ html[data-motion="reduced"] *{
 }
 .op-file-detail{
     font-size:10px;color:var(--text-muted);
-    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-height:1.25;
 }
+.op-file-percent,.op-percent{font-size:10px;color:var(--text-secondary);text-align:right;white-space:nowrap;}
 .op-file-progress{
     width:20px;height:20px;border-radius:50%;
     display:flex;align-items:center;justify-content:center;
@@ -2241,6 +2243,7 @@ html[data-motion="reduced"] *{
 .op-file-progress.waiting{border:0;color:#FBC02D;animation:none;}
 .op-file-progress.done{border:0;color:#4caf50;animation:none;}
 .op-file-progress.error,.op-file-progress.cancelled{border:0;color:var(--danger);animation:none;}
+.op-icon.waiting{color:#FBC02D;background:rgba(251,192,45,.12);}
 .op-item{
     display:grid;grid-template-columns:26px minmax(0,1fr);gap:8px;align-items:center;
     padding:10px 14px;border-bottom:1px solid var(--border);
@@ -2265,6 +2268,7 @@ html[data-motion="reduced"] *{
 .op-status.err{color:var(--danger);}
 .op-progress{height:3px;background:var(--surface3);border-radius:2px;overflow:hidden;}
 .op-progress-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .2s;}
+.op-progress-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center;}
 .op-log{font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
 /* ─── Context menu ────────────────────────────────────────────────────────── */

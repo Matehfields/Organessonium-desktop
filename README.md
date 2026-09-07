@@ -136,6 +136,14 @@ Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1
 
 Mudar o modo afeta somente uploads novos. Cada arquivo usa o modo registrado no próprio metadata, sem recriptografar conteúdo existente.
 
+## Upload e transferências
+
+Uploads criptografados de arquivos grandes não são mais divididos e criptografados integralmente antes do envio. O app calcula a quantidade de partes usando o limite de plaintext de 10 MB menos o overhead do envelope, lê uma faixa por vez, criptografa essa faixa e grava somente o ciphertext atual em uma pasta oculta `.organessonium-upload-*` ao lado do arquivo original. O ciphertext é removido assim que a mensagem correspondente termina; a pasta também é removida ao fim da transferência. O limite global de `UploadThreads` inclui a preparação e o envio, evitando criar uma cópia temporária para cada chunk do arquivo.
+
+O uploader mantém a posição de cada parte pelo índice, mesmo quando partes pendentes são enviadas em paralelo. O índice é salvo no estado da transferência imediatamente após a confirmação da mensagem, permitindo retomar sem reenviar as partes já confirmadas. Falhas temporárias de rede, HTTP 429, respostas 5xx e o limite de threads ativas do Discord deixam o estado como pausado e recuperável, preservando o thread e os chunks já enviados. O cliente coordena as requisições da mesma rota do Discord para evitar rajadas concorrentes de rate limit.
+
+O progresso individual cobre preparação, envio dos chunks originais, geração e envio da miniatura, geração e envio da prévia 480p, publicação dos metadados e conclusão. O diálogo mostra o percentual em cada arquivo e no lote. A velocidade de upload e download exibida no diálogo é a média dos bytes transferidos na janela móvel dos últimos 60 segundos; downloads também mostram uma estimativa de conclusão quando há dados suficientes.
+
 ### Download, integridade e compatibilidade
 
 Para payloads criptografados, cada tentativa baixa o ciphertext para um arquivo temporário identificado como tal, valida o envelope e a tag GCM, e só então grava o plaintext. Falhas de download, estrutura ou autenticação descartam os temporários suspeitos e fazem no máximo três downloads completos por payload. Após a terceira falha, o diálogo oferece `Tentar novamente`, iniciando uma nova sequência de três buscas. Após reconstruir o arquivo, o tamanho plaintext é comparado com `sizeBytes` do metadata.

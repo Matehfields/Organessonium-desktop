@@ -6,6 +6,17 @@ public static class ArchiveSplitter
 {
     private const int SplitBytes = 10 * 1024 * 1024;
 
+    public static int GetPartCount(long length, int? maxPartBytes = null)
+    {
+        var partBytes = Math.Clamp(maxPartBytes ?? SplitBytes, 1024, SplitBytes);
+        if (length <= 0)
+        {
+            return 1;
+        }
+
+        return checked((int)((length + partBytes - 1) / partBytes));
+    }
+
     public static async Task<IReadOnlyList<FileInfo>> SplitAsync(
         FileInfo file,
         CancellationToken cancellationToken = default,

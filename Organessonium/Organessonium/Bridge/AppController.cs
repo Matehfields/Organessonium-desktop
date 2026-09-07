@@ -1762,14 +1762,16 @@ public sealed class AppController : IAsyncDisposable
                 {
                     Debug.WriteLine("[Upload] " + ex.Message);
                     AppLogger.Error("UploadSingle", ex, task.File.FullName);
-                    var failedNow = Interlocked.Increment(ref failed);
-                    var message = FriendlyUploadError(ex);
-                    await OpsUploadFileProgressAsync(opId, index, "error", -1, message);
-                    await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + failedNow, tasks.Count), $"{failedNow} upload(s) falharam");
-                    if (IsBlockingUploadApiError(ex))
+                    var blockedByApi = IsBlockingUploadApiError(ex);
+                    if (blockedByApi)
                     {
                         Volatile.Write(ref stoppedByApi, 1);
                     }
+
+                    var failedNow = Interlocked.Increment(ref failed);
+                    var message = FriendlyUploadError(ex);
+                    await OpsUploadFileProgressAsync(opId, index, blockedByApi ? "waiting" : "error", -1, message);
+                    await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + failedNow, tasks.Count), $"{failedNow} upload(s) falharam");
                 }
                 finally
                 {
@@ -1784,9 +1786,11 @@ public sealed class AppController : IAsyncDisposable
             allEntries.Add(pair.Value);
         }
 
-        var status = done == tasks.Count ? "done" : "error";
+        var status = Volatile.Read(ref stoppedByApi) != 0
+            ? "waiting"
+            : (done == tasks.Count ? "done" : "error");
         var summary = Volatile.Read(ref stoppedByApi) != 0
-            ? $"{done}/{tasks.Count} concluídos - Discord recusou novos uploads agora"
+            ? $"{done}/{tasks.Count} concluídos - limite do Discord; upload preservado para retomar"
             : failed > 0
                 ? $"{done}/{tasks.Count} concluídos, {failed} falharam"
                 : $"{done}/{tasks.Count} concluídos";
@@ -1796,16 +1800,22 @@ public sealed class AppController : IAsyncDisposable
 
     private static bool IsBlockingUploadApiError(Exception ex)
     {
-        return ex is DiscordApiException api && api.DiscordCode == DiscordApiClient.MaxActiveThreadsCode;
+        return ex is DiscordApiException api &&
+               ((int)api.StatusCode == 429 || api.DiscordCode == DiscordApiClient.MaxActiveThreadsCode);
     }
 
     private static string FriendlyUploadError(Exception ex)
     {
         if (ex is DiscordApiException api)
         {
+            if ((int)api.StatusCode == 429)
+            {
+                return "Limite do Discord atingido. Upload pausado e preservado para retomar.";
+            }
+
             if (api.DiscordCode == DiscordApiClient.MaxActiveThreadsCode)
             {
-                return "limite de threads ativas no fórum do Discord";
+                return "Limite de threads do Discord atingido. Upload pausado e preservado para retomar.";
             }
 
             if ((int)api.StatusCode >= 500)
@@ -1835,15 +1845,38 @@ public sealed class AppController : IAsyncDisposable
         Func<long, Task>? onBytesUploaded = null)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
+        var sourceLength = file.Length;
         var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
                                      existingTransferState?.UploadedChunks.Count > 0;
-        var parts = await ArchiveSplitter.SplitAsync(
-            file,
-            cancellationToken,
-            preserveLegacyTransfer ? null : EncryptionService.MaximumPlaintextPayloadBytes);
+        var progressTracker = new UploadProgressTracker(
+            ThumbnailCache.IsImage(name),
+            string.Equals(PreviewType(name), "video", StringComparison.Ordinal));
+        await ReportUploadItemProgressAsync(
+            opId,
+            fileIndex,
+            fileTotal,
+            progressTracker.Preparing(0),
+            "Preparando arquivo",
+            throttle,
+            true,
+            useBatchUi,
+            progressTracker: progressTracker);
+
+        IReadOnlyList<FileInfo>? parts = null;
+        var totalChunks = ArchiveSplitter.GetPartCount(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes);
+        var chunkSizeBytes = sourceLength > 0
+            ? Math.Min(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes)
+            : 0;
+        if (preserveLegacyTransfer)
+        {
+            parts = await ArchiveSplitter.SplitAsync(file, cancellationToken);
+            totalChunks = parts.Count;
+            chunkSizeBytes = parts.Count > 0 ? parts.Max(part => part.Length) : 0;
+        }
+
         var threadId = "";
         TransferState? transferState = existingTransferState;
-        EncryptedPayloadStaging? encryptedStaging = null;
+        DirectoryInfo? generatedPartDirectory = null;
         try
         {
             var parentFolderId = string.IsNullOrWhiteSpace(transferState?.TargetFolderId)
@@ -1856,8 +1889,8 @@ public sealed class AppController : IAsyncDisposable
                     targetPath,
                     parentFolderId,
                     GuessFileMime(name),
-                    parts.Count > 0 ? parts.Max(part => part.Length) : 0,
-                    parts.Count,
+                    chunkSizeBytes,
+                    totalChunks,
                     cancellationToken);
                 transferState.FileId = Guid.NewGuid().ToString("N");
                 transferState.Encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
@@ -1868,12 +1901,12 @@ public sealed class AppController : IAsyncDisposable
                 transferState.SourcePath = file.FullName;
                 transferState.FileName = name;
                 transferState.MimeType = string.IsNullOrWhiteSpace(transferState.MimeType) ? GuessFileMime(name) : transferState.MimeType;
-                transferState.SizeBytes = Math.Max(0, file.Length);
+                transferState.SizeBytes = Math.Max(0, sourceLength);
                 transferState.TargetPath = PathRules.Normalize(string.IsNullOrWhiteSpace(transferState.TargetPath) ? targetPath : transferState.TargetPath);
                 transferState.TargetFolderId = parentFolderId;
-                transferState.TotalChunks = parts.Count;
-                transferState.ChunkSizeBytes = parts.Count > 0 ? parts.Max(part => part.Length) : 0;
-                transferState.PendingChunks = Enumerable.Range(0, parts.Count)
+                transferState.TotalChunks = totalChunks;
+                transferState.ChunkSizeBytes = chunkSizeBytes;
+                transferState.PendingChunks = Enumerable.Range(0, totalChunks)
                     .Except(transferState.UploadedChunks.Select(chunk => chunk.Index))
                     .ToList();
                 transferState.FileId = string.IsNullOrWhiteSpace(transferState.FileId)
@@ -1887,17 +1920,23 @@ public sealed class AppController : IAsyncDisposable
 
             transferState.FileName = name;
             await _transferManager.SaveAsync(transferState, cancellationToken);
+            await ReportUploadItemProgressAsync(
+                opId,
+                fileIndex,
+                fileTotal,
+                progressTracker.Preparing(100),
+                "Arquivo preparado",
+                throttle,
+                true,
+                useBatchUi,
+                progressTracker: progressTracker);
             targetPath = PathRules.Normalize(string.IsNullOrWhiteSpace(transferState.TargetPath) ? targetPath : transferState.TargetPath);
             if (transferState.Encryption != null)
             {
-                encryptedStaging = await _encryption.StageFilesAsync(
-                    parts,
-                    transferState.FileId,
-                    transferState.Encryption,
-                    EncryptedPayloadRoles.Original,
-                    cancellationToken);
+                generatedPartDirectory = CreateUploadPartDirectory(file, transferState.FileId);
+                transferState.TempPath = generatedPartDirectory.FullName;
+                await _transferManager.SaveAsync(transferState, cancellationToken);
             }
-            var uploadParts = encryptedStaging?.Files ?? parts;
 
             async Task ReportRateLimitWaitAsync(TimeSpan remaining)
             {
@@ -1912,70 +1951,105 @@ public sealed class AppController : IAsyncDisposable
                     throttle,
                     true,
                     useBatchUi,
-                    "waiting");
+                    "waiting",
+                    progressTracker);
             }
 
             var uploadedMap = transferState.UploadedChunks
                 .Where(chunk => !string.IsNullOrWhiteSpace(chunk.MessageId))
                 .ToDictionary(chunk => chunk.Index, chunk => chunk.MessageId);
             using var checkpointGate = new SemaphoreSlim(1, 1);
-            var upload = await uploader.UploadResumableAsync(
-                name,
-                uploadParts,
-                transferState.ThreadId,
-                transferState.BatchId,
-                uploadedMap,
-                uploadedParts =>
+            void ReportUploadedParts(int uploadedParts)
+            {
+                var partPercent = Percent(uploadedParts, totalChunks);
+                var message = totalChunks > 1
+                    ? $"Parte {Math.Max(1, uploadedParts)}/{totalChunks}"
+                    : "Enviando arquivo";
+                _ = ReportUploadItemProgressAsync(
+                    opId,
+                    fileIndex,
+                    fileTotal,
+                    progressTracker.Original(partPercent),
+                    message,
+                    throttle,
+                    uploadedParts >= totalChunks,
+                    useBatchUi,
+                    progressTracker: progressTracker);
+            }
+
+            async Task HandleUploadedChunkAsync(ForumUploadedChunk chunk)
+            {
+                await checkpointGate.WaitAsync(cancellationToken);
+                try
                 {
-                    var partPercent = Percent(uploadedParts, uploadParts.Count);
-                    var message = uploadParts.Count > 1
-                        ? $"Parte {Math.Max(1, uploadedParts)}/{uploadParts.Count}"
-                        : "Enviando arquivo";
-                    _ = ReportUploadItemProgressAsync(
-                        opId,
-                        fileIndex,
-                        fileTotal,
-                        partPercent,
-                        message,
-                        throttle,
-                        uploadedParts >= parts.Count,
-                        useBatchUi);
-                },
-                async chunk =>
+                    transferState.ThreadId = chunk.ThreadId;
+                    transferState.BatchId = chunk.BatchId;
+                    threadId = chunk.ThreadId;
+                    await _transferManager.MarkUploadChunkAsync(
+                        transferState,
+                        chunk.Index,
+                        chunk.MessageId,
+                        chunk.SizeBytes,
+                        cancellationToken);
+                    if (onBytesUploaded != null)
+                    {
+                        await onBytesUploaded(chunk.LogicalSizeBytes >= 0 ? chunk.LogicalSizeBytes : chunk.SizeBytes);
+                    }
+                }
+                finally
                 {
-                    await checkpointGate.WaitAsync(cancellationToken);
-                    try
-                    {
-                        transferState.ThreadId = chunk.ThreadId;
-                        transferState.BatchId = chunk.BatchId;
-                        threadId = chunk.ThreadId;
-                        await _transferManager.MarkUploadChunkAsync(
-                            transferState,
-                            chunk.Index,
-                            chunk.MessageId,
-                            chunk.SizeBytes,
-                            cancellationToken);
-                        if (onBytesUploaded != null)
-                        {
-                            await onBytesUploaded(chunk.SizeBytes);
-                        }
-                    }
-                    finally
-                    {
-                        checkpointGate.Release();
-                    }
-                },
-                cancellationToken,
-                ReportRateLimitWaitAsync,
-                settings.UploadThreads,
-                uploadGate,
-                transferState.Encryption == null
-                    ? null
-                    : new EncryptedPayloadContext(
-                        transferState.FileId,
-                        transferState.Encryption,
+                    checkpointGate.Release();
+                }
+            }
+
+            ForumUploadResult upload;
+            if (transferState.Encryption != null)
+            {
+                var encryptionContext = new EncryptedPayloadContext(
+                    transferState.FileId,
+                    transferState.Encryption,
+                    EncryptedPayloadRoles.Original,
+                    0,
+                    totalChunks);
+                upload = await uploader.UploadResumableGeneratedAsync(
+                    name,
+                    totalChunks,
+                    index => PrepareEncryptedUploadPartAsync(
+                        file,
+                        sourceLength,
+                        generatedPartDirectory!,
+                        encryptionContext,
                         EncryptedPayloadRoles.Original,
-                        0));
+                        index,
+                        totalChunks,
+                        cancellationToken),
+                    transferState.ThreadId,
+                    transferState.BatchId,
+                    uploadedMap,
+                    ReportUploadedParts,
+                    HandleUploadedChunkAsync,
+                    cancellationToken,
+                    ReportRateLimitWaitAsync,
+                    settings.UploadThreads,
+                    uploadGate,
+                    encryptionContext,
+                    TryDeleteFile);
+            }
+            else
+            {
+                upload = await uploader.UploadResumableAsync(
+                    name,
+                    parts!,
+                    transferState.ThreadId,
+                    transferState.BatchId,
+                    uploadedMap,
+                    ReportUploadedParts,
+                    HandleUploadedChunkAsync,
+                    cancellationToken,
+                    ReportRateLimitWaitAsync,
+                    settings.UploadThreads,
+                    uploadGate);
+            }
             threadId = upload.ThreadId;
 
             var previewIds = await TryUploadGeneratedPreviewAsync(
@@ -1992,6 +2066,7 @@ public sealed class AppController : IAsyncDisposable
                 cancellationToken,
                 transferState,
                 useBatchUi,
+                progressTracker,
                 transferState.Encryption == null
                     ? null
                     : new EncryptedPayloadContext(
@@ -2000,8 +2075,18 @@ public sealed class AppController : IAsyncDisposable
                         EncryptedPayloadRoles.Preview,
                         0));
 
+            await ReportUploadItemProgressAsync(
+                opId,
+                fileIndex,
+                fileTotal,
+                progressTracker.Metadata(0),
+                "Enviando metadados",
+                throttle,
+                true,
+                useBatchUi,
+                progressTracker: progressTracker);
             var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
-            var entry = AppEntry.File(name, threadId, now, file.Length, targetPath);
+            var entry = AppEntry.File(name, threadId, now, sourceLength, targetPath);
             entry.FileId = transferState.FileId;
             entry.Encryption = transferState.Encryption?.Clone();
             entry.ParentFolderId = parentFolderId;
@@ -2014,6 +2099,16 @@ public sealed class AppController : IAsyncDisposable
             entry.VideoPreviewChunkMessageIds = previewIds.VideoPreviewChunkMessageIds.ToList();
             entry.VideoPreviewSizeBytes = previewIds.VideoPreviewSizeBytes;
             await registry.AddEntryAsync(entry, cancellationToken, ReportRateLimitWaitAsync);
+            await ReportUploadItemProgressAsync(
+                opId,
+                fileIndex,
+                fileTotal,
+                progressTracker.Metadata(70),
+                "Metadados enviados",
+                throttle,
+                true,
+                useBatchUi,
+                progressTracker: progressTracker);
             transferState.FileId = entry.FileId;
             transferState.MetadataMessageId = entry.MetadataMessageId;
             await _transferManager.CompleteAsync(transferState, settings.KeepTransferHistory, cancellationToken);
@@ -2029,6 +2124,17 @@ public sealed class AppController : IAsyncDisposable
             {
                 AppLogger.Error("UploadArchiveThread", ex, threadId);
             }
+
+            await ReportUploadItemProgressAsync(
+                opId,
+                fileIndex,
+                fileTotal,
+                progressTracker.Done(),
+                "Concluído",
+                throttle,
+                true,
+                useBatchUi,
+                progressTracker: progressTracker);
 
             return entry;
         }
@@ -2055,15 +2161,29 @@ public sealed class AppController : IAsyncDisposable
         {
             if (transferState != null)
             {
-                await _transferManager.FailAsync(transferState, ex, CancellationToken.None);
+                if (IsResumableUploadFailure(ex))
+                {
+                    await _transferManager.PauseAsync(transferState, ex, CancellationToken.None);
+                }
+                else
+                {
+                    await _transferManager.FailAsync(transferState, ex, CancellationToken.None);
+                }
             }
 
             throw;
         }
         finally
         {
-            encryptedStaging?.Dispose();
-            ArchiveSplitter.CleanupParts(parts, file);
+            if (generatedPartDirectory != null)
+            {
+                CleanDir(generatedPartDirectory);
+            }
+
+            if (parts != null)
+            {
+                ArchiveSplitter.CleanupParts(parts, file);
+            }
         }
     }
 
@@ -2081,6 +2201,7 @@ public sealed class AppController : IAsyncDisposable
         CancellationToken cancellationToken,
         TransferState? transferState = null,
         bool useBatchUi = false,
+        UploadProgressTracker? progressTracker = null,
         EncryptedPayloadContext? previewEncryption = null)
     {
         DirectoryInfo? tempDir = null;
@@ -2096,16 +2217,27 @@ public sealed class AppController : IAsyncDisposable
                     opId,
                     fileIndex,
                     fileTotal,
-                    0,
+                    progressTracker?.ThumbnailGeneration(0) ?? 0,
                     "Gerando miniatura 200x200",
                     throttle,
                     true,
-                    useBatchUi);
+                    useBatchUi,
+                    progressTracker: progressTracker);
                 var png = ThumbnailCache.CreateSquarePng(await File.ReadAllBytesAsync(file.FullName, cancellationToken));
                 ThumbnailCache.Store(threadId, png);
                 tempDir = Directory.CreateTempSubdirectory("organessonium_image_preview_");
                 var generated = new FileInfo(Path.Combine(tempDir.FullName, PreviewFileName(name, ".png")));
                 await File.WriteAllBytesAsync(generated.FullName, png, cancellationToken);
+                await ReportUploadItemProgressAsync(
+                    opId,
+                    fileIndex,
+                    fileTotal,
+                    progressTracker?.ThumbnailUpload(0) ?? 0,
+                    "Enviando miniatura",
+                    throttle,
+                    true,
+                    useBatchUi,
+                    progressTracker: progressTracker);
                 using (var encryptedPreview = previewEncryption == null
                     ? null
                     : await _encryption.StageFilesAsync(
@@ -2124,6 +2256,16 @@ public sealed class AppController : IAsyncDisposable
                         cancellationToken,
                         onRateLimitWait: onRateLimitWait);
                 }
+                await ReportUploadItemProgressAsync(
+                    opId,
+                    fileIndex,
+                    fileTotal,
+                    progressTracker?.ThumbnailUpload(100) ?? 100,
+                    "Miniatura enviada",
+                    throttle,
+                    true,
+                    useBatchUi,
+                    progressTracker: progressTracker);
                 if (transferState != null)
                 {
                     transferState.ThumbnailMessageId = previewMessageId;
@@ -2152,6 +2294,7 @@ public sealed class AppController : IAsyncDisposable
                 onRateLimitWait,
                 cancellationToken,
                 useBatchUi,
+                progressTracker,
                 previewEncryption);
             if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
             {
@@ -2171,11 +2314,12 @@ public sealed class AppController : IAsyncDisposable
                             opId,
                             fileIndex,
                             fileTotal,
-                            progress,
+                            progressTracker?.VideoPreviewGeneration(progress) ?? progress,
                             $"Gerando prévia 480p - {progress}%",
                             throttle,
                             progress is 0 or 100,
-                            useBatchUi),
+                            useBatchUi,
+                            progressTracker: progressTracker),
                         cancellationToken,
                         outputFileName: VideoPreviewFileName(name));
                     await ReportUploadItemProgressAsync(
@@ -2186,7 +2330,8 @@ public sealed class AppController : IAsyncDisposable
                         "Enviando preview 480p",
                         throttle,
                         true,
-                        useBatchUi);
+                        useBatchUi,
+                        progressTracker: progressTracker);
                     var videoPreview = await UploadVideoPreview480Async(
                         opId,
                         fileIndex,
@@ -2199,6 +2344,8 @@ public sealed class AppController : IAsyncDisposable
                         onRateLimitWait,
                         cancellationToken,
                         useBatchUi,
+                        settings.UploadThreads,
+                        progressTracker,
                         previewEncryption == null
                             ? null
                             : previewEncryption with { Role = EncryptedPayloadRoles.Video480p });
@@ -2227,6 +2374,7 @@ public sealed class AppController : IAsyncDisposable
                             onRateLimitWait,
                             cancellationToken,
                             useBatchUi,
+                            progressTracker,
                             previewEncryption);
                         if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
                         {
@@ -2278,35 +2426,85 @@ public sealed class AppController : IAsyncDisposable
         Func<TimeSpan, Task> onRateLimitWait,
         CancellationToken cancellationToken,
         bool useBatchUi,
+        int maxParallelParts,
+        UploadProgressTracker? progressTracker,
         EncryptedPayloadContext? videoEncryption)
     {
-        var previewParts = await ArchiveSplitter.SplitAsync(
-            generated,
-            cancellationToken,
-            videoEncryption == null ? null : EncryptionService.MaximumPlaintextPayloadBytes);
-        EncryptedPayloadStaging? encryptedPreview = null;
+        if (videoEncryption != null)
+        {
+            var totalParts = ArchiveSplitter.GetPartCount(generated.Length, EncryptionService.MaximumPlaintextPayloadBytes);
+            var encryptionContext = videoEncryption.WithChunkCount(totalParts);
+            var generatedDirectory = generated.Directory ?? throw new IOException("A pasta da prévia gerada não está disponível.");
+            var result = await uploader.UploadResumableGeneratedAsync(
+                VideoPreviewFileName(originalName),
+                totalParts,
+                index => PrepareEncryptedUploadPartAsync(
+                    generated,
+                    generated.Length,
+                    generatedDirectory,
+                    encryptionContext,
+                    EncryptedPayloadRoles.Video480p,
+                    index,
+                    totalParts,
+                    cancellationToken),
+                threadId,
+                "",
+                new Dictionary<int, string>(),
+                uploadedParts =>
+                {
+                    var partPercent = Percent(uploadedParts, totalParts);
+                    var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{totalParts}";
+                    _ = ReportUploadItemProgressAsync(
+                        opId,
+                        fileIndex,
+                        fileTotal,
+                        progressTracker?.VideoPreviewUpload(partPercent) ?? partPercent,
+                        msg,
+                        throttle,
+                        uploadedParts >= totalParts,
+                        useBatchUi,
+                        progressTracker: progressTracker);
+                },
+                cancellationToken: cancellationToken,
+                onRateLimitWait: onRateLimitWait,
+                maxParallelParts: maxParallelParts,
+                encryptedPayload: encryptionContext,
+                cleanupPart: TryDeleteFile);
+            return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds);
+        }
+
+        var previewParts = await ArchiveSplitter.SplitAsync(generated, cancellationToken);
+        var payloadParts = previewParts;
         try
         {
-            if (videoEncryption != null)
-            {
-                encryptedPreview = await _encryption.StageFilesAsync(
-                    previewParts,
-                    videoEncryption.FileId,
-                    videoEncryption.Encryption,
-                    EncryptedPayloadRoles.Video480p,
-                    cancellationToken);
-            }
-            var payloadParts = encryptedPreview?.Files ?? previewParts;
             if (payloadParts.Count == 1)
             {
+                await ReportUploadItemProgressAsync(
+                    opId,
+                    fileIndex,
+                    fileTotal,
+                    progressTracker?.VideoPreviewUpload(0) ?? 0,
+                    "Enviando preview 480p",
+                    throttle,
+                    true,
+                    useBatchUi,
+                    progressTracker: progressTracker);
                 var messageId = await uploader.UploadPreviewFileToThreadAsync(
                     threadId,
-                    videoEncryption == null
-                        ? "VIDEO_PREVIEW_480P|" + StripExtension(originalName)
-                        : EncryptedPayloadProtocol.Message(videoEncryption, 1),
+                    "VIDEO_PREVIEW_480P|" + StripExtension(originalName),
                     payloadParts[0],
                     cancellationToken,
                     onRateLimitWait: onRateLimitWait);
+                await ReportUploadItemProgressAsync(
+                    opId,
+                    fileIndex,
+                    fileTotal,
+                    progressTracker?.VideoPreviewUpload(100) ?? 100,
+                    "Preview 480p enviada",
+                    throttle,
+                    true,
+                    useBatchUi,
+                    progressTracker: progressTracker);
                 return new VideoPreviewUploadResult(generated.Length, [messageId]);
             }
 
@@ -2316,17 +2514,18 @@ public sealed class AppController : IAsyncDisposable
                 payloadParts,
                 uploadedParts =>
                 {
-                    var percent = Percent(uploadedParts, payloadParts.Count);
+                    var partPercent = Percent(uploadedParts, payloadParts.Count);
                     var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{payloadParts.Count}";
                     _ = ReportUploadItemProgressAsync(
                         opId,
                         fileIndex,
                         fileTotal,
-                        percent,
+                        progressTracker?.VideoPreviewUpload(partPercent) ?? partPercent,
                         msg,
                         throttle,
-                        uploadedParts >= previewParts.Count,
-                        useBatchUi);
+                        uploadedParts >= payloadParts.Count,
+                        useBatchUi,
+                        progressTracker: progressTracker);
                 },
                 cancellationToken,
                 onRateLimitWait: onRateLimitWait,
@@ -2335,7 +2534,6 @@ public sealed class AppController : IAsyncDisposable
         }
         finally
         {
-            encryptedPreview?.Dispose();
             ArchiveSplitter.CleanupParts(previewParts, generated);
         }
     }
@@ -2353,6 +2551,7 @@ public sealed class AppController : IAsyncDisposable
         Func<TimeSpan, Task> onRateLimitWait,
         CancellationToken cancellationToken,
         bool useBatchUi,
+        UploadProgressTracker? progressTracker,
         EncryptedPayloadContext? previewEncryption)
     {
         try
@@ -2361,11 +2560,12 @@ public sealed class AppController : IAsyncDisposable
                 opId,
                 fileIndex,
                 fileTotal,
-                0,
+                progressTracker?.ThumbnailGeneration(0) ?? 0,
                 "Gerando miniatura 200x200",
                 throttle,
                 true,
-                useBatchUi);
+                useBatchUi,
+                progressTracker: progressTracker);
             var thumbnail = await VideoPreviewGenerator.CreateThumbnailAsync(
                 source,
                 tempDir,
@@ -2377,6 +2577,16 @@ public sealed class AppController : IAsyncDisposable
             }
 
             ThumbnailCache.Store(threadId, await File.ReadAllBytesAsync(thumbnail.FullName, cancellationToken));
+            await ReportUploadItemProgressAsync(
+                opId,
+                fileIndex,
+                fileTotal,
+                progressTracker?.ThumbnailUpload(0) ?? 0,
+                "Enviando miniatura",
+                throttle,
+                true,
+                useBatchUi,
+                progressTracker: progressTracker);
             using var encryptedThumbnail = previewEncryption == null
                 ? null
                 : await _encryption.StageFilesAsync(
@@ -2397,11 +2607,12 @@ public sealed class AppController : IAsyncDisposable
                 opId,
                 fileIndex,
                 fileTotal,
-                100,
+                progressTracker?.ThumbnailUpload(100) ?? 100,
                 "Miniatura de vídeo enviada",
                 throttle,
                 true,
-                useBatchUi);
+                useBatchUi,
+                progressTracker: progressTracker);
             return messageId;
         }
         catch (OperationCanceledException)
@@ -3797,8 +4008,17 @@ var registry = Registry();
             catch (Exception ex)
             {
                 AppLogger.Error("Transfer.Resume", ex, state.TransferId);
-                await _transferManager.FailAsync(state, ex, CancellationToken.None);
-                await OpsUpdateAsync(opId, "error", ex.Message);
+                if (state.TransferType.Equals(TransferTypes.Upload, StringComparison.OrdinalIgnoreCase) &&
+                    IsResumableUploadFailure(ex))
+                {
+                    await _transferManager.PauseAsync(state, ex, CancellationToken.None);
+                    await OpsUpdateAsync(opId, "waiting", FriendlyUploadError(ex));
+                }
+                else
+                {
+                    await _transferManager.FailAsync(state, ex, CancellationToken.None);
+                    await OpsUpdateAsync(opId, "error", ex.Message);
+                }
             }
             finally
             {
@@ -3980,7 +4200,8 @@ var registry = Registry();
         UiThrottle throttle,
         bool force,
         bool useBatchUi,
-        string batchStatus = "active")
+        string batchStatus = "active",
+        UploadProgressTracker? progressTracker = null)
     {
         if (useBatchUi)
         {
@@ -3997,7 +4218,7 @@ var registry = Registry();
 
         await ReportUploadProgressAsync(
             opId,
-            Percent(fileIndex, fileTotal),
+            progressTracker?.Current ?? Math.Max(0, itemPercent),
             $"({fileIndex + 1}/{fileTotal}) {message}",
             throttle,
             force);
@@ -5776,6 +5997,97 @@ private static string ClassifyConnectError(Exception ex)
         return type is 0 or 5;
     }
 
+    private static DirectoryInfo CreateUploadPartDirectory(FileInfo source, string fileId)
+    {
+        var parent = source.Directory ?? throw new IOException("A pasta do arquivo de origem não está disponível.");
+        var suffix = string.Concat((fileId ?? "").Where(char.IsLetterOrDigit));
+        if (string.IsNullOrWhiteSpace(suffix))
+        {
+            suffix = Guid.NewGuid().ToString("N");
+        }
+
+        var directory = Directory.CreateDirectory(Path.Combine(parent.FullName, ".organessonium-upload-" + suffix));
+        try
+        {
+            directory.Attributes |= FileAttributes.Hidden;
+        }
+        catch
+        {
+            // Hiding the short-lived staging directory is best effort.
+        }
+
+        return directory;
+    }
+
+    private async Task<PreparedUploadPart> PrepareEncryptedUploadPartAsync(
+        FileInfo source,
+        long expectedLength,
+        DirectoryInfo directory,
+        EncryptedPayloadContext context,
+        string role,
+        int index,
+        int totalParts,
+        CancellationToken cancellationToken)
+    {
+        if (index < 0 || index >= totalParts)
+        {
+            throw new ArgumentOutOfRangeException(nameof(index));
+        }
+
+        source.Refresh();
+        if (source.Length != expectedLength)
+        {
+            throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
+        }
+
+        var offset = checked((long)index * EncryptionService.MaximumPlaintextPayloadBytes);
+        var remaining = Math.Max(0, expectedLength - offset);
+        var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, remaining);
+        if (index > 0 && remaining <= 0)
+        {
+            throw new EndOfStreamException("O chunk solicitado não existe mais no arquivo de origem.");
+        }
+
+        var target = new FileInfo(Path.Combine(
+            directory.FullName,
+            EncryptedPayloadProtocol.FileName(role, index, totalParts)));
+        await _encryption.EncryptFileRangeAsync(
+            source,
+            offset,
+            length,
+            target,
+            context.WithChunkIndex(index).WithChunkCount(totalParts),
+            cancellationToken);
+        return new PreparedUploadPart(target, length);
+    }
+
+    private static void TryDeleteFile(FileInfo file)
+    {
+        try
+        {
+            if (file.Exists)
+            {
+                file.Delete();
+            }
+        }
+        catch
+        {
+            // Each generated part is removed on a best-effort basis.
+        }
+    }
+
+    private static bool IsResumableUploadFailure(Exception ex)
+    {
+        if (ex is DiscordApiException api)
+        {
+            return (int)api.StatusCode == 429 ||
+                   (int)api.StatusCode >= 500 ||
+                   api.DiscordCode == DiscordApiClient.MaxActiveThreadsCode;
+        }
+
+        return ex is HttpRequestException;
+    }
+
     private static bool IsSerialChannel(int type)
     {
         return type is 0 or 5;
@@ -5943,6 +6255,72 @@ private static string ClassifyConnectError(Exception ex)
     private sealed class UiThrottle
     {
         public long Last;
+    }
+
+    private sealed class UploadProgressTracker
+    {
+        private readonly bool _isImage;
+        private readonly bool _isVideo;
+        private readonly object _sync = new();
+        private int _current;
+
+        public UploadProgressTracker(bool isImage, bool isVideo)
+        {
+            _isImage = isImage;
+            _isVideo = isVideo;
+        }
+
+        public int Current
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _current;
+                }
+            }
+        }
+
+        public int Preparing(int percent) => Report(0, 5, percent);
+
+        public int Original(int percent)
+        {
+            var end = _isVideo ? 65 : (_isImage ? 75 : 95);
+            return Report(5, end, percent);
+        }
+
+        public int ThumbnailGeneration(int percent)
+        {
+            var start = _isVideo ? 65 : 75;
+            var end = _isVideo ? 70 : 87;
+            return Report(start, end, percent);
+        }
+
+        public int ThumbnailUpload(int percent)
+        {
+            var start = _isVideo ? 70 : 87;
+            var end = _isVideo ? 73 : 95;
+            return Report(start, end, percent);
+        }
+
+        public int VideoPreviewGeneration(int percent) => Report(73, 84, percent);
+
+        public int VideoPreviewUpload(int percent) => Report(84, 95, percent);
+
+        public int Metadata(int percent) => Report(95, 100, percent);
+
+        public int Done() => Report(100, 100, 100);
+
+        private int Report(int start, int end, int percent)
+        {
+            var normalized = Math.Clamp(percent, 0, 100);
+            var mapped = start + (int)Math.Round((end - start) * normalized / 100.0, MidpointRounding.AwayFromZero);
+            lock (_sync)
+            {
+                _current = Math.Max(_current, Math.Clamp(mapped, 0, 100));
+                return _current;
+            }
+        }
     }
 
     private sealed class SetupChannelsMissingException : Exception

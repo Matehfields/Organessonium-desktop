@@ -162,6 +162,14 @@ public sealed class TransferManager
         await _repository.MoveToFailedAsync(state, ex.Message, cancellationToken);
     }
 
+    public async Task PauseAsync(TransferState state, Exception ex, CancellationToken cancellationToken = default)
+    {
+        state.Status = TransferStatuses.Paused;
+        state.LastError = ex.Message;
+        state.Touch();
+        await SaveAsync(state, cancellationToken);
+    }
+
     public async Task CancelAsync(
         TransferState state,
         bool keepHistory,
