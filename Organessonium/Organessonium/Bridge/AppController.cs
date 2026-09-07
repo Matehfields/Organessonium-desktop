@@ -601,10 +601,15 @@ public sealed class AppController : IAsyncDisposable
                     var ownsLoad = false;
                     for (var attempt = 0; attempt < 5 && !ownsLoad; attempt++)
                     {
+                        if (token.IsCancellationRequested)
+                        {
+                            return;
+                        }
+
                         ownsLoad = _thumbnailLoads.TryAdd(app.ThreadId, 0);
                         if (!ownsLoad)
                         {
-                            await Task.Delay(40, token);
+                            await Task.Delay(40);
                         }
                     }
                     if (!ownsLoad)
