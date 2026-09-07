@@ -1165,7 +1165,11 @@ public sealed class ForumDownloader
 
                     if (encryption != null)
                     {
-                        await _encryption.DecryptFileAsync(encryptedTarget, target, encryption.WithChunkIndex(part.Index), cancellationToken);
+                        await _encryption.DecryptFileAsync(
+                            encryptedTarget,
+                            target,
+                            encryption.WithChunkIndex(part.Index).WithChunkCount(parts.Count),
+                            cancellationToken);
                         TryDelete(encryptedTarget);
                     }
 

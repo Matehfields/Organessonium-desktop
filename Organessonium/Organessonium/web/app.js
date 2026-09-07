@@ -752,9 +752,12 @@ function applyThumbnailElement(el, url) {
     img.draggable = false;
     img.decoding = 'async';
     img.loading = 'lazy';
-    img.src = url;
+    img.addEventListener('error', () => {
+        if (img.parentNode === el) resetThumbnailElement(el);
+    }, { once:true });
     el.innerHTML = '';
     el.appendChild(img);
+    img.src = url;
 }
 
 function resetThumbnailElement(el) {
@@ -830,9 +833,16 @@ window._onPreviewReady = (type, name, data) => {
         wrap.className = 'preview-img-wrap';
         const img = document.createElement('img');
         img.className = 'preview-img';
-        img.src = data; img.alt = name; img.draggable = false; img.decoding = 'async';
+        img.alt = name; img.draggable = false; img.decoding = 'async';
+        img.addEventListener('error', () => {
+            if (img.parentNode !== wrap || !wrap.isConnected) return;
+            activeImgWrap = null;
+            $('preview-zoom-controls').classList.add('hidden');
+            body.innerHTML = `<div class="preview-unsupported">${icon('error',48,'#595959')}<p>${esc(t('previewErrorTitle'))}</p></div>`;
+        }, { once:true });
         wrap.appendChild(img);
         body.appendChild(wrap);
+        img.src = data;
         activeImgWrap = wrap;
         setupImageZoom(wrap, img);
 
@@ -5362,8 +5372,7 @@ function makeFileCard(app) {
     // Aplica thumb já em cache
     if (isThumbable && window._thumbs && window._thumbs[app.threadId]) {
         const prev=card.querySelector('.card-preview');
-        const img=document.createElement('img'); img.className='card-preview-img'; img.alt=''; img.src=window._thumbs[app.threadId];
-        prev.innerHTML=''; prev.appendChild(img);
+        applyThumbnailElement(prev, window._thumbs[app.threadId]);
     }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);
@@ -5451,13 +5460,7 @@ function makeDriveFileCard(app) {
 
     if (isThumbable && window._thumbs && window._thumbs[app.threadId]) {
         const prev = card.querySelector('.card-preview');
-        const img = document.createElement('img');
-        img.className = 'card-preview-img';
-        img.alt = '';
-        img.draggable = false;
-        img.src = window._thumbs[app.threadId];
-        prev.innerHTML = '';
-        prev.appendChild(img);
+        applyThumbnailElement(prev, window._thumbs[app.threadId]);
     }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);

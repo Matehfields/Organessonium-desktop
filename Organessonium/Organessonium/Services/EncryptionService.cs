@@ -8,11 +8,13 @@ namespace Organessonium.Services;
 
 public sealed class EncryptionService
 {
-    public const int EnvelopeHeaderBytes = 26;
+    public const int EnvelopeHeaderBytes = 54;
     public const int AuthenticationTagBytes = 16;
     public const int EnvelopeOverheadBytes = EnvelopeHeaderBytes + AuthenticationTagBytes;
     public const int MaximumPlaintextPayloadBytes = 10 * 1024 * 1024 - EnvelopeOverheadBytes;
-    private static readonly byte[] EnvelopeMagic = "OESB"u8.ToArray();
+    private const int FileSaltBytes = 16;
+    private const int NonceBytes = 12;
+    private static readonly byte[] EnvelopeMagic = "ORGAESGC"u8.ToArray();
     private readonly DefaultEncryptionKeyProvider _defaultKeyProvider;
     private readonly CustomEncryptionKeyProvider _customKeyProvider;
 
@@ -30,7 +32,7 @@ public sealed class EncryptionService
         {
             Version = EncryptionMetadata.CurrentVersion,
             Mode = EncryptionModes.Normalize(mode),
-            Salt = EncryptionMetadataCodec.EncodeSalt(RandomNumberGenerator.GetBytes(16))
+            Salt = EncryptionMetadataCodec.EncodeSalt(RandomNumberGenerator.GetBytes(FileSaltBytes))
         };
     }
 
@@ -74,7 +76,7 @@ public sealed class EncryptionService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var target = new FileInfo(Path.Combine(directory.FullName, EncryptedPayloadProtocol.FileName(role, index, files.Count)));
-                await EncryptFileAsync(files[index], target, new EncryptedPayloadContext(fileId, encryption, role, index), cancellationToken);
+                await EncryptFileAsync(files[index], target, new EncryptedPayloadContext(fileId, encryption, role, index, files.Count), cancellationToken);
                 staged.Add(target);
             }
 
@@ -141,30 +143,53 @@ public sealed class EncryptionService
 
     public byte[] EncryptBytes(ReadOnlySpan<byte> plaintext, EncryptedPayloadContext context)
     {
-        var fileKey = DeriveFileKey(context.FileId, context.Encryption);
+        var roleCode = RoleCode(context.Role);
+        ValidateChunkPosition(context.ChunkIndex, context.ChunkCount);
+        var salt = DecodeFileSalt(context.Encryption);
         try
         {
-            var nonce = RandomNumberGenerator.GetBytes(12);
-            var ciphertext = new byte[plaintext.Length];
-            var tag = new byte[AuthenticationTagBytes];
-            var output = new byte[EnvelopeHeaderBytes + ciphertext.Length + tag.Length];
-            EnvelopeMagic.CopyTo(output, 0);
-            output[4] = EncryptionMetadata.CurrentVersion;
-            output[5] = 0;
-            nonce.CopyTo(output, 6);
-            BinaryPrimitives.WriteUInt64BigEndian(output.AsSpan(18, 8), checked((ulong)plaintext.Length));
-            using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
-            aes.Encrypt(nonce, plaintext, ciphertext, tag, AssociatedData(context));
-            ciphertext.CopyTo(output, EnvelopeHeaderBytes);
-            tag.CopyTo(output, EnvelopeHeaderBytes + ciphertext.Length);
-            CryptographicOperations.ZeroMemory(nonce);
-            CryptographicOperations.ZeroMemory(ciphertext);
-            CryptographicOperations.ZeroMemory(tag);
-            return output;
+            var fileKey = DeriveFileKey(context.FileId, context.Encryption, salt);
+            try
+            {
+                var nonce = RandomNumberGenerator.GetBytes(NonceBytes);
+                var ciphertext = new byte[plaintext.Length];
+                var tag = new byte[AuthenticationTagBytes];
+                var header = new byte[EnvelopeHeaderBytes];
+                try
+                {
+                    EnvelopeMagic.CopyTo(header, 0);
+                    header[8] = EncryptionMetadata.CurrentVersion;
+                    header[9] = roleCode;
+                    BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(10, 4), checked((uint)context.ChunkIndex + 1U));
+                    BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(14, 4), checked((uint)context.ChunkCount));
+                    BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(18, 8), checked((ulong)plaintext.Length));
+                    salt.CopyTo(header.AsSpan(26, FileSaltBytes));
+                    nonce.CopyTo(header.AsSpan(42, NonceBytes));
+
+                    using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
+                    aes.Encrypt(nonce, plaintext, ciphertext, tag, header);
+                    var output = new byte[EnvelopeHeaderBytes + ciphertext.Length + tag.Length];
+                    header.CopyTo(output, 0);
+                    ciphertext.CopyTo(output, EnvelopeHeaderBytes);
+                    tag.CopyTo(output, EnvelopeHeaderBytes + ciphertext.Length);
+                    return output;
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(nonce);
+                    CryptographicOperations.ZeroMemory(ciphertext);
+                    CryptographicOperations.ZeroMemory(tag);
+                    CryptographicOperations.ZeroMemory(header);
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(fileKey);
+            }
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(fileKey);
+            CryptographicOperations.ZeroMemory(salt);
         }
     }
 
@@ -176,9 +201,25 @@ public sealed class EncryptionService
             throw new EncryptedPayloadFormatException("O payload criptografado não possui um envelope válido.");
         }
 
-        if (payload[4] != EncryptionMetadata.CurrentVersion || payload[5] != 0)
+        if (payload[8] != EncryptionMetadata.CurrentVersion)
         {
             throw new EncryptedPayloadFormatException("A versão do payload criptografado não é suportada.");
+        }
+
+        var roleCode = payload[9];
+        if (roleCode is < 1 or > 3 || roleCode != RoleCode(context.Role))
+        {
+            throw new EncryptedPayloadFormatException("O papel do payload criptografado não corresponde ao esperado.");
+        }
+
+        var chunkIndex = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(10, 4));
+        var chunkCount = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(14, 4));
+        ValidateChunkPosition(chunkIndex, chunkCount);
+        ValidateChunkPosition(context.ChunkIndex, context.ChunkCount);
+        if (chunkIndex != checked((uint)context.ChunkIndex + 1U) ||
+            chunkCount != checked((uint)context.ChunkCount))
+        {
+            throw new EncryptedPayloadFormatException("A posição do chunk criptografado não corresponde ao esperado.");
         }
 
         var plaintextLength = BinaryPrimitives.ReadUInt64BigEndian(payload.Slice(18, 8));
@@ -188,34 +229,82 @@ public sealed class EncryptionService
             throw new EncryptedPayloadFormatException("O payload criptografado está truncado ou possui tamanho inválido.");
         }
 
-        var fileKey = DeriveFileKey(context.FileId, context.Encryption);
-        var plaintext = new byte[ciphertextLength];
+        var salt = DecodeFileSalt(context.Encryption);
         try
         {
-            using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
-            aes.Decrypt(
-                payload.Slice(6, 12),
-                payload.Slice(EnvelopeHeaderBytes, ciphertextLength),
-                payload.Slice(EnvelopeHeaderBytes + ciphertextLength, AuthenticationTagBytes),
-                plaintext,
-                AssociatedData(context));
-            return plaintext;
-        }
-        catch (CryptographicException ex)
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-            throw new EncryptedPayloadAuthenticationException("O payload criptografado não pôde ser autenticado.", ex);
+            if (!CryptographicOperations.FixedTimeEquals(payload.Slice(26, FileSaltBytes), salt))
+            {
+                throw new EncryptedPayloadFormatException("O salt do envelope não corresponde aos metadados do arquivo.");
+            }
+
+            var fileKey = DeriveFileKey(context.FileId, context.Encryption, salt);
+            var plaintext = new byte[ciphertextLength];
+            try
+            {
+                using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
+                aes.Decrypt(
+                    payload.Slice(42, NonceBytes),
+                    payload.Slice(EnvelopeHeaderBytes, ciphertextLength),
+                    payload.Slice(EnvelopeHeaderBytes + ciphertextLength, AuthenticationTagBytes),
+                    plaintext,
+                    payload[..EnvelopeHeaderBytes]);
+                return plaintext;
+            }
+            catch (CryptographicException ex)
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+                throw new EncryptedPayloadAuthenticationException("O payload criptografado não pôde ser autenticado.", ex);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(fileKey);
+            }
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(fileKey);
+            CryptographicOperations.ZeroMemory(salt);
         }
     }
 
-    private byte[] DeriveFileKey(string fileId, EncryptionMetadata encryption)
+    private byte[] DeriveFileKey(string fileId, EncryptionMetadata encryption, byte[] salt)
     {
         if (string.IsNullOrWhiteSpace(fileId) || encryption.Version != EncryptionMetadata.CurrentVersion ||
             !EncryptionModes.IsSupported(encryption.Mode))
+        {
+            throw new EncryptedPayloadFormatException("Os metadados de criptografia do arquivo são inválidos.");
+        }
+
+        var masterKey = EncryptionModes.Normalize(encryption.Mode) == EncryptionModes.Custom
+            ? _customKeyProvider.GetMasterKey()
+            : _defaultKeyProvider.GetMasterKey();
+        var fileKey = new byte[32];
+        var encodedFileId = Encoding.UTF8.GetBytes(fileId.Trim());
+        var domain = Encoding.UTF8.GetBytes("organessonium/file-key/v1");
+        var info = new byte[domain.Length + 1 + 4 + encodedFileId.Length];
+        try
+        {
+            domain.CopyTo(info, 0);
+            BinaryPrimitives.WriteUInt32BigEndian(info.AsSpan(domain.Length + 1, 4), checked((uint)encodedFileId.Length));
+            encodedFileId.CopyTo(info, domain.Length + 1 + 4);
+            HKDF.DeriveKey(HashAlgorithmName.SHA256, masterKey, fileKey, salt, info);
+            return fileKey;
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(fileKey);
+            throw;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(encodedFileId);
+            CryptographicOperations.ZeroMemory(domain);
+            CryptographicOperations.ZeroMemory(info);
+        }
+    }
+
+    private static byte[] DecodeFileSalt(EncryptionMetadata encryption)
+    {
+        if (encryption.Version != EncryptionMetadata.CurrentVersion || !EncryptionModes.IsSupported(encryption.Mode))
         {
             throw new EncryptedPayloadFormatException("Os metadados de criptografia do arquivo são inválidos.");
         }
@@ -230,32 +319,41 @@ public sealed class EncryptionService
             throw new EncryptedPayloadFormatException("O salt de criptografia do arquivo é inválido.", ex);
         }
 
-        if (salt.Length < 16)
+        if (salt.Length != FileSaltBytes)
         {
             CryptographicOperations.ZeroMemory(salt);
-            throw new EncryptedPayloadFormatException("O salt de criptografia do arquivo é inválido.");
+            throw new EncryptedPayloadFormatException("O salt de criptografia do arquivo deve conter 16 bytes.");
         }
 
-        var masterKey = EncryptionModes.Normalize(encryption.Mode) == EncryptionModes.Custom
-            ? _customKeyProvider.GetMasterKey()
-            : _defaultKeyProvider.GetMasterKey();
-        var fileKey = new byte[32];
-        var info = Encoding.UTF8.GetBytes("Organessonium/file-key/v1/" + fileId);
-        try
+        return salt;
+    }
+
+    private static byte RoleCode(string role)
+    {
+        return role switch
         {
-            HKDF.DeriveKey(HashAlgorithmName.SHA256, masterKey, fileKey, salt, info);
-            return fileKey;
-        }
-        finally
+            EncryptedPayloadRoles.Original => 1,
+            EncryptedPayloadRoles.Preview => 2,
+            EncryptedPayloadRoles.Video480p => 3,
+            EncryptedPayloadRoles.MarkdownImage => 2,
+            _ => throw new EncryptedPayloadFormatException("O papel do payload criptografado é inválido.")
+        };
+    }
+
+    private static void ValidateChunkPosition(int chunkIndex, int chunkCount)
+    {
+        if (chunkIndex < 0 || chunkCount <= 0 || chunkIndex >= chunkCount)
         {
-            CryptographicOperations.ZeroMemory(salt);
-            CryptographicOperations.ZeroMemory(info);
+            throw new EncryptedPayloadFormatException("A posição do chunk criptografado é inválida.");
         }
     }
 
-    private static byte[] AssociatedData(EncryptedPayloadContext context)
+    private static void ValidateChunkPosition(uint chunkIndex, uint chunkCount)
     {
-        return Encoding.UTF8.GetBytes($"Organessonium/payload/v1|{context.FileId}|{context.Role}|{context.ChunkIndex}");
+        if (chunkIndex == 0 || chunkCount == 0 || chunkIndex > chunkCount)
+        {
+            throw new EncryptedPayloadFormatException("A posição do chunk criptografado é inválida.");
+        }
     }
 
     private static void TryDeleteDirectory(DirectoryInfo directory)
@@ -311,11 +409,14 @@ public sealed class EncryptedPayloadStaging : IDisposable
 
 public static class EncryptedPayloadProtocol
 {
-    private const string Prefix = "OES1";
+    private const string FilePrefix = "file:";
+    private const string RolePrefix = "role:";
+    private const string ChunkPrefix = "chunk:";
+    private const string EncryptionMarker = "encryption:v1";
 
     public static string Message(EncryptedPayloadContext context, int totalParts)
     {
-        return $"{Prefix}|{context.FileId}|{context.Role}|{context.ChunkIndex + 1}/{totalParts}";
+        return $"{FilePrefix}{context.FileId} {RolePrefix}{context.Role} {ChunkPrefix}{context.ChunkIndex + 1}/{totalParts} {EncryptionMarker}";
     }
 
     public static string FileName(string role, int index, int totalParts)
@@ -335,23 +436,33 @@ public static class EncryptedPayloadProtocol
     public static bool TryParse(string? message, out ParsedEncryptedPayload payload)
     {
         payload = default;
-        var parts = (message ?? "").Split('|');
-        if (parts.Length != 4 || !parts[0].Equals(Prefix, StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(parts[1]) || string.IsNullOrWhiteSpace(parts[2]))
+        var parts = (message ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 4 || !parts[0].StartsWith(FilePrefix, StringComparison.Ordinal) ||
+            !parts[1].StartsWith(RolePrefix, StringComparison.Ordinal) ||
+            !parts[2].StartsWith(ChunkPrefix, StringComparison.Ordinal) ||
+            !parts[3].Equals(EncryptionMarker, StringComparison.Ordinal))
         {
             return false;
         }
 
-        var slash = parts[3].IndexOf('/');
+        var fileId = parts[0][FilePrefix.Length..];
+        var role = parts[1][RolePrefix.Length..];
+        var chunk = parts[2][ChunkPrefix.Length..];
+        if (string.IsNullOrWhiteSpace(fileId) || string.IsNullOrWhiteSpace(role))
+        {
+            return false;
+        }
+
+        var slash = chunk.IndexOf('/');
         if (slash <= 0 ||
-            !int.TryParse(parts[3][..slash], out var oneBasedIndex) ||
-            !int.TryParse(parts[3][(slash + 1)..], out var total) ||
+            !int.TryParse(chunk[..slash], out var oneBasedIndex) ||
+            !int.TryParse(chunk[(slash + 1)..], out var total) ||
             oneBasedIndex <= 0 || total <= 0 || oneBasedIndex > total)
         {
             return false;
         }
 
-        payload = new ParsedEncryptedPayload(parts[1], parts[2], oneBasedIndex - 1, total);
+        payload = new ParsedEncryptedPayload(fileId, role, oneBasedIndex - 1, total);
         return true;
     }
 }

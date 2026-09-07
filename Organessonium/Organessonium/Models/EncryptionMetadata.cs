@@ -91,10 +91,16 @@ public sealed record EncryptedPayloadContext(
     string FileId,
     EncryptionMetadata Encryption,
     string Role,
-    int ChunkIndex)
+    int ChunkIndex,
+    int ChunkCount = 1)
 {
     public EncryptedPayloadContext WithChunkIndex(int chunkIndex)
     {
         return this with { ChunkIndex = chunkIndex };
+    }
+
+    public EncryptedPayloadContext WithChunkCount(int chunkCount)
+    {
+        return this with { ChunkCount = chunkCount };
     }
 }

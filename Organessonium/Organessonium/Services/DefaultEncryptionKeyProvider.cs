@@ -5,17 +5,20 @@ namespace Organessonium.Services;
 
 public sealed class DefaultEncryptionKeyProvider
 {
-    private const int Iterations = 600_000;
-    private static readonly byte[] Salt = Encoding.UTF8.GetBytes("Organessonium/default-master/v1");
+    private static readonly byte[] LogicalIdentity = Encoding.UTF8.GetBytes("matehfields");
+    private static readonly byte[] MasterSalt = Encoding.UTF8.GetBytes("organessonium/master-key/salt/v1");
+    private static readonly byte[] MasterInfo = Encoding.UTF8.GetBytes("organessonium/master-key/aes-256-gcm/v1");
     private byte[]? _masterKey;
 
     public byte[] GetMasterKey()
     {
-        return _masterKey ??= Rfc2898DeriveBytes.Pbkdf2(
-            Encoding.UTF8.GetBytes("matehfields"),
-            Salt,
-            Iterations,
-            HashAlgorithmName.SHA256,
-            32);
+        if (_masterKey != null)
+        {
+            return _masterKey;
+        }
+
+        var masterKey = new byte[32];
+        HKDF.DeriveKey(HashAlgorithmName.SHA256, LogicalIdentity, masterKey, MasterSalt, MasterInfo);
+        return _masterKey = masterKey;
     }
 }

@@ -13,6 +13,7 @@ internal static class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
+        ("encryptedPayloadMessageProtocol", EncryptedPayloadMessageProtocolAsync),
         ("encryptedPayloadTamperAndTruncation", EncryptedPayloadTamperAndTruncationAsync),
         ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
         ("urlSafeEncryptionSaltCompatibility", UrlSafeEncryptionSaltCompatibilityAsync),
@@ -106,7 +107,7 @@ internal static class Program
 
                 var plaintext = freshInstallService.DecryptBytes(
                     encrypted,
-                    new EncryptedPayloadContext("file-roundtrip", encryption, EncryptedPayloadRoles.Original, part.index));
+                    new EncryptedPayloadContext("file-roundtrip", encryption, EncryptedPayloadRoles.Original, part.index, staged.Files.Count));
                 await output.WriteAsync(plaintext);
                 CryptographicOperations.ZeroMemory(plaintext);
                 CryptographicOperations.ZeroMemory(encrypted);
@@ -117,12 +118,13 @@ internal static class Program
             var hashesMatch = CryptographicOperations.FixedTimeEquals(
                 SHA256.HashData(inputBytes),
                 SHA256.HashData(outputBytes));
+            var envelopeMatches = firstPayload != null && firstPayload.AsSpan(0, 8).SequenceEqual("ORGAESGC"u8);
             var nonceDiffers = firstPayload != null && staged.Files.Count > 1 &&
-                                !(await File.ReadAllBytesAsync(staged.Files[1].FullName)).AsSpan(6, 12).SequenceEqual(firstPayload.AsSpan(6, 12));
+                                !(await File.ReadAllBytesAsync(staged.Files[1].FullName)).AsSpan(42, 12).SequenceEqual(firstPayload.AsSpan(42, 12));
             CryptographicOperations.ZeroMemory(firstPayload ?? []);
             CryptographicOperations.ZeroMemory(outputBytes);
             ArchiveSplitter.CleanupParts(parts, input);
-            return matches && hashesMatch && nonceDiffers
+            return matches && hashesMatch && envelopeMatches && nonceDiffers
                 ? TestOutcome.Pass()
                 : TestOutcome.Fail("a reconstrução ou os nonces dos chunks não correspondeu ao esperado");
         }
@@ -149,6 +151,29 @@ internal static class Program
         return Task.FromResult(tamperDetected && truncationDetected
             ? TestOutcome.Pass()
             : TestOutcome.Fail("alteração ou truncamento não foi rejeitado"));
+    }
+
+    private static Task<TestOutcome> EncryptedPayloadMessageProtocolAsync()
+    {
+        var context = new EncryptedPayloadContext(
+            "file-message-protocol",
+            new EncryptionMetadata { Version = 1, Mode = EncryptionModes.Standard, Salt = "NyasiAVslEKTO__DCbEeKg" },
+            EncryptedPayloadRoles.Original,
+            1,
+            3);
+        var message = EncryptedPayloadProtocol.Message(context, 3);
+        var parsed = EncryptedPayloadProtocol.TryParse(message, out var payload);
+        var legacyRejected = !EncryptedPayloadProtocol.TryParse(
+            "OES1|file-message-protocol|original|2/3",
+            out _);
+        var matches = parsed && legacyRejected &&
+                      payload.FileId == context.FileId &&
+                      payload.Role == context.Role &&
+                      payload.ChunkIndex == context.ChunkIndex &&
+                      payload.TotalParts == context.ChunkCount;
+        return Task.FromResult(matches
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o formato de mensagem criptografada não corresponde ao padrão do servidor"));
     }
 
     private static Task<TestOutcome> EncryptedPreviewAndVideoPayloadsAsync()

@@ -112,9 +112,9 @@ Todo novo attachment binário do Organessônium passa por `EncryptionService` an
 
 O `salt` usa exclusivamente Base64URL sem padding, com os caracteres `A-Z`, `a-z`, `0-9`, `-` e `_`. Esse é o formato gravado nas mensagens do servidor e usado tanto na validação do índice quanto na derivação da chave.
 
-O blob `OESB` v1 contém magic, versão, flags, nonce GCM de 96 bits, tamanho plaintext, ciphertext e tag de autenticação. O nonce é gerado por CSPRNG para cada payload. A chave por arquivo é derivada por HKDF-SHA-256 a partir da master key, `fileId` e do salt aleatório do arquivo; os chunks usam AAD que inclui `fileId`, papel do payload e índice do chunk. Assim, trocar, truncar ou reordenar payloads invalida a autenticação AES-256-GCM.
+O blob `ORGAESGC` v1 contém magic, versão, papel do payload, índice 1-based e quantidade total do chunk, tamanho plaintext, salt de 16 bytes, nonce GCM de 96 bits, ciphertext e tag de autenticação. O nonce é gerado por CSPRNG para cada payload. A chave por arquivo é derivada por HKDF-SHA-256 a partir da master key, do `fileId` normalizado e do salt do arquivo. O header completo é o AAD do AES-256-GCM, então trocar, truncar ou reordenar payloads invalida a autenticação.
 
-Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1.bin`, `preview.bin`, `video-preview-1.bin` e `image.bin`, sempre com `application/octet-stream`. A mensagem do Discord usa o protocolo compacto `OES1|fileId|role|parte/total`. O nome e o MIME originais permanecem somente no metadata do Organessônium.
+Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1.bin`, `preview.bin`, `video-preview-1.bin` e `image.bin`, sempre com `application/octet-stream`. A mensagem do Discord usa o formato `file:<fileId> role:<role> chunk:<parte>/<total> encryption:v1`. O nome e o MIME originais permanecem somente no metadata do Organessônium.
 
 ### Modos de chave
 
