@@ -23,6 +23,7 @@ internal static class Program
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
+        ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -439,6 +440,34 @@ internal static class Program
             : TestOutcome.Fail("o envelope do canal serial não correspondeu ao padrão existente"));
     }
 
+    private static async Task<TestOutcome> ParallelMessageIndexUsesConcurrentWindowsAsync()
+    {
+        const ulong channelId = 4_000_000_000_000_000_000;
+        var messageIds = Enumerable.Range(1, 400)
+            .Select(index => channelId + (ulong)(index * 100))
+            .ToArray();
+        using var handler = new ParallelMessageHandler(messageIds);
+        using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+        var announced = 0;
+        var messages = await discord.GetMessagesInParallelAsync(
+            channelId.ToString(),
+            workers: 4,
+            onBatch: batch =>
+            {
+                Interlocked.Add(ref announced, batch.Count);
+                return Task.CompletedTask;
+            });
+
+        var received = messages.Select(message => message.Id).ToHashSet(StringComparer.Ordinal);
+        var expected = messageIds.Select(id => id.ToString()).ToHashSet(StringComparer.Ordinal);
+        var valid = received.SetEquals(expected) &&
+                    announced == expected.Count &&
+                    handler.MaximumConcurrentRequests >= 2;
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail($"índice incompleto ou sequencial: recebidos={received.Count}, callbacks={announced}, paralelo={handler.MaximumConcurrentRequests}");
+    }
+
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)
     {
         store = new InMemoryEncryptionSecretStore();
@@ -470,6 +499,83 @@ internal static class Program
         public void WriteEncryptionSecret(string key, string value)
         {
             _values[key] = value;
+        }
+    }
+
+    private sealed class ParallelMessageHandler : HttpMessageHandler
+    {
+        private readonly IReadOnlyList<ulong> _messageIds;
+        private readonly object _sync = new();
+        private int _activeRequests;
+        private int _maximumConcurrentRequests;
+
+        public ParallelMessageHandler(IReadOnlyList<ulong> messageIds)
+        {
+            _messageIds = messageIds.OrderByDescending(id => id).ToArray();
+        }
+
+        public int MaximumConcurrentRequests
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _maximumConcurrentRequests;
+                }
+            }
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri ?? throw new InvalidOperationException("URI ausente no teste de índice.");
+            var limit = QueryValue(uri, "limit") is { } limitText && int.TryParse(limitText, out var parsedLimit)
+                ? parsedLimit
+                : 50;
+            var before = QueryValue(uri, "before") is { } beforeText && ulong.TryParse(beforeText, out var parsedBefore)
+                ? parsedBefore
+                : ulong.MaxValue;
+            lock (_sync)
+            {
+                _activeRequests++;
+                _maximumConcurrentRequests = Math.Max(_maximumConcurrentRequests, _activeRequests);
+            }
+
+            try
+            {
+                await Task.Delay(30, cancellationToken);
+                var selected = _messageIds
+                    .Where(id => id < before)
+                    .Take(limit)
+                    .Select(id => $"{{\"id\":\"{id}\",\"content\":\"\",\"attachments\":[]}}")
+                    .ToArray();
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("[" + string.Join(',', selected) + "]", Encoding.UTF8, "application/json")
+                };
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    _activeRequests--;
+                }
+            }
+        }
+
+        private static string? QueryValue(Uri uri, string key)
+        {
+            foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = pair.Split('=', 2);
+                if (parts.Length == 2 && parts[0].Equals(key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Uri.UnescapeDataString(parts[1]);
+                }
+            }
+
+            return null;
         }
     }
 

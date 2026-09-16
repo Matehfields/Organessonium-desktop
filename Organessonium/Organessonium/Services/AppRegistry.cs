@@ -24,10 +24,9 @@ public sealed class AppRegistry
         Func<IReadOnlyList<AppEntry>, Task>? onBatch = null)
     {
         var cached = _store.LoadCachedEntries();
-        var progressFloor = cached.Count;
         if (onProgress != null)
         {
-            await onProgress(progressFloor);
+            await onProgress(0);
         }
 
         try
@@ -38,14 +37,6 @@ public sealed class AppRegistry
                 await onBatch(fastEntries);
             }
 
-            if (fastEntries.Count > 0)
-            {
-                progressFloor = Math.Max(progressFloor, fastEntries.Count);
-                if (onProgress != null)
-                {
-                    await onProgress(progressFloor);
-                }
-            }
         }
         catch (OperationCanceledException)
         {
@@ -57,57 +48,65 @@ public sealed class AppRegistry
         }
 
         var seenServerMessages = new HashSet<string>(StringComparer.Ordinal);
-        var serverBotMessageCount = 0;
-        var messages = await _discord.GetMessagesInParallelAsync(
+        var envelopesByMessageId = new Dictionary<string, MetadataEnvelope>(StringComparer.Ordinal);
+        var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+        var metadataBatchSize = Math.Max(100, workers * 100);
+        var sentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var lastProgressiveEntryCount = 0;
+        await _discord.GetMessagesInParallelAsync(
             _settings.NamesChannelId,
-            Math.Clamp(_settings.SearchWorkers, 1, 8),
+            workers,
             cancellationToken,
             async batch =>
             {
-                foreach (var message in batch)
+                var metadataMessages = batch
+                    .Where(message => message.Author?.Bot == true && seenServerMessages.Add(message.Id))
+                    .ToArray();
+                if (metadataMessages.Length == 0)
                 {
-                    if (message.Author?.Bot == true && seenServerMessages.Add(message.Id))
-                    {
-                        serverBotMessageCount++;
-                    }
+                    return;
                 }
 
-                if (onProgress != null && serverBotMessageCount > 0)
+                var resolved = await _metadata.ReadEnvelopesInParallelAsync(
+                    metadataMessages,
+                    workers,
+                    cancellationToken);
+                foreach (var envelope in resolved)
                 {
-                    await onProgress(Math.Max(progressFloor, serverBotMessageCount));
+                    envelopesByMessageId[envelope.MessageId] = envelope;
+                }
+
+                if (onProgress != null)
+                {
+                    // The UI must report accepted metadata, not raw Discord messages or a cached floor.
+                    await onProgress(envelopesByMessageId.Count);
+                }
+
+                if (onBatch != null &&
+                    envelopesByMessageId.Count - lastProgressiveEntryCount >= metadataBatchSize)
+                {
+                    var current = _metadata.ToAppEntries(envelopesByMessageId.Values.ToList());
+                    var added = ReadyForProgressiveSend(current, sentIds);
+                    if (added.Count > 0)
+                    {
+                        await onBatch(added);
+                    }
+
+                    lastProgressiveEntryCount = envelopesByMessageId.Count;
                 }
             });
-        var botMessages = messages.Where(message => message.Author?.Bot == true).ToArray();
-        var envelopes = new List<MetadataEnvelope>(botMessages.Length);
-        var sentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
-        var metadataBatchSize = Math.Max(100, workers * 100);
-        for (var offset = 0; offset < botMessages.Length; offset += metadataBatchSize)
+        var envelopes = envelopesByMessageId.Values
+            .OrderByDescending(envelope => ulong.TryParse(envelope.MessageId, out var id) ? id : 0UL)
+            .ToList();
+        var list = _metadata.ToAppEntries(envelopes);
+        if (onBatch != null)
         {
-            var batch = botMessages
-                .Skip(offset)
-                .Take(metadataBatchSize)
-                .ToArray();
-            var resolved = await _metadata.ReadEnvelopesInParallelAsync(batch, workers, cancellationToken);
-            envelopes.AddRange(resolved);
-
-            if (onBatch != null)
+            var added = ReadyForProgressiveSend(list, sentIds);
+            if (added.Count > 0)
             {
-                var current = _metadata.ToAppEntries(envelopes);
-                var added = ReadyForProgressiveSend(current, sentIds);
-                if (added.Count > 0)
-                {
-                    await onBatch(added);
-                }
-            }
-
-            if (onProgress != null)
-            {
-                await onProgress(Math.Max(progressFloor, envelopes.Count));
+                await onBatch(added);
             }
         }
-
-        var list = _metadata.ToAppEntries(envelopes);
         _store.CacheEntries(list);
         try
         {

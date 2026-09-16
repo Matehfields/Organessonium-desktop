@@ -114,64 +114,89 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch = null)
     {
         workers = Math.Clamp(workers, 1, 16);
-
-        using (var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, $"channels/{channelId}/messages?limit=1"), cancellationToken))
+        if (workers == 1)
         {
-            var newest = await ReadJsonAsync<List<DiscordMessageDto>>(response, cancellationToken);
-            if (newest.Count == 0)
-            {
-                return [];
-            }
+            return await GetMessagesAsync(channelId, null, cancellationToken, onBatch);
+        }
 
-            var newestMs = (ulong.Parse(newest[0].Id) >> 22) + DiscordEpochMilliseconds;
-            var windowMs = (double)(newestMs + 1 - DiscordEpochMilliseconds) / workers;
-            var gate = new SemaphoreSlim(1);
-            var tasks = new List<Task<List<DiscordMessageDto>>>(workers);
-            for (var worker = 0; worker < workers; worker++)
-            {
-                var startMs = DiscordEpochMilliseconds + (ulong)(windowMs * worker);
-                var endMs = worker == workers - 1
-                    ? newestMs + 1
-                    : DiscordEpochMilliseconds + (ulong)(windowMs * (worker + 1));
-                tasks.Add(FetchWindowAsync(channelId, startMs, endMs, gate, onBatch, cancellationToken));
-            }
+        using var response = await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, $"channels/{channelId}/messages?limit=1"),
+            cancellationToken,
+            serializeRoute: false);
+        var newest = await ReadJsonAsync<List<DiscordMessageDto>>(response, cancellationToken);
+        if (newest.Count == 0 || !ulong.TryParse(newest[0].Id, out var newestId))
+        {
+            return [];
+        }
 
-            var windows = await Task.WhenAll(tasks);
-            var seen = new HashSet<ulong>();
-            var merged = new List<DiscordMessageDto>();
-            foreach (var window in windows)
+        // Channel snowflakes are created before every message in that channel. Using this
+        // boundary avoids partitioning the entire history of Discord since 2015.
+        var firstId = ulong.TryParse(channelId, out var channelIdValue) && channelIdValue < newestId
+            ? channelIdValue
+            : 0UL;
+        if (newestId <= firstId)
+        {
+            return await GetMessagesAsync(channelId, null, cancellationToken, onBatch);
+        }
+
+        var span = newestId - firstId + 1;
+        var divisor = (ulong)workers;
+        var quotient = span / divisor;
+        var remainder = span % divisor;
+        ulong WindowBoundary(int worker)
+        {
+            var position = (ulong)worker;
+            return firstId + quotient * position + Math.Min(remainder, position);
+        }
+
+        var gate = new SemaphoreSlim(1);
+        var tasks = new List<Task<List<DiscordMessageDto>>>(workers);
+        for (var worker = 0; worker < workers; worker++)
+        {
+            var windowStartId = WindowBoundary(worker);
+            var windowEndId = worker == workers - 1
+                ? newestId + 1
+                : WindowBoundary(worker + 1);
+            tasks.Add(FetchWindowAsync(channelId, windowStartId, windowEndId, gate, onBatch, cancellationToken));
+        }
+
+        var windows = await Task.WhenAll(tasks);
+        var seen = new HashSet<ulong>();
+        var merged = new List<DiscordMessageDto>();
+        foreach (var window in windows)
+        {
+            foreach (var message in window)
             {
-                foreach (var message in window)
+                if (ulong.TryParse(message.Id, out var id) && seen.Add(id))
                 {
-                    if (seen.Add(ulong.Parse(message.Id)))
-                    {
-                        merged.Add(message);
-                    }
+                    merged.Add(message);
                 }
             }
-
-            merged.Sort((a, b) => ulong.Parse(b.Id).CompareTo(ulong.Parse(a.Id)));
-            return merged;
         }
+
+        merged.Sort((a, b) => ulong.Parse(b.Id).CompareTo(ulong.Parse(a.Id)));
+        return merged;
     }
 
     private async Task<List<DiscordMessageDto>> FetchWindowAsync(
         string channelId,
-        ulong startMs,
-        ulong endMs,
+        ulong windowStartId,
+        ulong windowEndId,
         SemaphoreSlim gate,
         Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch,
         CancellationToken cancellationToken)
     {
         var results = new List<DiscordMessageDto>();
-        var windowStartId = (startMs - DiscordEpochMilliseconds) << 22;
-        var before = (endMs - DiscordEpochMilliseconds) << 22;
+        var before = windowEndId;
 
         while (true)
         {
             var url = $"channels/{channelId}/messages?limit=100&before={before}";
 
-            using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), cancellationToken);
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, url),
+                cancellationToken,
+                serializeRoute: false);
             var batch = await ReadJsonAsync<List<DiscordMessageDto>>(response, cancellationToken);
             if (batch.Count == 0)
             {
@@ -179,7 +204,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             }
 
             var clipped = batch
-                .Where(message => ulong.Parse(message.Id) >= windowStartId)
+                .Where(message => ulong.TryParse(message.Id, out var id) &&
+                                  id >= windowStartId &&
+                                  id < windowEndId)
                 .ToList();
             results.AddRange(clipped);
             if (onBatch != null && clipped.Count > 0)
@@ -200,13 +227,14 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 break;
             }
 
-            before = ulong.Parse(batch[^1].Id);
+            if (!ulong.TryParse(batch[^1].Id, out before))
+            {
+                break;
+            }
         }
 
         return results;
     }
-
-    private const ulong DiscordEpochMilliseconds = 1420070400000UL;
 
     public async Task<IReadOnlyDictionary<string, DiscordMessageDto>> GetMessagesByIdsAsync(
         string channelId,
@@ -567,14 +595,20 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     private async Task<HttpResponseMessage> SendAsync(
         Func<HttpRequestMessage> requestFactory,
         CancellationToken cancellationToken,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true)
     {
         for (var attempt = 0; attempt < 12; attempt++)
         {
             using var request = requestFactory();
             var routeKey = BuildRouteKey(request);
-            var routeLock = _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1));
-            await routeLock.WaitAsync(cancellationToken);
+            var routeLock = serializeRoute
+                ? _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1))
+                : null;
+            if (routeLock != null)
+            {
+                await routeLock.WaitAsync(cancellationToken);
+            }
             try
             {
                 await WaitForRouteAsync(routeKey, onRateLimitWait, cancellationToken);
@@ -615,13 +649,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 }
 
                 var retry = await ResolveRetryAfterAsync(response, cancellationToken);
-                _routeReadyAt[routeKey] = DateTimeOffset.UtcNow.Add(retry);
+                SetRouteReadyAt(routeKey, DateTimeOffset.UtcNow.Add(retry));
                 response.Dispose();
                 await WaitWithProgressAsync(retry, onRateLimitWait, cancellationToken);
             }
             finally
             {
-                routeLock.Release();
+                routeLock?.Release();
             }
         }
 
@@ -667,12 +701,12 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         var delay = readyAt - DateTimeOffset.UtcNow;
         if (delay <= TimeSpan.Zero)
         {
-            _routeReadyAt.TryRemove(routeKey, out _);
+            TryRemoveRouteReadyAt(routeKey, readyAt);
             return;
         }
 
         await WaitWithProgressAsync(delay, onRateLimitWait, cancellationToken);
-        _routeReadyAt.TryRemove(routeKey, out _);
+        TryRemoveRouteReadyAt(routeKey, readyAt);
     }
 
     private void TrackRouteLimit(string routeKey, HttpResponseMessage response)
@@ -684,8 +718,19 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         if (TryReadHeaderDouble(response, "X-RateLimit-Reset-After", out var seconds) && seconds > 0)
         {
-            _routeReadyAt[routeKey] = DateTimeOffset.UtcNow.AddSeconds(seconds);
+            SetRouteReadyAt(routeKey, DateTimeOffset.UtcNow.AddSeconds(seconds));
         }
+    }
+
+    private void SetRouteReadyAt(string routeKey, DateTimeOffset readyAt)
+    {
+        _routeReadyAt.AddOrUpdate(routeKey, readyAt, (_, current) => current > readyAt ? current : readyAt);
+    }
+
+    private bool TryRemoveRouteReadyAt(string routeKey, DateTimeOffset expectedReadyAt)
+    {
+        return ((ICollection<KeyValuePair<string, DateTimeOffset>>)_routeReadyAt)
+            .Remove(new KeyValuePair<string, DateTimeOffset>(routeKey, expectedReadyAt));
     }
 
     private static async Task WaitWithProgressAsync(
