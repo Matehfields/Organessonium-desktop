@@ -33,6 +33,15 @@ public sealed class CustomEncryptionKeyProvider
 
     public bool HasStoredKey => !string.IsNullOrWhiteSpace(_store.ReadEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey));
 
+    public void ClearCachedKey()
+    {
+        var masterKey = Interlocked.Exchange(ref _masterKey, null);
+        if (masterKey != null)
+        {
+            CryptographicOperations.ZeroMemory(masterKey);
+        }
+    }
+
     public void ConfigureFromPassphrase(string passphrase)
     {
         if (string.IsNullOrWhiteSpace(passphrase))

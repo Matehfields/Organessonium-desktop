@@ -8,6 +8,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
 {
     private const string DataFolderName = "OrganessoniumData";
     private const string DataPointerFileName = "OrganessoniumData.path";
+    private const string WebViewDataFolderName = "WebView";
+    private const string LogsFolderName = "Logs";
     private const string PreferenceDefaultsVersion = "2";
     private readonly object _lock = new();
 
@@ -18,7 +20,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         PreviewCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Previews"));
         SerialCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Serials"));
         ThumbnailCache.Configure(PreviewCacheDirectory);
-        WebViewDataDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "WebView"));
+        WebViewDataDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, WebViewDataFolderName));
         TransfersDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Transfers"));
         DatabasePath = System.IO.Path.Combine(DataDirectory.FullName, "organessonium.db");
         Directory.CreateDirectory(DataDirectory.FullName);
@@ -57,6 +59,54 @@ public sealed class SettingsStore : IEncryptionSecretStore
             WriteDataDirectoryPointer(target.FullName);
         }
         return target.FullName;
+    }
+
+    public void ClearLocalDataForLogout()
+    {
+        lock (_lock)
+        {
+            ThumbnailCache.Clear();
+            var failures = ClearDataDirectoryContents(DataDirectory);
+            if (failures.Count > 0)
+            {
+                AppLogger.Error(
+                    "Settings.ClearOnLogout",
+                    new IOException("Não foi possível remover todos os arquivos locais."),
+                    string.Join(Environment.NewLine, failures));
+            }
+        }
+    }
+
+    internal static IReadOnlyList<string> ClearDataDirectoryContents(DirectoryInfo dataDirectory)
+    {
+        var failures = new List<string>();
+        dataDirectory.Create();
+
+        foreach (var file in dataDirectory.EnumerateFiles().ToArray())
+        {
+            if (!TryDeleteForLogout(file))
+            {
+                failures.Add(file.FullName);
+            }
+        }
+
+        foreach (var directory in dataDirectory.EnumerateDirectories().ToArray())
+        {
+            if (directory.Name.Equals(WebViewDataFolderName, StringComparison.OrdinalIgnoreCase) ||
+                directory.Name.Equals(LogsFolderName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!TryDeleteForLogout(directory))
+            {
+                failures.Add(directory.FullName);
+            }
+        }
+
+        EnsureRetainedDirectory(dataDirectory, WebViewDataFolderName, failures);
+        EnsureRetainedDirectory(dataDirectory, LogsFolderName, failures);
+        return failures;
     }
 
     public static string NormalizeDataDirectorySelection(string selectedPath)
@@ -373,7 +423,16 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
     private void InitializeDatabase()
     {
+        var databaseWasMissing = !File.Exists(DatabasePath);
         using var connection = Open();
+        if (!databaseWasMissing)
+        {
+            InitializeDatabaseSchema(connection);
+        }
+    }
+
+    private void InitializeDatabaseSchema(SqliteConnection connection)
+    {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS settings (
@@ -712,8 +771,14 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
     private SqliteConnection Open()
     {
+        var databaseWasMissing = !File.Exists(DatabasePath);
         var connection = new SqliteConnection($"Data Source={DatabasePath}");
         connection.Open();
+        if (databaseWasMissing)
+        {
+            InitializeDatabaseSchema(connection);
+        }
+
         return connection;
     }
 
@@ -1120,6 +1185,54 @@ public sealed class SettingsStore : IEncryptionSecretStore
         catch
         {
             // Cache cleanup should never block the app.
+        }
+    }
+
+    private static bool TryDeleteForLogout(FileInfo file)
+    {
+        try
+        {
+            if (file.Exists)
+            {
+                file.Delete();
+            }
+
+            file.Refresh();
+            return !file.Exists;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryDeleteForLogout(DirectoryInfo directory)
+    {
+        try
+        {
+            if (directory.Exists)
+            {
+                directory.Delete(true);
+            }
+
+            directory.Refresh();
+            return !directory.Exists;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void EnsureRetainedDirectory(DirectoryInfo dataDirectory, string name, ICollection<string> failures)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(dataDirectory.FullName, name));
+        }
+        catch
+        {
+            failures.Add(Path.Combine(dataDirectory.FullName, name));
         }
     }
 

@@ -26,6 +26,11 @@ public sealed class EncryptionService
 
     public bool HasCustomKey => _customKeyProvider.HasStoredKey;
 
+    public void ClearCustomKey()
+    {
+        _customKeyProvider.ClearCachedKey();
+    }
+
     public static bool LooksLikeEncryptedEnvelope(ReadOnlySpan<byte> payload)
     {
         return payload.Length >= EnvelopeMagic.Length &&

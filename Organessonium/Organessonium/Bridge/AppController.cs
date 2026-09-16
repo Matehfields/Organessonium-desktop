@@ -41,12 +41,14 @@ public sealed class AppController : IAsyncDisposable
     private readonly ConcurrentDictionary<string, DirectoryInfo> _previewDirs = new();
     private readonly ConcurrentDictionary<string, string> _previewUrls = new();
     private readonly ConcurrentDictionary<string, byte> _thumbnailLoads = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _thumbnailRequests = new();
     private readonly object _thumbnailRequestSync = new();
     private readonly SemaphoreSlim _thumbnailDeliveryGate = new(1, 1);
     private CancellationTokenSource? _thumbnailRequestCts;
     private string _thumbnailRequestKey = "";
     private readonly ConcurrentDictionary<string, TaskCompletionSource<UploadConflictResponse>> _uploadConflictResponses = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _transferOperations = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _transferCompletions = new();
     private readonly SemaphoreSlim _registryLoadGate = new(1, 1);
     private readonly TransferManager _transferManager;
     private readonly EncryptionService _encryption;
@@ -55,6 +57,7 @@ public sealed class AppController : IAsyncDisposable
     private DiscordSession? _session;
     private AppRegistry? _registry;
     private string _currentPath = "/";
+    private volatile bool _loggingOut;
 
     public AppController(
         Window owner,
@@ -131,11 +134,16 @@ public sealed class AppController : IAsyncDisposable
         }
 
         _transferOperations.Clear();
+        _transferCompletions.Clear();
+        _thumbnailRequests.Clear();
 
         foreach (var dir in _previewDirs.Values)
         {
             CleanDir(dir);
         }
+
+        _previewDirs.Clear();
+        _previewUrls.Clear();
 
         _previewServer.Dispose();
         if (_session != null)
@@ -156,7 +164,7 @@ public sealed class AppController : IAsyncDisposable
                 _ = RunAsync(() => LoadFolderAtPathAsync(_currentPath, ArgString(args, 1)));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
-            case "loadVisibleThumbnails": _ = RunAsync(() => LoadVisibleThumbnailsAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
@@ -207,6 +215,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task ConnectAsync(JsonElement[] args)
     {
+        _loggingOut = false;
         var token = ArgString(args, 0).Trim();
         var names = ArgString(args, 1, "names").Trim();
         var folders = ArgString(args, 2, "folders").Trim();
@@ -305,23 +314,27 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task LogoutAsync()
     {
+        _loggingOut = true;
         _loadedApps = [];
         var session = _session;
         _session = null;
         _registry = null;
+
+        await CancelActiveTransfersAndWaitAsync();
+        await CancelThumbnailRequestsAndWaitAsync();
+        ClearPreviewState();
+        _encryption.ClearCustomKey();
+
         if (session != null)
         {
             await session.DisposeAsync();
         }
 
-        var settings = _store.Load();
-        settings.BotToken = "";
-        settings.NamesChannelId = "";
-        settings.FoldersForumId = "";
-        settings.AppsForumId = "";
-        settings.SerialChannelId = "";
-        _store.Save(settings);
-        await _bridge.SetSettingsAsync(settings);
+        _store.ClearLocalDataForLogout();
+        await _bridge.SetSettingsAsync(new AppSettings
+        {
+            DataPath = _store.DataDirectory.FullName
+        });
         await _bridge.CallAsync("_onLoggedOut");
     }
 
@@ -632,6 +645,11 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task LoadVisibleThumbnailsAsync(string visibleIdsJson)
     {
+        if (_loggingOut)
+        {
+            return;
+        }
+
         var settings = _store.Load();
         if (!settings.PreviewEnabled)
         {
@@ -795,6 +813,25 @@ public sealed class AppController : IAsyncDisposable
                 }
             }
             request.Dispose();
+        }
+    }
+
+    private async Task RunTrackedThumbnailRequestAsync(string visibleIdsJson)
+    {
+        var requestId = NewId();
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _thumbnailRequests[requestId] = completion;
+        try
+        {
+            if (!_loggingOut)
+            {
+                await LoadVisibleThumbnailsAsync(visibleIdsJson);
+            }
+        }
+        finally
+        {
+            _thumbnailRequests.TryRemove(requestId, out _);
+            completion.TrySetResult();
         }
     }
 
@@ -3911,8 +3948,14 @@ public sealed class AppController : IAsyncDisposable
 
     private CancellationToken BeginTransferOperation(string opId)
     {
+        if (_loggingOut)
+        {
+            return new CancellationToken(true);
+        }
+
         var cts = new CancellationTokenSource();
         _transferOperations[opId] = cts;
+        _transferCompletions[opId] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         return cts.Token;
     }
 
@@ -3922,6 +3965,78 @@ public sealed class AppController : IAsyncDisposable
         {
             cts.Dispose();
         }
+
+        if (_transferCompletions.TryRemove(opId, out var completion))
+        {
+            completion.TrySetResult();
+        }
+    }
+
+    private async Task CancelActiveTransfersAndWaitAsync()
+    {
+        foreach (var transfer in _transferOperations.Values)
+        {
+            try { transfer.Cancel(); } catch { }
+        }
+
+        var completions = _transferCompletions.Values.Select(completion => completion.Task).ToArray();
+        if (completions.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(completions).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        catch (TimeoutException ex)
+        {
+            AppLogger.Error("Logout.WaitTransfers", ex);
+        }
+    }
+
+    private async Task CancelThumbnailRequestsAndWaitAsync()
+    {
+        CancellationTokenSource? request;
+        lock (_thumbnailRequestSync)
+        {
+            request = _thumbnailRequestCts;
+            _thumbnailRequestCts = null;
+            _thumbnailRequestKey = "";
+        }
+
+        try { request?.Cancel(); } catch { }
+        _thumbnailLoads.Clear();
+
+        var completions = _thumbnailRequests.Values.Select(completion => completion.Task).ToArray();
+        if (completions.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await Task.WhenAll(completions).WaitAsync(TimeSpan.FromSeconds(15));
+        }
+        catch (TimeoutException ex)
+        {
+            AppLogger.Error("Logout.WaitThumbnails", ex);
+        }
+    }
+
+    private void ClearPreviewState()
+    {
+        var previewIds = _previewDirs.Keys
+            .Concat(_previewUrls.Keys.Select(key => key.Split('|', 2)[0]))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        foreach (var threadId in previewIds)
+        {
+            ClosePreview(threadId);
+        }
+
+        ThumbnailCache.Clear();
+        _thumbnailLoads.Clear();
     }
 
     private void CancelTransfers(string idsJson)

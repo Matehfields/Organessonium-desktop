@@ -24,6 +24,7 @@ internal static class Program
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
         ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
         ("fourChannelSettingsRequireFoldersForum", FourChannelSettingsRequireFoldersForumAsync),
+        ("logoutDataCleanupKeepsRuntimeFolders", LogoutDataCleanupKeepsRuntimeFoldersAsync),
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
@@ -106,6 +107,36 @@ internal static class Program
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("a configuração não preservou os quatro canais separados"));
+    }
+
+    private static Task<TestOutcome> LogoutDataCleanupKeepsRuntimeFoldersAsync()
+    {
+        var root = Directory.CreateTempSubdirectory("organessonium_logout_test_");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root.FullName, "WebView", "User Data"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, "Logs"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, "Previews"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, "Serials"));
+            Directory.CreateDirectory(Path.Combine(root.FullName, "Transfers"));
+            File.WriteAllText(Path.Combine(root.FullName, "organessonium.db"), "settings");
+            File.WriteAllText(Path.Combine(root.FullName, "WebView", "User Data", "profile.dat"), "webview");
+            File.WriteAllText(Path.Combine(root.FullName, "Logs", "session.log"), "log");
+
+            var failures = SettingsStore.ClearDataDirectoryContents(root);
+            var children = root.EnumerateFileSystemInfos().Select(item => item.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var valid = failures.Count == 0 &&
+                        children.SetEquals(["WebView", "Logs"]) &&
+                        File.Exists(Path.Combine(root.FullName, "WebView", "User Data", "profile.dat")) &&
+                        File.Exists(Path.Combine(root.FullName, "Logs", "session.log"));
+            return Task.FromResult(valid
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("a limpeza de logout não preservou apenas WebView e Logs"));
+        }
+        finally
+        {
+            try { root.Delete(true); } catch { }
+        }
     }
 
     private static async Task<TestOutcome> EncryptedPayloadRoundTripAndChunksAsync()

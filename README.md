@@ -194,4 +194,6 @@ As configurações e os índices locais ficam em `organessonium.db`, dentro da p
 
 Ao abrir uma pasta, o cache e o serial daquela pasta são mostrados primeiro. Em seguida, somente o thread remoto dessa pasta é consultado. Falhas temporárias, serial corrompido, thread inacessível ou HTTP 429 não removem o cache local válido: a operação é registrada e a interface continua com o último estado conhecido. A exclusão, criação, rename e move atualizam somente os threads, caches e seriais dos pais envolvidos; a exclusão de uma pasta também remove seu mapping, serial e thread de índice depois de remover seus descendentes.
 
+Ao clicar em `Sair`, o app encerra a sessão, cancela transferências e prévias em andamento e limpa o diretório `OrganessoniumData`. O banco SQLite, caches, seriais e estados de transferência são removidos; somente `WebView` e `Logs` são preservados. O banco é recriado automaticamente quando uma nova sessão for configurada, sem exigir reinicialização do app.
+
 Para detalhes de arquitetura e compatibilidade entre versoes, veja `Information.md`.

@@ -296,6 +296,7 @@ public sealed class SerialIndexService
 
     private async Task WriteCachedAsync(string folderId, byte[] bytes, CancellationToken cancellationToken)
     {
+        _cacheDirectory.Create();
         var target = CacheFile(folderId);
         var temporary = new FileInfo(target.FullName + ".tmp");
         await File.WriteAllBytesAsync(temporary.FullName, bytes, cancellationToken);
@@ -312,6 +313,7 @@ public sealed class SerialIndexService
 
     private async Task<FileInfo> WriteTemporarySerialAsync(string folderId, byte[] bytes, CancellationToken cancellationToken)
     {
+        _cacheDirectory.Create();
         var file = new FileInfo(Path.Combine(
             _cacheDirectory.FullName,
             "upload_" + CacheToken(folderId) + "_" + Guid.NewGuid().ToString("N") + ".bin"));
