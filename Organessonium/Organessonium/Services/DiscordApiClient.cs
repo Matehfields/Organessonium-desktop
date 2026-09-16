@@ -319,6 +319,23 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
+    public async Task<DiscordMessageDto> UpdateMessageAsync(
+        string channelId,
+        string messageId,
+        string content,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        var payload = JsonSerializer.Serialize(new { content }, JsonOptions.Web);
+        using var response = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Patch, $"channels/{channelId}/messages/{messageId}");
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            return request;
+        }, cancellationToken, onRateLimitWait);
+        return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
+    }
+
     public async Task DeleteMessageAsync(string channelId, string messageId, CancellationToken cancellationToken = default)
     {
         using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}/messages/{messageId}"), cancellationToken);
@@ -379,6 +396,66 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         }
 
         throw new DiscordApiException(HttpStatusCode.BadRequest, "Discord recusou a criacao da thread do arquivo.");
+    }
+
+    public async Task<DiscordForumPostResult> CreateForumPostAsync(
+        string forumId,
+        string title,
+        string content,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                using var response = await SendAsync(() =>
+                {
+                    var payload = JsonSerializer.Serialize(new
+                    {
+                        name = Truncate(title, 100),
+                        message = new { content }
+                    }, JsonOptions.Web);
+                    var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
+                    request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+                    return request;
+                }, cancellationToken, onRateLimitWait);
+                var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
+                var messageId = channel.Message?.Id ?? "";
+                if (string.IsNullOrWhiteSpace(messageId))
+                {
+                    var messages = await GetMessagesAsync(channel.Id, 5, cancellationToken);
+                    messageId = messages
+                        .Where(message => string.Equals(message.Content, content, StringComparison.Ordinal))
+                        .OrderBy(message => Snowflake(message.Id))
+                        .Select(message => message.Id)
+                        .FirstOrDefault() ?? "";
+                }
+
+                if (!string.IsNullOrWhiteSpace(messageId))
+                {
+                    return new DiscordForumPostResult(channel.Id, messageId);
+                }
+
+                throw new InvalidOperationException("Não foi possível localizar a mensagem inicial do índice da pasta.");
+            }
+            catch (DiscordApiException ex) when (ex.DiscordCode == MaxActiveThreadsCode && attempt < 2)
+            {
+                var archived = await ArchiveActiveThreadsAsync(
+                    forumId,
+                    attempt == 0 ? 100 : 500,
+                    cancellationToken,
+                    onRateLimitWait);
+                if (archived <= 0)
+                {
+                    throw;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken);
+            }
+        }
+
+        throw new DiscordApiException(HttpStatusCode.BadRequest, "Discord recusou a criação da thread de índice.");
     }
 
     private async Task<DiscordForumPostResult> CreateForumPostWithFileDetailedOnceAsync(
@@ -527,6 +604,21 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     public async Task DeleteChannelAsync(string channelId, CancellationToken cancellationToken = default)
     {
         using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}"), cancellationToken);
+    }
+
+    public async Task RenameThreadAsync(
+        string threadId,
+        string title,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        var payload = JsonSerializer.Serialize(new { name = Truncate(title, 100) }, JsonOptions.Web);
+        using var _ = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Patch, $"channels/{threadId}");
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+            return request;
+        }, cancellationToken, onRateLimitWait);
     }
 
     private async Task SetThreadArchivedAsync(

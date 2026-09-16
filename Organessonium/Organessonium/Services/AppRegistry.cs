@@ -1,14 +1,23 @@
+using System.Collections.Concurrent;
+using System.IO;
 using Organessonium.Models;
 
 namespace Organessonium.Services;
 
 public sealed class AppRegistry
 {
+    public const string RootFolderId = "root";
+
     private readonly DiscordApiClient _discord;
     private readonly SettingsStore _store;
     private readonly AppSettings _settings;
     private readonly MetadataService _metadata = new();
     private readonly SerialIndexService _serials;
+    private readonly ConcurrentDictionary<string, FolderIndexMapping> _mappings;
+    private readonly ConcurrentDictionary<string, FolderDescriptor> _descriptors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, Task<List<AppEntry>>> _folderRefreshes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _mappingRefreshGate = new(1, 1);
+    private readonly SemaphoreSlim _rootCreationGate = new(1, 1);
 
     public AppRegistry(DiscordApiClient discord, SettingsStore store, AppSettings settings)
     {
@@ -16,193 +25,98 @@ public sealed class AppRegistry
         _store = store;
         _settings = settings;
         _serials = new SerialIndexService(discord, store, settings);
+        _mappings = new ConcurrentDictionary<string, FolderIndexMapping>(
+            store.LoadFolderIndexMappings(),
+            StringComparer.OrdinalIgnoreCase);
+        _descriptors[RootFolderId] = new FolderDescriptor(RootFolderId, RootFolderId, RootFolderId, "/");
     }
 
-    public async Task<List<AppEntry>> LoadAsync(
-        CancellationToken cancellationToken = default,
-        Func<int, Task>? onProgress = null,
-        Func<IReadOnlyList<AppEntry>, Task>? onBatch = null)
-    {
-        var cached = _store.LoadCachedEntries();
-        if (onProgress != null)
-        {
-            await onProgress(0);
-        }
-
-        try
-        {
-            var fastEntries = await _serials.LoadFastEntriesAsync(cached, cancellationToken);
-            if (fastEntries.Count > 0 && onBatch != null)
-            {
-                await onBatch(fastEntries);
-            }
-
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Registry.SerialIndex", ex, _settings.SerialChannelId);
-        }
-
-        var seenServerMessages = new HashSet<string>(StringComparer.Ordinal);
-        var envelopesByMessageId = new Dictionary<string, MetadataEnvelope>(StringComparer.Ordinal);
-        var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
-        var metadataBatchSize = Math.Max(100, workers * 100);
-        var sentIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var lastProgressiveEntryCount = 0;
-        await _discord.GetMessagesInParallelAsync(
-            _settings.NamesChannelId,
-            workers,
-            cancellationToken,
-            async batch =>
-            {
-                var metadataMessages = batch
-                    .Where(message => message.Author?.Bot == true && seenServerMessages.Add(message.Id))
-                    .ToArray();
-                if (metadataMessages.Length == 0)
-                {
-                    return;
-                }
-
-                var resolved = await _metadata.ReadEnvelopesInParallelAsync(
-                    metadataMessages,
-                    workers,
-                    cancellationToken);
-                foreach (var envelope in resolved)
-                {
-                    envelopesByMessageId[envelope.MessageId] = envelope;
-                }
-
-                if (onProgress != null)
-                {
-                    // The UI must report accepted metadata, not raw Discord messages or a cached floor.
-                    await onProgress(envelopesByMessageId.Count);
-                }
-
-                if (onBatch != null &&
-                    envelopesByMessageId.Count - lastProgressiveEntryCount >= metadataBatchSize)
-                {
-                    var current = _metadata.ToAppEntries(envelopesByMessageId.Values.ToList());
-                    var added = ReadyForProgressiveSend(current, sentIds);
-                    if (added.Count > 0)
-                    {
-                        await onBatch(added);
-                    }
-
-                    lastProgressiveEntryCount = envelopesByMessageId.Count;
-                }
-            });
-        var envelopes = envelopesByMessageId.Values
-            .OrderByDescending(envelope => ulong.TryParse(envelope.MessageId, out var id) ? id : 0UL)
-            .ToList();
-        var list = _metadata.ToAppEntries(envelopes);
-        if (onBatch != null)
-        {
-            var added = ReadyForProgressiveSend(list, sentIds);
-            if (added.Count > 0)
-            {
-                await onBatch(added);
-            }
-        }
-        _store.CacheEntries(list);
-        try
-        {
-            await _serials.SynchronizeAsync(list, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Registry.SerialIndexSync", ex, _settings.SerialChannelId);
-        }
-
-        return list;
-    }
-
-    private static List<AppEntry> ReadyForProgressiveSend(
-        IReadOnlyList<AppEntry> entries,
-        HashSet<string> sentIds)
-    {
-        var byFolderId = entries
-            .Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId))
-            .GroupBy(entry => entry.FolderId, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-
-        var ready = new List<AppEntry>();
-        foreach (var entry in entries)
-        {
-            if (string.IsNullOrWhiteSpace(entry.MetadataMessageId))
-            {
-                continue;
-            }
-
-            if (sentIds.Contains(entry.MetadataMessageId))
-            {
-                continue;
-            }
-
-            if (!HasKnownParentChain(entry, byFolderId))
-            {
-                continue;
-            }
-
-            sentIds.Add(entry.MetadataMessageId);
-            ready.Add(entry);
-        }
-
-        return ready;
-    }
-
-    private static bool HasKnownParentChain(
-        AppEntry entry,
-        IReadOnlyDictionary<string, AppEntry> byFolderId)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var parentId = entry.ParentFolderId;
-        while (!string.IsNullOrWhiteSpace(parentId))
-        {
-            if (!seen.Add(parentId))
-            {
-                return false;
-            }
-
-            if (!byFolderId.TryGetValue(parentId, out var parent))
-            {
-                return false;
-            }
-
-            parentId = parent.ParentFolderId;
-        }
-
-        return true;
-    }
-
-    public List<AppEntry> LoadCached()
-    {
-        return _store.LoadCachedEntries();
-    }
-
-    public void CacheEntries(IEnumerable<AppEntry> entries)
-    {
-        var list = entries.ToList();
-        foreach (var entry in list)
-        {
-            entry.Normalize();
-        }
-
-        _store.CacheEntries(list);
-    }
-
-    public Task SynchronizeSerialsAsync(
-        IEnumerable<AppEntry> entries,
+    public async Task<List<AppEntry>> LoadCachedFolderAsync(
+        string folderId,
+        string folderPath,
         CancellationToken cancellationToken = default)
     {
-        return _serials.SynchronizeAsync(entries, cancellationToken);
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        var mapping = await GetMappingAsync(normalizedFolderId, cancellationToken);
+        var cached = _store.LoadCachedEntriesForFolder(normalizedFolderId);
+        var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        var entries = serial == null
+            ? cached
+            : _serials.MaterializeEntries(serial, cached, folderPath, MappingSnapshot()).ToList();
+        NormalizeFolderEntries(entries, normalizedFolderId, folderPath);
+        RecordDescriptors(entries);
+        return entries;
+    }
+
+    public Task<List<AppEntry>> RefreshFolderAsync(
+        string folderId,
+        string folderPath,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        return _folderRefreshes.GetOrAdd(
+            normalizedFolderId,
+            _ => RefreshFolderCoreAsync(normalizedFolderId, folderPath, cancellationToken));
+    }
+
+    public async Task RefreshMappingsAsync(CancellationToken cancellationToken = default)
+    {
+        await _mappingRefreshGate.WaitAsync(cancellationToken);
+        try
+        {
+            var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+            var messages = await _discord.GetMessagesInParallelAsync(
+                _settings.NamesChannelId,
+                workers,
+                cancellationToken);
+            var mappings = await _metadata.ReadFolderIndexMappingsInParallelAsync(messages, workers, cancellationToken);
+            var canonical = mappings
+                .Where(mapping => !string.IsNullOrWhiteSpace(mapping.FolderId) && !string.IsNullOrWhiteSpace(mapping.ThreadId))
+                .GroupBy(mapping => mapping.FolderId, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group
+                    .OrderByDescending(mapping => Snowflake(mapping.NamesMessageId))
+                    .First())
+                .ToList();
+
+            _mappings.Clear();
+            foreach (var mapping in canonical)
+            {
+                _mappings[mapping.FolderId] = mapping;
+            }
+            _store.ReplaceFolderIndexMappings(canonical);
+        }
+        finally
+        {
+            _mappingRefreshGate.Release();
+        }
+    }
+
+    public async Task<List<AppEntry>> LoadFolderTreeAsync(
+        AppEntry folder,
+        CancellationToken cancellationToken = default)
+    {
+        if (folder.Type != "folder" || string.IsNullOrWhiteSpace(folder.FolderId))
+        {
+            return [];
+        }
+
+        var result = new List<AppEntry>();
+        async Task VisitAsync(string folderId, string path)
+        {
+            var children = await RefreshFolderAsync(folderId, path, cancellationToken);
+            foreach (var child in children)
+            {
+                result.Add(child);
+            }
+
+            foreach (var child in children.Where(child => child.Type == "folder" && !string.IsNullOrWhiteSpace(child.FolderId)))
+            {
+                await VisitAsync(child.FolderId, PathRules.ChildPath(child));
+            }
+        }
+
+        await VisitAsync(folder.FolderId, PathRules.ChildPath(folder));
+        return result;
     }
 
     public async Task<string> AddEntryAsync(
@@ -211,16 +125,358 @@ public sealed class AppRegistry
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
         entry.Normalize();
-        return await _metadata.SendEntryAsync(
-            _discord,
-            _settings.NamesChannelId,
-            entry,
-            cancellationToken,
-            onRateLimitWait);
+        var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        entry.ParentFolderId = parentFolderId;
+        if (entry.Type == "folder")
+        {
+            var created = await EnsureFolderIndexAsync(entry, cancellationToken);
+            entry.ThreadId = created.ThreadId;
+        }
+
+        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+        ReplaceEntry(siblings, entry);
+        _store.CacheFolderEntries(parentFolderId, siblings);
+        RecordDescriptors(siblings);
+        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+
+        if (entry.Type == "folder")
+        {
+            await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), [], cancellationToken);
+        }
+
+        return entry.MetadataMessageId;
+    }
+
+    public async Task UpdateEntryAsync(
+        AppEntry entry,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        entry.Normalize();
+        var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        entry.ParentFolderId = parentFolderId;
+        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        await _metadata.UpsertEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+        ReplaceEntry(siblings, entry);
+        _store.CacheFolderEntries(parentFolderId, siblings);
+        RecordDescriptors(siblings);
+        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+
+        if (entry.Type == "folder")
+        {
+            var mapping = await GetMappingAsync(entry.FolderId, cancellationToken);
+            await _discord.RenameThreadAsync(mapping.ThreadId, FolderThreadTitle(entry.Name, entry.FolderId), cancellationToken, onRateLimitWait);
+            var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
+            await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
+        }
+    }
+
+    public async Task MoveEntryAsync(
+        AppEntry entry,
+        string targetFolderId,
+        string targetPath,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        entry.Normalize();
+        var sourceFolderId = NormalizeFolderId(entry.ParentFolderId);
+        var destinationFolderId = NormalizeFolderId(targetFolderId);
+        if (sourceFolderId.Equals(destinationFolderId, StringComparison.OrdinalIgnoreCase))
+        {
+            entry.Path = PathRules.Normalize(targetPath);
+            await UpdateEntryAsync(entry, cancellationToken, onRateLimitWait);
+            return;
+        }
+
+        var source = await GetMappingAsync(sourceFolderId, cancellationToken);
+        await _metadata.DeleteEntryAsync(_discord, source.ThreadId, entry, cancellationToken);
+        var sourceChildren = _store.LoadCachedEntriesForFolder(sourceFolderId);
+        RemoveEntry(sourceChildren, entry);
+        _store.CacheFolderEntries(sourceFolderId, sourceChildren);
+        await SynchronizeFolderSerialAsync(sourceFolderId, entry.Path, sourceChildren, cancellationToken);
+
+        entry.ParentFolderId = destinationFolderId;
+        entry.Path = PathRules.Normalize(targetPath);
+        entry.MetadataMessageId = "";
+        var destination = await GetMappingAsync(destinationFolderId, cancellationToken);
+        await _metadata.SendEntryAsync(_discord, destination.ThreadId, entry, cancellationToken, onRateLimitWait);
+        var destinationChildren = _store.LoadCachedEntriesForFolder(destinationFolderId);
+        ReplaceEntry(destinationChildren, entry);
+        _store.CacheFolderEntries(destinationFolderId, destinationChildren);
+        RecordDescriptors(destinationChildren);
+        await SynchronizeFolderSerialAsync(destinationFolderId, entry.Path, destinationChildren, cancellationToken);
+
+        if (entry.Type == "folder")
+        {
+            var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
+            await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
+        }
     }
 
     public async Task DeleteEntryAsync(AppEntry entry, CancellationToken cancellationToken = default)
     {
-        await _metadata.DeleteEntryAsync(_discord, _settings.NamesChannelId, entry, cancellationToken);
+        var folderMapping = entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)
+            ? await GetMappingAsync(entry.FolderId, cancellationToken)
+            : null;
+
+        var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        await _metadata.DeleteEntryAsync(_discord, parent.ThreadId, entry, cancellationToken);
+        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+        RemoveEntry(siblings, entry);
+        _store.CacheFolderEntries(parentFolderId, siblings);
+        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+
+        if (entry.Type != "folder" || string.IsNullOrWhiteSpace(entry.FolderId))
+        {
+            return;
+        }
+
+        if (folderMapping != null)
+        {
+            await _serials.DeleteFolderAsync(folderMapping, cancellationToken);
+            await _discord.DeleteMessageAsync(_settings.NamesChannelId, folderMapping.NamesMessageId, cancellationToken);
+            await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken);
+            _mappings.TryRemove(entry.FolderId, out _);
+            _descriptors.TryRemove(entry.FolderId, out _);
+            _store.DeleteFolderIndexMapping(entry.FolderId);
+            _store.CacheFolderEntries(entry.FolderId, []);
+        }
     }
+
+    private async Task<List<AppEntry>> RefreshFolderCoreAsync(
+        string folderId,
+        string folderPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var mapping = await GetMappingAsync(folderId, cancellationToken);
+            var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+            var messages = await _discord.GetMessagesInParallelAsync(mapping.ThreadId, workers, cancellationToken);
+            var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+            var entries = _metadata.ToFolderEntries(envelopes, folderId, folderPath, MappingSnapshot());
+            NormalizeFolderEntries(entries, folderId, folderPath);
+            _store.CacheFolderEntries(folderId, entries);
+            RecordDescriptors(entries);
+            await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
+            return entries;
+        }
+        finally
+        {
+            _folderRefreshes.TryRemove(folderId, out _);
+        }
+    }
+
+    private async Task<FolderIndexMapping> GetMappingAsync(string folderId, CancellationToken cancellationToken)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        if (_mappings.TryGetValue(normalizedFolderId, out var cached))
+        {
+            return cached;
+        }
+
+        await RefreshMappingsAsync(cancellationToken);
+        if (_mappings.TryGetValue(normalizedFolderId, out var refreshed))
+        {
+            return refreshed;
+        }
+
+        if (normalizedFolderId.Equals(RootFolderId, StringComparison.OrdinalIgnoreCase))
+        {
+            return await EnsureRootIndexAsync(cancellationToken);
+        }
+
+        throw new InvalidOperationException($"O índice da pasta {normalizedFolderId} não está registrado no canal names.");
+    }
+
+    private async Task<FolderIndexMapping> EnsureRootIndexAsync(CancellationToken cancellationToken)
+    {
+        await _rootCreationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_mappings.TryGetValue(RootFolderId, out var existing))
+            {
+                return existing;
+            }
+
+            if (_mappings.Count > 0)
+            {
+                throw new InvalidOperationException("O canal names possui índices de pasta, mas não possui o índice root.");
+            }
+
+            var root = await CreateFolderIndexAsync(RootFolderId, RootFolderId, RootFolderId, "/", cancellationToken);
+            return root;
+        }
+        finally
+        {
+            _rootCreationGate.Release();
+        }
+    }
+
+    private async Task<FolderIndexMapping> EnsureFolderIndexAsync(AppEntry folder, CancellationToken cancellationToken)
+    {
+        if (_mappings.TryGetValue(folder.FolderId, out var existing))
+        {
+            return existing;
+        }
+
+        return await CreateFolderIndexAsync(
+            folder.FolderId,
+            NormalizeFolderId(folder.ParentFolderId),
+            folder.Name,
+            PathRules.ChildPath(folder),
+            cancellationToken);
+    }
+
+    private async Task<FolderIndexMapping> CreateFolderIndexAsync(
+        string folderId,
+        string parentFolderId,
+        string name,
+        string folderPath,
+        CancellationToken cancellationToken)
+    {
+        var header = _metadata.SerializeFolderIndexHeader(folderId, parentFolderId, name);
+        var post = await _discord.CreateForumPostAsync(
+            _settings.AppsForumId,
+            FolderThreadTitle(name, folderId),
+            header,
+            cancellationToken);
+        var draft = new FolderIndexMapping(folderId, post.ThreadId, "");
+        var message = await _discord.CreateMessageAsync(
+            _settings.NamesChannelId,
+            _metadata.SerializeFolderIndex(draft),
+            cancellationToken);
+        var mapping = draft with { NamesMessageId = message.Id };
+        _mappings[folderId] = mapping;
+        _store.UpsertFolderIndexMapping(mapping);
+        _descriptors[folderId] = new FolderDescriptor(folderId, parentFolderId, name, folderPath);
+        await SynchronizeFolderSerialAsync(folderId, folderPath, [], cancellationToken);
+        return _mappings[folderId];
+    }
+
+    private async Task SynchronizeFolderSerialAsync(
+        string folderId,
+        string folderPath,
+        IEnumerable<AppEntry> entries,
+        CancellationToken cancellationToken)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        if (!_mappings.TryGetValue(normalizedFolderId, out var mapping))
+        {
+            return;
+        }
+
+        var descriptor = ResolveFolderDescriptor(normalizedFolderId, folderPath);
+        var serial = _serials.BuildFolderSerial(
+            normalizedFolderId,
+            descriptor.ParentFolderId,
+            descriptor.Name,
+            entries,
+            MappingSnapshot());
+        var updated = await _serials.SaveFolderAsync(serial, mapping, cancellationToken);
+        if (updated == mapping)
+        {
+            return;
+        }
+
+        var message = await _discord.UpdateMessageAsync(
+            _settings.NamesChannelId,
+            mapping.NamesMessageId,
+            _metadata.SerializeFolderIndex(updated),
+            cancellationToken);
+        var persisted = updated with { NamesMessageId = message.Id };
+        _mappings[normalizedFolderId] = persisted;
+        _store.UpsertFolderIndexMapping(persisted);
+        await _serials.DeleteSupersededRemoteSerialAsync(mapping.SerialMessageId, persisted.SerialMessageId, cancellationToken);
+    }
+
+    private FolderDescriptor ResolveFolderDescriptor(string folderId, string folderPath)
+    {
+        if (_descriptors.TryGetValue(folderId, out var known))
+        {
+            return known;
+        }
+
+        var cached = _store.LoadCachedFolderEntry(folderId);
+        if (cached != null)
+        {
+            var descriptor = new FolderDescriptor(
+                folderId,
+                NormalizeFolderId(cached.ParentFolderId),
+                cached.Name,
+                PathRules.ChildPath(cached));
+            _descriptors[folderId] = descriptor;
+            return descriptor;
+        }
+
+        var name = folderId.Equals(RootFolderId, StringComparison.OrdinalIgnoreCase)
+            ? RootFolderId
+            : Path.GetFileName(PathRules.Normalize(folderPath));
+        var fallback = new FolderDescriptor(folderId, RootFolderId, name, PathRules.Normalize(folderPath));
+        _descriptors[folderId] = fallback;
+        return fallback;
+    }
+
+    private IReadOnlyDictionary<string, FolderIndexMapping> MappingSnapshot()
+    {
+        return new Dictionary<string, FolderIndexMapping>(_mappings, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void RecordDescriptors(IEnumerable<AppEntry> entries)
+    {
+        foreach (var entry in entries.Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)))
+        {
+            _descriptors[entry.FolderId] = new FolderDescriptor(
+                entry.FolderId,
+                NormalizeFolderId(entry.ParentFolderId),
+                entry.Name,
+                PathRules.ChildPath(entry));
+        }
+    }
+
+    private static void NormalizeFolderEntries(List<AppEntry> entries, string folderId, string folderPath)
+    {
+        foreach (var entry in entries)
+        {
+            entry.ParentFolderId = NormalizeFolderId(entry.ParentFolderId);
+            entry.Path = PathRules.Normalize(folderPath);
+            entry.Normalize();
+        }
+    }
+
+    private static void ReplaceEntry(List<AppEntry> entries, AppEntry replacement)
+    {
+        RemoveEntry(entries, replacement);
+        entries.Add(replacement);
+    }
+
+    private static void RemoveEntry(List<AppEntry> entries, AppEntry target)
+    {
+        entries.RemoveAll(entry =>
+            (!string.IsNullOrWhiteSpace(target.MetadataMessageId) && entry.MetadataMessageId == target.MetadataMessageId) ||
+            (!string.IsNullOrWhiteSpace(target.FileId) && entry.FileId == target.FileId) ||
+            (!string.IsNullOrWhiteSpace(target.FolderId) && entry.FolderId == target.FolderId));
+    }
+
+    private static string NormalizeFolderId(string? folderId)
+    {
+        return string.IsNullOrWhiteSpace(folderId) ? RootFolderId : folderId;
+    }
+
+    private static ulong Snowflake(string id)
+    {
+        return ulong.TryParse(id, out var parsed) ? parsed : 0;
+    }
+
+    private static string FolderThreadTitle(string name, string folderId)
+    {
+        var suffix = folderId[..Math.Min(12, folderId.Length)];
+        return "index-" + suffix + "-" + (string.IsNullOrWhiteSpace(name) ? "folder" : name);
+    }
+
+    private sealed record FolderDescriptor(string FolderId, string ParentFolderId, string Name, string Path);
 }

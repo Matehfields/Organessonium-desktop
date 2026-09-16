@@ -53,6 +53,7 @@ public sealed class AppController : IAsyncDisposable
     private readonly PreviewFileServer _previewServer = new();
     private IReadOnlyList<AppEntry> _loadedApps = [];
     private DiscordSession? _session;
+    private AppRegistry? _registry;
     private string _currentPath = "/";
 
     public AppController(
@@ -74,6 +75,7 @@ public sealed class AppController : IAsyncDisposable
     public void SetSession(DiscordSession session)
     {
         _session = session;
+        _registry = null;
     }
 
     public bool HasSession => _session != null;
@@ -149,7 +151,10 @@ public sealed class AppController : IAsyncDisposable
             case "connect": return ConnectAsync(args);
             case "logout": _ = RunAsync(LogoutAsync); return Task.CompletedTask;
             case "openGuide": return OpenGuideAsync();
-            case "setCurrentPath": _currentPath = PathRules.Normalize(ArgString(args, 0)); return Task.CompletedTask;
+            case "setCurrentPath":
+                _currentPath = PathRules.Normalize(ArgString(args, 0));
+                _ = RunAsync(() => LoadFolderAtPathAsync(_currentPath, ArgString(args, 1)));
+                return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => LoadVisibleThumbnailsAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -299,6 +304,7 @@ public sealed class AppController : IAsyncDisposable
         _loadedApps = [];
         var session = _session;
         _session = null;
+        _registry = null;
         if (session != null)
         {
             await session.DisposeAsync();
@@ -453,31 +459,75 @@ public sealed class AppController : IAsyncDisposable
         await _registryLoadGate.WaitAsync();
         try
         {
-            var cached = _store.LoadCachedEntries();
+            var registry = Registry();
+            var cached = await registry.LoadCachedFolderAsync(AppRegistry.RootFolderId, "/");
             _loadedApps = cached;
-
             var hasCache = cached.Count > 0;
             await _bridge.CallAsync("_onRegistryLoadStarted", hasCache);
             if (hasCache)
             {
                 await _bridge.CallAsync("_onCachedAppsLoaded", cached);
             }
+            await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
 
-            var registry = Registry();
-            var apps = await registry.LoadAsync(
-                onProgress: count => _bridge.CallAsync("_onRegistryLoadProgress", count),
-                onBatch: async batch =>
+            _ = RunAsync(async () =>
+            {
+                try
                 {
-                    MergeLoadedApps(batch);
-                    await _bridge.CallAsync("_onAppsBatch", batch);
-                });
-
-            _loadedApps = apps;
-            await _bridge.CallAsync("_onAppsLoaded", apps);
+                    await registry.RefreshMappingsAsync();
+                    var refreshed = await registry.RefreshFolderAsync(AppRegistry.RootFolderId, "/");
+                    ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
+                    await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+                }
+                catch (OperationCanceledException)
+                {
+                    // App shutdown cancels the silent reconciliation.
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("Registry.RootRefresh", ex);
+                }
+            });
         }
         finally
         {
             _registryLoadGate.Release();
+        }
+    }
+
+    private async Task LoadFolderAtPathAsync(string folderPath, string folderId)
+    {
+        var normalizedPath = PathRules.Normalize(folderPath);
+        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId)
+            ? normalizedPath == "/"
+                ? AppRegistry.RootFolderId
+                : _loadedApps.FirstOrDefault(entry =>
+                    IsFolderEntry(entry) &&
+                    PathRules.ChildPath(entry).Equals(normalizedPath, StringComparison.OrdinalIgnoreCase))?.FolderId ?? ""
+            : folderId;
+        if (string.IsNullOrWhiteSpace(normalizedFolderId))
+        {
+            return;
+        }
+
+        var registry = Registry();
+        var cached = await registry.LoadCachedFolderAsync(normalizedFolderId, normalizedPath);
+        ReplaceLoadedFolder(normalizedFolderId, cached);
+        await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+
+        try
+        {
+            var refreshed = await registry.RefreshFolderAsync(normalizedFolderId, normalizedPath);
+            ReplaceLoadedFolder(normalizedFolderId, refreshed);
+            await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+        }
+        catch (OperationCanceledException)
+        {
+            // A navigation request can be abandoned during app shutdown.
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.FolderRefresh", ex, normalizedFolderId);
         }
     }
     private void MergeLoadedApps(IReadOnlyList<AppEntry> batch)
@@ -491,6 +541,20 @@ public sealed class AppController : IAsyncDisposable
         foreach (var app in batch)
         {
             byId[EntryCacheKey(app)] = app;
+        }
+
+        _loadedApps = byId.Values.ToList();
+    }
+
+    private void ReplaceLoadedFolder(string folderId, IReadOnlyList<AppEntry> entries)
+    {
+        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? AppRegistry.RootFolderId : folderId;
+        var byId = _loadedApps
+            .Where(entry => !string.Equals(entry.ParentFolderId ?? AppRegistry.RootFolderId, normalizedFolderId, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(EntryCacheKey, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in entries)
+        {
+            byId[EntryCacheKey(entry)] = entry;
         }
 
         _loadedApps = byId.Values.ToList();
@@ -520,7 +584,7 @@ public sealed class AppController : IAsyncDisposable
     {
         return _loadedApps.Count > 0
             ? _loadedApps.ToList()
-            : _store.LoadCachedEntries();
+            : _store.LoadCachedEntriesForFolder(AppRegistry.RootFolderId);
     }
 
     private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries)
@@ -530,11 +594,8 @@ public sealed class AppController : IAsyncDisposable
             entry.Normalize();
         }
 
-        registry.CacheEntries(entries);
         _loadedApps = entries;
         await _bridge.CallAsync("_onLocalAppsChanged", entries);
-        await _bridge.CallAsync("_onStatus", "Atualizando índice...", true);
-        await registry.SynchronizeSerialsAsync(entries);
     }
 
     private Task SetBackgroundActivityAsync(string message, bool active)
@@ -579,7 +640,7 @@ public sealed class AppController : IAsyncDisposable
         try
         {
             await Task.Delay(80, cancellationToken);
-            var apps = (_loadedApps.Count > 0 ? _loadedApps : await Registry().LoadAsync())
+            var apps = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
                 .Where(app => visibleIds.Contains(app.ThreadId))
                 .ToList();
             var downloader = Downloader();
@@ -1242,7 +1303,7 @@ public sealed class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
-        var all = await registry.LoadAsync();
+        var all = CurrentLocalEntries();
         var opId = NewId();
         await OpsAddAsync(opId, "move", ids.Count == 1 ? "Movendo item" : "Movendo itens");
 
@@ -1267,7 +1328,7 @@ public sealed class AppController : IAsyncDisposable
 
             await OpsUpdateAsync(opId, "done", $"OK {moved} item(ns) movido(s).");
             await _bridge.CallAsync("_onStatus", $"OK {moved} item(ns) movido(s).", false);
-            await LoadAppsAsync();
+            await PublishLocalRegistryAsync(registry, all);
         }
         catch (Exception ex)
         {
@@ -1283,28 +1344,22 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task MoveEntryAsync(AppRegistry registry, List<AppEntry> all, AppEntry entry, string newPath)
     {
-        entry.ParentFolderId = FolderIdForPath(all.Where(candidate => !ReferenceEquals(candidate, entry)), newPath);
+        var targetFolderId = FolderIdForPath(all.Where(candidate => !ReferenceEquals(candidate, entry)), newPath)
+            ?? AppRegistry.RootFolderId;
+        var oldFolderPath = entry.Type == "folder" ? PathRules.ChildPath(entry) : "";
+        await registry.MoveEntryAsync(entry, targetFolderId, newPath);
         if (entry.Type == "folder")
         {
-            var oldFolderPath = PathRules.ChildPath(entry);
             var newFolderPath = PathRules.Normalize(newPath == "/" ? "/" + entry.Name : newPath + "/" + entry.Name);
-            foreach (var child in all.Where(child => child.Type != "folder").ToList())
+            foreach (var child in all.Where(child => !ReferenceEquals(child, entry)).ToList())
             {
                 var childPath = PathRules.Normalize(child.Path);
                 if (childPath == oldFolderPath || childPath.StartsWith(oldFolderPath + "/", StringComparison.Ordinal))
                 {
-                    await registry.DeleteEntryAsync(child);
                     child.Path = MovedChildPath(oldFolderPath, newFolderPath, childPath);
-                    child.MetadataMessageId = "";
-                    await registry.AddEntryAsync(child);
                 }
             }
         }
-
-        await registry.DeleteEntryAsync(entry);
-        entry.Path = newPath;
-        entry.MetadataMessageId = "";
-        await registry.AddEntryAsync(entry);
     }
 
     private async Task UpdateFolderColorAsync(string metadataMessageId, string color)
@@ -1312,7 +1367,7 @@ public sealed class AppController : IAsyncDisposable
         var safeColor = Regex.IsMatch(color ?? "", "^#[0-9a-fA-F]{6}$") ? color : "#C4C7C5";
 
         var registry = Registry();
-        var all = await registry.LoadAsync();
+        var all = CurrentLocalEntries();
         var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId && a.Type == "folder");
         if (entry == null)
         {
@@ -1320,12 +1375,10 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
-        await registry.DeleteEntryAsync(entry);
         entry.FolderColor = (safeColor ?? "#C4C7C5").ToUpperInvariant();
-        entry.MetadataMessageId = "";
-        await registry.AddEntryAsync(entry);
+        await registry.UpdateEntryAsync(entry);
+        await PublishLocalRegistryAsync(registry, all);
         await _bridge.CallAsync("_onStatus", "OK Cor da pasta atualizada.", false);
-        await LoadAppsAsync();
     }
 
     private async Task RenameItemAsync(string metadataMessageId, string newName)
@@ -1344,7 +1397,7 @@ public sealed class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
-        var all = await registry.LoadAsync();
+        var all = CurrentLocalEntries();
         var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
         if (entry == null)
         {
@@ -1363,27 +1416,21 @@ public sealed class AppController : IAsyncDisposable
             var oldFolderPath = PathRules.ChildPath(entry);
             var parentPath = PathRules.Normalize(entry.Path);
             var newFolderPath = PathRules.Normalize(parentPath == "/" ? "/" + clean : parentPath + "/" + clean);
-            var children = all
-                .Where(child => !ReferenceEquals(child, entry) && child.MetadataMessageId != entry.MetadataMessageId && IsInsideFolder(child, oldFolderPath))
-                .OrderBy(child => PathRules.Normalize(child.Path).Count(ch => ch == '/'))
-                .ToList();
-
-            foreach (var child in children)
+            entry.Name = clean;
+            await registry.UpdateEntryAsync(entry);
+            foreach (var child in all.Where(child => !ReferenceEquals(child, entry) && IsInsideFolder(child, oldFolderPath)))
             {
-                var childPath = PathRules.Normalize(child.Path);
-                await registry.DeleteEntryAsync(child);
-                child.Path = MovedChildPath(oldFolderPath, newFolderPath, childPath);
-                child.MetadataMessageId = "";
-                await registry.AddEntryAsync(child);
+                child.Path = MovedChildPath(oldFolderPath, newFolderPath, PathRules.Normalize(child.Path));
             }
         }
+        else
+        {
+            entry.Name = clean;
+            await registry.UpdateEntryAsync(entry);
+        }
 
-        await registry.DeleteEntryAsync(entry);
-        entry.Name = clean;
-        entry.MetadataMessageId = "";
-        await registry.AddEntryAsync(entry);
+        await PublishLocalRegistryAsync(registry, all);
         await _bridge.CallAsync("_onStatus", "OK Item renomeado.", false);
-        await LoadAppsAsync();
     }
 
     private async Task StartUploadDialogAsync()
@@ -1426,7 +1473,7 @@ public sealed class AppController : IAsyncDisposable
         var folderCount = 0;
         var skipped = 0;
         var registry = Registry();
-        var all = await registry.LoadAsync();
+        var all = CurrentLocalEntries();
 
         foreach (var path in paths)
         {
@@ -2651,7 +2698,7 @@ public sealed class AppController : IAsyncDisposable
             try
             {
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
-                var entry = (_loadedApps.Count > 0 ? _loadedApps : await Registry().LoadAsync(cancellationToken))
+                var entry = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
                     .FirstOrDefault(app => app.ThreadId == threadId);
                 totalDownloadBytes = Math.Max(0, entry?.SizeBytes ?? 0);
                 await OpsTransferMetricsAsync(opId, "download", 0, 1, 0, totalDownloadBytes);
@@ -2739,10 +2786,14 @@ public sealed class AppController : IAsyncDisposable
 
         _ = RunAsync(async () =>
         {
-            var all = await Registry().LoadAsync();
+            var all = CurrentLocalEntries();
             var entry = all.FirstOrDefault(a => a.Type == "folder" && a.Name == folderName && a.ThreadId == folderThreadId);
             var folderPath = entry != null ? PathRules.ChildPath(entry) : PathRules.Normalize(_currentPath == "/" ? "/" + folderName : _currentPath + "/" + folderName);
-            var toDownload = all.Where(a => a.Type != "folder" && (PathRules.Normalize(a.Path) == folderPath || PathRules.Normalize(a.Path).StartsWith(folderPath + "/", StringComparison.Ordinal))).ToList();
+            var toDownload = entry == null
+                ? []
+                : (await Registry().LoadFolderTreeAsync(entry))
+                    .Where(a => a.Type != "folder")
+                    .ToList();
             if (toDownload.Count == 0)
             {
                 await ErrorAsync("A pasta está vazia.");
@@ -2884,15 +2935,8 @@ public sealed class AppController : IAsyncDisposable
             }
             else
             {
-                if (!string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal))
-                {
-                    await Downloader().DeleteThreadAsync(threadId);
-                    ThumbnailCache.Remove(threadId);
-                }
-
-                await registry.DeleteEntryAsync(new AppEntry { MetadataMessageId = metadataMessageId });
-                all.RemoveAll(app => app.MetadataMessageId == metadataMessageId);
-                await PublishLocalRegistryAsync(registry, all);
+                await ErrorAsync("Item não encontrado na pasta carregada.");
+                return;
             }
 
             await _bridge.CallAsync("_onStatus", "OK Item apagado.", false);
@@ -2948,6 +2992,18 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
     {
+        foreach (var folder in selected.Where(IsFolderEntry).ToList())
+        {
+            var descendants = await registry.LoadFolderTreeAsync(folder);
+            foreach (var descendant in descendants)
+            {
+                if (!all.Any(existing => EntryCacheKey(existing).Equals(EntryCacheKey(descendant), StringComparison.OrdinalIgnoreCase)))
+                {
+                    all.Add(descendant);
+                }
+            }
+        }
+
         var plan = BuildDeletePlan(all, selected);
         var total = plan.Files.Count + plan.Folders.Count;
         if (total == 0)
@@ -3031,25 +3087,8 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task DeleteEntryAsync(AppRegistry registry, List<AppEntry> all, AppEntry entry)
     {
-        var isFolder = entry.Type == "folder" || entry.ThreadId.StartsWith("folder_", StringComparison.Ordinal);
-        if (isFolder)
-        {
-            var folderPath = PathRules.ChildPath(entry);
-            var children = all
-                .Where(a => a != entry)
-                .Where(a => PathRules.Normalize(a.Path) == folderPath || PathRules.Normalize(a.Path).StartsWith(folderPath + "/", StringComparison.Ordinal))
-                .ToList();
-            foreach (var child in children)
-            {
-                await DeleteStoredEntryAsync(registry, child);
-            }
-
-            await registry.DeleteEntryAsync(entry);
-        }
-        else
-        {
-            await DeleteStoredEntryAsync(registry, entry);
-        }
+        // The delete plan already expands folders recursively in a deterministic order.
+        await DeleteStoredEntryAsync(registry, entry);
     }
 
     private async Task DeleteStoredEntryAsync(AppRegistry registry, AppEntry entry)
@@ -3256,15 +3295,21 @@ public sealed class AppController : IAsyncDisposable
                 updated.BatchId = uploadResult.BatchId;
                 updated.ChunkCount = uploadResult.ChunkCount;
                 updated.ChunkMessageIds = uploadResult.ChunkMessageIds.ToList();
-var registry = Registry();
-                var all = await registry.LoadAsync();
-                updated.ParentFolderId = FolderIdForPath(all, path);
-                var newMetadataMessageId = await registry.AddEntryAsync(updated);
-
-                if (!string.IsNullOrWhiteSpace(metadataMessageId))
+                var registry = Registry();
+                var all = CurrentLocalEntries();
+                updated.ParentFolderId = FolderIdForPath(all, path) ?? AppRegistry.RootFolderId;
+                var existing = all.FirstOrDefault(app => app.MetadataMessageId == metadataMessageId);
+                if (existing != null)
                 {
-                    await registry.DeleteEntryAsync(new AppEntry { MetadataMessageId = metadataMessageId });
+                    updated.MetadataMessageId = existing.MetadataMessageId;
+                    await registry.UpdateEntryAsync(updated);
+                    all.Remove(existing);
                 }
+                else
+                {
+                    await registry.AddEntryAsync(updated);
+                }
+                all.Add(updated);
 
                 if (!string.IsNullOrWhiteSpace(threadId) && threadId != newThreadId)
                 {
@@ -3272,7 +3317,7 @@ var registry = Registry();
                     ThumbnailCache.Remove(threadId);
                 }
 
-                updated.MetadataMessageId = newMetadataMessageId;
+                await PublishLocalRegistryAsync(registry, all);
                 try
                 {
                     await uploader.ArchiveThreadAsync(newThreadId);
@@ -3478,7 +3523,7 @@ var registry = Registry();
 
         try
         {
-            var all = await Registry().LoadAsync();
+            var all = CurrentLocalEntries();
             var image = all.FirstOrDefault(app => app.ThreadId == threadId);
             if (image?.Encryption != null)
             {
@@ -3535,7 +3580,7 @@ var registry = Registry();
 
     private async Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageThreadId)
     {
-        var image = (_loadedApps.Count > 0 ? _loadedApps : await Registry().LoadAsync())
+        var image = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
             .FirstOrDefault(app => app.ThreadId == imageThreadId && app.Encryption != null);
         if (image == null)
         {
@@ -3764,7 +3809,7 @@ var registry = Registry();
 
     private AppRegistry Registry()
     {
-        return new AppRegistry(RequireApi(), _store, _store.Load());
+        return _registry ??= new AppRegistry(RequireApi(), _store, _store.Load());
     }
 
     private ForumDownloader Downloader()
@@ -3920,7 +3965,7 @@ var registry = Registry();
         await _bridge.CallAsync("_onStatus", $"Retomando {states.Count} transferência(s)...", true);
         var settings = _store.Load();
         var registry = Registry();
-        var all = await registry.LoadAsync();
+        var all = CurrentLocalEntries();
         var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
         var throttle = new UiThrottle();
         var resumed = 0;
@@ -4322,7 +4367,7 @@ var registry = Registry();
     {
         try
         {
-            return (await Registry().LoadAsync()).FirstOrDefault(a => a.ThreadId == threadId)?.SizeBytes ?? -1;
+            return CurrentLocalEntries().FirstOrDefault(a => a.ThreadId == threadId)?.SizeBytes ?? -1;
         }
         catch
         {

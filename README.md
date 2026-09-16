@@ -1,36 +1,72 @@
 # Organessônium
 
-Este repositório contém a versão desktop C# WPF + WebView2 do Organessônium. O aplicativo usa o Discord como armazenamento de payloads, o canal `names` como índice estrutural autoritativo e o canal `serial` como índice rápido por pasta.
+Este repositório contém a versão desktop C# WPF + WebView2 do Organessônium. O aplicativo usa o Discord como armazenamento de payloads, com um índice hierárquico por pasta para que a abertura da raiz não dependa da quantidade total de arquivos no servidor.
 
 ## Arquitetura de dados
 
 - `Bridge/AppController.cs` coordena upload, download, previews, transferências e a ponte WebView2.
 - `Services/ForumUploader.cs` cria posts e mensagens com attachments no fórum de arquivos.
 - `Services/ForumDownloader.cs` resolve as mensagens referenciadas pelo metadata, baixa as partes e monta o arquivo final na ordem dos índices.
-- `Services/MetadataService.cs` publica e lê o metadata estrutural no canal `names`.
-- `Services/SerialIndexService.cs` lê, valida, mantém em cache e publica o índice binário rápido por pasta no canal `serial`.
+- `Services/AppRegistry.cs` resolve o mapa `folderId -> threadId`, abre somente o índice da pasta requisitada e atualiza os caches afetados por cada operação.
+- `Services/MetadataService.cs` publica e lê o mapping no `names` e os metadados de filhos diretos nos threads de índice.
+- `Services/SerialIndexService.cs` lê, valida, mantém em memória e publica o serial binário de uma única pasta por vez no canal `serial`.
 - `Services/FolderSerialCodec.cs` codifica e decodifica o formato binário versionado `OSER` usado pelos seriais.
-- `Services/SettingsStore.cs` mantém configurações, o índice local `app_entries`, cache de previews e estados de transferência no diretório de dados.
+- `Services/SettingsStore.cs` mantém configurações, os caches locais `app_entries` e `folder_index_map`, previews e estados de transferência no diretório de dados.
 
-Um arquivo é identificado por `fileId`; o metadata associa esse identificador ao `threadId` do fórum, aos IDs das mensagens dos chunks, ao nome e MIME originais, a `sizeBytes` em plaintext, ao `parentFolderId` e às referências de prévias. Pastas usam `folderId`; o `parentFolderId` estabelece a árvore. O metadata não é criptografado, pois é o índice necessário para localizar os blobs no Discord.
+Um arquivo é identificado por `fileId`; seu metadata associa esse identificador ao `threadId` de payload, aos IDs das mensagens dos chunks, ao nome e MIME originais, a `sizeBytes` em plaintext, ao `parentFolderId` e às referências de prévias. Pastas usam `folderId`; o `parentFolderId` estabelece a árvore. Os IDs são preservados em rename e move. O metadata não é criptografado, pois é o índice necessário para localizar os blobs no Discord.
 
 ## Índice serial
 
-O canal de texto `serial` contém uma mensagem do bot para cada pasta materializada. O conteúdo da mensagem é um envelope JSON compacto com `schema`, `entryType: "folderSerial"`, `folderId`, `folderName` opcional e o `sha256` do anexo. O anexo usa a extensão `.bin` e o formato binário `OSER` versionado; ele guarda os filhos diretos da pasta, seus nomes, IDs, relações, MIME, timestamps, referências de preview, cores e os totais agregados da pasta. O serial não substitui o metadata completo do arquivo: tamanho, chunks e demais dados necessários para transferir o arquivo continuam sendo lidos do canal `names` e preservados no cache local.
+Cada pasta, inclusive `root`, possui exatamente um serial `.bin` próprio. O canal de texto `serial` contém uma mensagem do bot para esse serial, com o envelope JSON `folderSerial`, `folderId`, nome opcional e SHA-256 do anexo. O anexo usa a extensão `.bin` e o formato binário versionado `OSER`; ele guarda somente os filhos diretos, seus IDs, relações, MIME, timestamps, referências de preview, cores, favorito e totais dessa pasta.
 
-Na inicialização, o app lê primeiro os seriais válidos já armazenados em `OrganessoniumData\Serials` e tenta atualizar somente os hashes ausentes ou divergentes no canal `serial`. Esses resumos são enviados à interface imediatamente para acelerar a primeira renderização. Em paralelo limitado pelo número de `SearchWorkers`, os anexos novos são baixados, verificados por SHA-256 e decodificados; entradas completas previamente armazenadas no SQLite são usadas para reidratar os campos de transferência. Instalações antigas sem `serialChannelId` continuam usando o caminho autoritativo do canal `names` até que o canal seja configurado novamente.
+O serial é o fast-path persistente. Ele é mantido em `OrganessoniumData\Serials` e, depois da primeira leitura, também em memória durante a sessão. Abrir a raiz lê somente o serial da raiz. Abrir `/Fotos` lê somente o serial de `Fotos`; não lê os seriais das subpastas. Se o serial local estiver ausente, o app baixa apenas o anexo indicado pelo mapping daquela pasta, valida o SHA-256 e grava o arquivo localmente por escrita atômica.
 
-Depois da varredura dos seriais, o canal `names` é lido por páginas em paralelo. As janelas de busca são calculadas entre o snowflake do próprio canal e a mensagem mais nova, evitando varrer períodos vazios desde 2015. Os `GET` dessa varredura usam os `SearchWorkers` configurados sem passar pela trava usada para escrita, mas continuam respeitando o cooldown de rate limit compartilhado por rota. O metadata de cada mensagem é desserializado em paralelo e somente envelopes válidos e únicos entram no resultado. Ao final, essa leitura completa do `names` permanece autoritativa, atualiza `app_entries` e sincroniza apenas os seriais cujo conteúdo mudou. Mensagens de serial duplicadas ou hashes antigos são removidos durante a sincronização.
+Depois de renderizar o conteúdo conhecido, o app reconcilia em segundo plano o thread remoto daquela mesma pasta. O resultado atualiza `app_entries`, o serial correspondente e a interface visível quando houver mudança. A sincronização não percorre todos os seriais nem todos os threads do fórum durante a inicialização.
 
-O cache local e os seriais disponíveis aparecem imediatamente, mas o contador da varredura começa em zero. Durante a leitura do `names`, ele representa somente a quantidade de metadados válidos e únicos encontrados no servidor, não mensagens brutas do bot nem o total do cache local. Ao criar uma pasta ou excluir itens, o app trabalha sobre a lista local já exibida, atualiza SQLite e interface imediatamente e sincroniza o canal `serial` sem iniciar uma nova varredura completa do `names`. Enquanto essa operação termina, a interface exibe o aviso `Em andamento...`, que pode ser ocultado sem cancelar a operação.
+`AppRegistry` deduplica uma reconciliação em andamento por `folderId`. A paginação e o parsing de um thread ou do canal `names` usam `SearchWorkers` com concorrência limitada. `DiscordApiClient` mantém o controle de rota e respeita o `retry_after` de HTTP 429, portanto uma verificação em segundo plano não dispara requisições ilimitadas nem duplica o trabalho de uma navegação.
 
 ## Metadata publica
 
-A metadata publica fica no canal `names` do Discord. O app envia JSON inline minificado quando couber em uma mensagem; quando passar do limite de caracteres do Discord, envia um anexo `metadata.json` formatado.
+O canal de texto `names` é pequeno e contém somente mappings `folderId -> threadId`; ele não armazena mais metadata global de arquivos ou pastas. A mensagem do mapping é JSON inline minificado e inclui também a referência do serial atual quando ele existir. O ID da própria mensagem de `names` é mantido no cache local para atualização e remoção direta.
+
+O fórum configurado em `appsForumId` contém dois tipos de post: posts de payload já usados por upload e posts `index-*` de índice de pasta. Cada post de índice possui uma primeira mensagem `folderIndexHeader` para identificação e, depois, somente os metadados `file` e `folder` dos filhos diretos daquela pasta. O `threadId` de payload continua pertencendo ao arquivo; o `threadId` de índice de uma pasta é resolvido pelo mapping em `names`.
 
 Regra principal: a presenca de um campo significa que o recurso existe. A ausencia significa que o recurso nao existe ou nao se aplica.
 
-O metadata novo nao deve incluir campos nulos, arrays vazios, objetos vazios, `enabled = false`, campos temporarios da UI, campos de video em imagens, nem campos de arquivo em pastas.
+O metadata novo nao deve incluir campos nulos, arrays vazios, objetos vazios, `enabled = false`, campos temporarios da UI, campos de video em imagens, nem campos de arquivo em pastas. Arquivos e pastas são publicados no thread de índice do respectivo pai, não no `names`.
+
+### Mapping no `names`
+
+```json
+{
+  "schemaVersion": 2,
+  "entryType": "folderIndex",
+  "folderId": "root",
+  "threadId": "id-do-thread-de-indice-root",
+  "serialMessageId": "id-da-mensagem-do-serial",
+  "serialSha256": "sha256-do-anexo-binario"
+}
+```
+
+`serialMessageId` e `serialSha256` são opcionais até a primeira sincronização do serial. O ID da mensagem de `names` não é colocado dentro do JSON: ele é o ID retornado pelo Discord.
+
+### Cabeçalho do thread de índice
+
+```json
+{
+  "schemaVersion": 2,
+  "entryType": "folderIndexHeader",
+  "folderId": "root",
+  "parentFolderId": "root",
+  "name": "root"
+}
+```
+
+### Configuração manual do Discord
+
+Antes de usar este protocolo, configure os três canais no assistente do app: um canal de texto `names`, um fórum em `appsForumId` e um canal de texto `serial`. O bot precisa de acesso de leitura ao histórico, envio de mensagens e anexos, criação de posts públicos no fórum, edição e exclusão das próprias mensagens e gerenciamento de threads.
+
+Não há migração nem fallback automático. Para migrar um servidor antigo, remova do `names` todos os metadados globais antigos. Para cada pasta, crie manualmente o post de índice com o cabeçalho acima, mova para ele apenas os metadados diretos dos seus filhos e publique no `names` um mapping para o thread correspondente. Inclua o mapping de `root`. Alternativamente, com `names` totalmente vazio, deixe o app criar automaticamente o índice de `root` na primeira abertura e recrie a estrutura pelo aplicativo. Não misture o layout antigo e o novo.
 
 ### Imagem com thumbnail
 
@@ -154,6 +190,8 @@ Entradas legadas sem `encryption` seguem exatamente o caminho anterior de downlo
 
 ## Persistência local
 
-As configurações e os índices locais ficam em `organessonium.db`, dentro da pasta de dados. A tabela `settings` usa `key`, `value` e `updated_at`; cada gravação atualiza o valor e o horário em UTC pelo SQLite. A tabela `app_entries` mantém também versão, modo e salt de criptografia para o índice local, sem armazenar qualquer chave. Os anexos seriais são mantidos em `OrganessoniumData\Serials`, nomeados por hash para evitar colisões e reutilização de conteúdo inválido. Na inicialização, o app cria a coluna `updated_at` quando encontra um banco legado e preenche os registros antigos antes de carregar as preferências.
+As configurações e os índices locais ficam em `organessonium.db`, dentro da pasta de dados. A tabela `settings` usa `key`, `value` e `updated_at`; cada gravação atualiza o valor e o horário em UTC pelo SQLite. `folder_index_map` persiste `folderId`, `threadId`, ID da mensagem em `names` e a referência do serial. `app_entries` é cache dos filhos já conhecidos, agrupado por `parent_folder_id`, e mantém também versão, modo e salt de criptografia sem armazenar qualquer chave.
+
+Ao abrir uma pasta, o cache e o serial daquela pasta são mostrados primeiro. Em seguida, somente o thread remoto dessa pasta é consultado. Falhas temporárias, serial corrompido, thread inacessível ou HTTP 429 não removem o cache local válido: a operação é registrada e a interface continua com o último estado conhecido. A exclusão, criação, rename e move atualizam somente os threads, caches e seriais dos pais envolvidos; a exclusão de uma pasta também remove seu mapping, serial e thread de índice depois de remover seus descendentes.
 
 Para detalhes de arquitetura e compatibilidade entre versoes, veja `Information.md`.

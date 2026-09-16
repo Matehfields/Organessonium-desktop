@@ -22,6 +22,8 @@ internal static class Program
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
+        ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
+        ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
@@ -409,7 +411,8 @@ internal static class Program
                         Version = 1,
                         Mode = EncryptionModes.Standard,
                         Salt = "NyasiAVslEKTO__DCbEeKg"
-                    }
+                    },
+                    Favorite = true
                 }
             ]
         };
@@ -421,10 +424,82 @@ internal static class Program
                     restored.Aggregate.TotalBytes == 42 &&
                     child?.Id == "file-id" &&
                     child.Encryption?.Salt == "NyasiAVslEKTO__DCbEeKg" &&
-                    child.MimeType == "image/jpeg";
+                    child.MimeType == "image/jpeg" &&
+                    child.Favorite;
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("o serial OSER não voltou com a estrutura esperada"));
+    }
+
+    private static async Task<TestOutcome> FolderIndexMappingProtocolAsync()
+    {
+        var service = new MetadataService();
+        var mapping = new FolderIndexMapping(
+            "root",
+            "root-thread",
+            "names-message",
+            "serial-message",
+            new string('a', 64));
+        var envelope = await service.ReadEnvelopeAsync(new DiscordMessageDto
+        {
+            Id = mapping.NamesMessageId,
+            Content = service.SerializeFolderIndex(mapping)
+        });
+        var mappings = await service.ReadFolderIndexMappingsInParallelAsync(
+            [new DiscordMessageDto { Id = mapping.NamesMessageId, Content = service.SerializeFolderIndex(mapping) }],
+            maxConcurrency: 2);
+        var valid = envelope?.Entry is FolderIndexMetadata index &&
+                    index.FolderId == mapping.FolderId &&
+                    index.ThreadId == mapping.ThreadId &&
+                    mappings.Count == 1 &&
+                    mappings[0] == mapping;
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o mapping folderId -> threadId não foi serializado e recuperado corretamente");
+    }
+
+    private static async Task<TestOutcome> FolderIndexReturnsOnlyDirectChildrenAsync()
+    {
+        var service = new MetadataService();
+        var messages = new[]
+        {
+            new DiscordMessageDto
+            {
+                Id = "header",
+                Content = service.SerializeFolderIndexHeader("root", "root", "root")
+            },
+            new DiscordMessageDto
+            {
+                Id = "file-root",
+                Content = """{"schemaVersion":2,"entryType":"file","fileId":"root-file","threadId":"payload-thread","name":"root.txt","mimeType":"text/plain","sizeBytes":1,"uploadedAt":"2026-09-16T00:00:00Z","parentFolderId":"root","chunks":["chunk"]}"""
+            },
+            new DiscordMessageDto
+            {
+                Id = "folder-child",
+                Content = """{"schemaVersion":2,"entryType":"folder","folderId":"photos","name":"Fotos","createdAt":"2026-09-16T00:00:00Z","parentFolderId":"root","folderColor":"#C4C7C5"}"""
+            },
+            new DiscordMessageDto
+            {
+                Id = "file-nested",
+                Content = """{"schemaVersion":2,"entryType":"file","fileId":"nested-file","threadId":"payload-thread","name":"nested.txt","mimeType":"text/plain","sizeBytes":1,"uploadedAt":"2026-09-16T00:00:00Z","parentFolderId":"photos","chunks":["chunk"]}"""
+            }
+        };
+        var envelopes = await service.ReadEnvelopesInParallelAsync(messages, maxConcurrency: 2);
+        var entries = service.ToFolderEntries(
+            envelopes,
+            "root",
+            "/",
+            new Dictionary<string, FolderIndexMapping>
+            {
+                ["photos"] = new("photos", "photos-thread", "names-photos")
+            });
+        var valid = entries.Count == 2 &&
+                    entries.Any(entry => entry.FileId == "root-file") &&
+                    entries.Any(entry => entry.FolderId == "photos" && entry.ThreadId == "photos-thread") &&
+                    entries.All(entry => entry.FileId != "nested-file");
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o índice da pasta incluiu um descendente ou não resolveu o thread da pasta filha");
     }
 
     private static Task<TestOutcome> SerialMessageEnvelopeProtocolAsync()

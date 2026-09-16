@@ -4586,7 +4586,11 @@ function makeMoveItem(path, label, depth) {
 function navigate(path, addHistory = true) {
     if (addHistory && path !== currentPath) { historyBack.push(currentPath); historyForward = []; }
     currentPath = path; searchQuery = ''; $('search-input').value = '';
-    window.bridge.setCurrentPath(path); updateNavButtons(); render(); requestVisibleThumbnails();
+    const folder = path === '/'
+        ? null
+        : allApps.find(app => isFolderApp(app) && folderPathForApp(app) === path);
+    window.bridge.setCurrentPath(path, path === '/' ? 'root' : (folder && folder.folderId) || '');
+    updateNavButtons(); render(); requestVisibleThumbnails();
 }
 function goBack()    { if (!historyBack.length) return;    historyForward.push(currentPath); navigate(historyBack.pop(), false); }
 function goForward() { if (!historyForward.length) return; historyBack.push(currentPath);    navigate(historyForward.pop(), false); }

@@ -77,6 +77,54 @@ public sealed class FolderMetadata : MetadataEntry
     public string FolderColor { get; set; } = "#C4C7C5";
 }
 
+// Stored in the names text channel. It is intentionally limited to locating a
+// folder index thread and its latest serial, never to listing every file.
+public sealed class FolderIndexMetadata : MetadataEntry
+{
+    public FolderIndexMetadata()
+    {
+        EntryType = "folderIndex";
+    }
+
+    [JsonPropertyName("folderId")]
+    public string FolderId { get; set; } = "";
+
+    [JsonPropertyName("threadId")]
+    public string ThreadId { get; set; } = "";
+
+    [JsonPropertyName("serialMessageId")]
+    public string? SerialMessageId { get; set; }
+
+    [JsonPropertyName("serialSha256")]
+    public string? SerialSha256 { get; set; }
+}
+
+// The first message of an index thread identifies the folder for human
+// inspection and validation. Child metadata messages stay in the same thread.
+public sealed class FolderIndexHeaderMetadata : MetadataEntry
+{
+    public FolderIndexHeaderMetadata()
+    {
+        EntryType = "folderIndexHeader";
+    }
+
+    [JsonPropertyName("folderId")]
+    public string FolderId { get; set; } = "";
+
+    [JsonPropertyName("parentFolderId")]
+    public string ParentFolderId { get; set; } = "root";
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+}
+
+public sealed record FolderIndexMapping(
+    string FolderId,
+    string ThreadId,
+    string NamesMessageId,
+    string SerialMessageId = "",
+    string SerialSha256 = "");
+
 public sealed class PreviewMetadata
 {
     [JsonPropertyName("thumbnailMessageId")]

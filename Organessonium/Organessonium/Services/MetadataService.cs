@@ -38,7 +38,7 @@ public sealed class MetadataService
 
     public async Task<string> SendEntryAsync(
         DiscordApiClient discord,
-        string namesChannelId,
+        string channelId,
         AppEntry entry,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
@@ -49,13 +49,13 @@ public sealed class MetadataService
         {
             var message = payload.Attachment == null
                 ? await discord.CreateMessageAsync(
-                    namesChannelId,
+                    channelId,
                     payload.Content,
                     cancellationToken,
                     onRateLimitWait)
                 : await SendMetadataFileAsync(
                     discord,
-                    namesChannelId,
+                    channelId,
                     payload.Attachment,
                     cancellationToken,
                     onRateLimitWait);
@@ -97,14 +97,132 @@ public sealed class MetadataService
 
     public async Task DeleteEntryAsync(
         DiscordApiClient discord,
-        string namesChannelId,
+        string channelId,
         AppEntry entry,
         CancellationToken cancellationToken = default)
     {
         if (!string.IsNullOrWhiteSpace(entry.MetadataMessageId))
         {
-            await discord.DeleteMessageAsync(namesChannelId, entry.MetadataMessageId, cancellationToken);
+            await discord.DeleteMessageAsync(channelId, entry.MetadataMessageId, cancellationToken);
         }
+    }
+
+    public async Task<string> UpsertEntryAsync(
+        DiscordApiClient discord,
+        string channelId,
+        AppEntry entry,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        entry.Normalize();
+        var payload = await CreateWritePayloadAsync(entry, cancellationToken);
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(entry.MetadataMessageId) && payload.Attachment == null)
+            {
+                var updated = await discord.UpdateMessageAsync(
+                    channelId,
+                    entry.MetadataMessageId,
+                    payload.Content,
+                    cancellationToken,
+                    onRateLimitWait);
+                entry.MetadataMessageId = updated.Id;
+                return updated.Id;
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.MetadataMessageId))
+            {
+                await discord.DeleteMessageAsync(channelId, entry.MetadataMessageId, cancellationToken);
+                entry.MetadataMessageId = "";
+            }
+
+            var message = payload.Attachment == null
+                ? await discord.CreateMessageAsync(channelId, payload.Content, cancellationToken, onRateLimitWait)
+                : await SendMetadataFileAsync(discord, channelId, payload.Attachment, cancellationToken, onRateLimitWait);
+            entry.MetadataMessageId = message.Id;
+            return message.Id;
+        }
+        finally
+        {
+            try { payload.Attachment?.Directory?.Delete(true); } catch { }
+        }
+    }
+
+    public string SerializeFolderIndex(FolderIndexMapping mapping)
+    {
+        var metadata = new FolderIndexMetadata
+        {
+            SchemaVersion = SchemaVersion,
+            FolderId = mapping.FolderId,
+            ThreadId = mapping.ThreadId,
+            SerialMessageId = string.IsNullOrWhiteSpace(mapping.SerialMessageId) ? null : mapping.SerialMessageId,
+            SerialSha256 = string.IsNullOrWhiteSpace(mapping.SerialSha256) ? null : mapping.SerialSha256
+        };
+        Validate(metadata);
+        return SerializeMetadata(metadata, CompactJsonOptions);
+    }
+
+    public string SerializeFolderIndexHeader(string folderId, string parentFolderId, string name)
+    {
+        var metadata = new FolderIndexHeaderMetadata
+        {
+            SchemaVersion = SchemaVersion,
+            FolderId = folderId,
+            ParentFolderId = string.IsNullOrWhiteSpace(parentFolderId) ? "root" : parentFolderId,
+            Name = name
+        };
+        Validate(metadata);
+        return SerializeMetadata(metadata, CompactJsonOptions);
+    }
+
+    public async Task<IReadOnlyList<FolderIndexMapping>> ReadFolderIndexMappingsInParallelAsync(
+        IReadOnlyList<DiscordMessageDto> messages,
+        int maxConcurrency,
+        CancellationToken cancellationToken = default)
+    {
+        var envelopes = await ReadEnvelopesInParallelAsync(messages, maxConcurrency, cancellationToken);
+        return envelopes
+            .Where(envelope => envelope.Entry is FolderIndexMetadata)
+            .Select(envelope =>
+            {
+                var index = (FolderIndexMetadata)envelope.Entry;
+                return new FolderIndexMapping(
+                    index.FolderId,
+                    index.ThreadId,
+                    envelope.MessageId,
+                    index.SerialMessageId ?? "",
+                    index.SerialSha256 ?? "");
+            })
+            .ToList();
+    }
+
+    public List<AppEntry> ToFolderEntries(
+        IReadOnlyList<MetadataEnvelope> envelopes,
+        string folderId,
+        string folderPath,
+        IReadOnlyDictionary<string, FolderIndexMapping> mappings)
+    {
+        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? "root" : folderId;
+        var result = new List<AppEntry>();
+        foreach (var envelope in envelopes)
+        {
+            var entry = ToAppEntry(envelope);
+            if (entry == null || !string.Equals(entry.ParentFolderId ?? "root", normalizedFolderId, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            entry.Path = PathRules.Normalize(folderPath);
+            if (entry.Type == "folder" && mappings.TryGetValue(entry.FolderId, out var mapping))
+            {
+                entry.ThreadId = mapping.ThreadId;
+            }
+
+            entry.Normalize();
+            result.Add(entry);
+        }
+
+        return result;
     }
 
     public async Task<FileInfo> CreateMetadataFileAsync(AppEntry entry, CancellationToken cancellationToken = default)
@@ -233,17 +351,6 @@ public sealed class MetadataService
             .ToList();
     }
 
-    public List<AppEntry> ToAppEntries(IReadOnlyList<MetadataEnvelope> envelopes)
-    {
-        var entries = envelopes
-            .Select(ToAppEntry)
-            .Where(entry => entry != null)
-            .Cast<AppEntry>()
-            .ToList();
-        ResolvePaths(entries);
-        return entries;
-    }
-
     public AppEntry? ToAppEntry(MetadataEnvelope envelope)
     {
         AppEntry entry;
@@ -366,6 +473,8 @@ public sealed class MetadataService
         {
             "file" => root.Deserialize<FileMetadata>(JsonOptions.Web),
             "folder" => root.Deserialize<FolderMetadata>(JsonOptions.Web),
+            "folderIndex" => root.Deserialize<FolderIndexMetadata>(JsonOptions.Web),
+            "folderIndexHeader" => root.Deserialize<FolderIndexHeaderMetadata>(JsonOptions.Web),
             _ => null
         };
     }
@@ -376,7 +485,8 @@ public sealed class MetadataService
         {
             SchemaVersion = SchemaVersion,
             FolderId = string.IsNullOrWhiteSpace(entry.FolderId) ? Guid.NewGuid().ToString("N") : entry.FolderId,
-            ThreadId = entry.ThreadId.StartsWith("folder_", StringComparison.OrdinalIgnoreCase) ? null : entry.ThreadId,
+            // The authoritative folderId -> threadId relationship lives in names.
+            ThreadId = null,
             Name = entry.Name,
             CreatedAt = NormalizeIsoTimestamp(entry.UploadedAt),
             ParentFolderId = NormalizeFolderParentId(entry.ParentFolderId),
@@ -452,61 +562,22 @@ public sealed class MetadataService
                 Require(!string.IsNullOrWhiteSpace(folder.FolderId), "folderId ausente.");
                 Require(!string.IsNullOrWhiteSpace(folder.Name), "name ausente.");
                 break;
+            case FolderIndexMetadata index:
+                Require(index.EntryType == "folderIndex", "entryType de índice de pasta inválido.");
+                Require(!string.IsNullOrWhiteSpace(index.FolderId), "folderId ausente no índice.");
+                Require(!string.IsNullOrWhiteSpace(index.ThreadId), "threadId ausente no índice.");
+                if (!string.IsNullOrWhiteSpace(index.SerialSha256))
+                {
+                    Require(index.SerialSha256.All(Uri.IsHexDigit), "serialSha256 inválido.");
+                }
+                break;
+            case FolderIndexHeaderMetadata header:
+                Require(header.EntryType == "folderIndexHeader", "entryType de cabeçalho de pasta inválido.");
+                Require(!string.IsNullOrWhiteSpace(header.FolderId), "folderId ausente no cabeçalho.");
+                Require(!string.IsNullOrWhiteSpace(header.Name), "name ausente no cabeçalho.");
+                break;
             default:
                 throw new InvalidOperationException("metadata.json desconhecido.");
-        }
-    }
-
-    private static void ResolvePaths(List<AppEntry> entries)
-    {
-        var folders = entries
-            .Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId))
-            .ToDictionary(entry => entry.FolderId, StringComparer.OrdinalIgnoreCase);
-        var resolving = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        string FolderFullPath(AppEntry folder)
-        {
-            ResolveFolderPath(folder);
-            return PathRules.Normalize(folder.Path == "/" ? "/" + folder.Name : folder.Path + "/" + folder.Name);
-        }
-
-        void ResolveFolderPath(AppEntry folder)
-        {
-            if (string.IsNullOrWhiteSpace(folder.FolderId) || !resolving.Add(folder.FolderId))
-            {
-                folder.Path = "/";
-                return;
-            }
-
-            try
-            {
-                if (string.IsNullOrWhiteSpace(folder.ParentFolderId) ||
-                    folder.ParentFolderId.Equals("root", StringComparison.OrdinalIgnoreCase) ||
-                    !folders.TryGetValue(folder.ParentFolderId, out var parent))
-                {
-                    folder.Path = "/";
-                    return;
-                }
-
-                folder.Path = FolderFullPath(parent);
-            }
-            finally
-            {
-                resolving.Remove(folder.FolderId);
-            }
-        }
-
-        foreach (var folder in folders.Values)
-        {
-            ResolveFolderPath(folder);
-        }
-
-        foreach (var file in entries.Where(entry => entry.Type != "folder"))
-        {
-            file.Path = !string.IsNullOrWhiteSpace(file.ParentFolderId) &&
-                        folders.TryGetValue(file.ParentFolderId, out var parent)
-                ? FolderFullPath(parent)
-                : "/";
         }
     }
 

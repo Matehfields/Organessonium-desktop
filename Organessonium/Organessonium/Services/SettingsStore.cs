@@ -165,8 +165,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
-    public List<AppEntry> LoadCachedEntries()
+    public List<AppEntry> LoadCachedEntriesForFolder(string folderId)
     {
+        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? "root" : folderId;
         lock (_lock)
         {
             var entries = new List<AppEntry>();
@@ -179,61 +180,99 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
                        encryption_mode, encryption_salt
                 FROM app_entries
+                WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
                 ORDER BY rowid
                 """;
-
+            command.Parameters.AddWithValue("$folderId", normalizedFolderId);
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
-                try
+                var entry = ReadCachedEntry(reader);
+                if (entry != null)
                 {
-                    var entry = new AppEntry
-                    {
-                        MetadataMessageId = reader.GetString(0),
-                        Name = reader.GetString(1),
-                        ThreadId = reader.GetString(2),
-                        UploadedAt = reader.GetString(3),
-                        SizeBytes = Math.Max(0, reader.GetInt64(4)),
-                        Path = reader.GetString(5),
-                        FolderColor = reader.GetString(6),
-                        Type = reader.GetString(7),
-                        MimeType = reader.GetString(8),
-                        BatchId = reader.GetString(11),
-                        PreviewMessageId = reader.GetString(12),
-                        VideoPreviewMessageId = reader.GetString(13),
-                        VideoPreviewSizeBytes = Math.Max(0, reader.GetInt64(15)),
-                        FileId = reader.GetString(16),
-                        FolderId = reader.GetString(17),
-                        ParentFolderId = reader.GetString(18)
-                    };
-                    var encryptionVersion = reader.GetInt32(19);
-                    if (encryptionVersion > 0)
-                    {
-                        entry.Encryption = new EncryptionMetadata
-                        {
-                            Version = encryptionVersion,
-                            Mode = reader.GetString(20),
-                            Salt = reader.GetString(21)
-                        };
-                    }
-                    entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
-                    entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
-                    entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
-                    if (string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
-                    {
-                        entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
-                    }
-
-                    entry.Normalize();
                     entries.Add(entry);
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Error("Settings.LoadCachedEntry", ex);
                 }
             }
 
             return entries;
+        }
+    }
+
+    public AppEntry? LoadCachedFolderEntry(string folderId)
+    {
+        if (string.IsNullOrWhiteSpace(folderId) || folderId.Equals("root", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT names_message_id, name, thread_id, uploaded_at, size_bytes, path, folder_color, type,
+                       mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
+                       video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
+                       file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
+                       encryption_mode, encryption_salt
+                FROM app_entries
+                WHERE folder_id = $folderId AND type = 'folder'
+                LIMIT 1
+                """;
+            command.Parameters.AddWithValue("$folderId", folderId);
+            using var reader = command.ExecuteReader();
+            return reader.Read() ? ReadCachedEntry(reader) : null;
+        }
+    }
+
+    private static AppEntry? ReadCachedEntry(SqliteDataReader reader)
+    {
+        try
+        {
+            var entry = new AppEntry
+            {
+                MetadataMessageId = reader.GetString(0),
+                Name = reader.GetString(1),
+                ThreadId = reader.GetString(2),
+                UploadedAt = reader.GetString(3),
+                SizeBytes = Math.Max(0, reader.GetInt64(4)),
+                Path = reader.GetString(5),
+                FolderColor = reader.GetString(6),
+                Type = reader.GetString(7),
+                MimeType = reader.GetString(8),
+                BatchId = reader.GetString(11),
+                PreviewMessageId = reader.GetString(12),
+                VideoPreviewMessageId = reader.GetString(13),
+                VideoPreviewSizeBytes = Math.Max(0, reader.GetInt64(15)),
+                FileId = reader.GetString(16),
+                FolderId = reader.GetString(17),
+                ParentFolderId = reader.GetString(18)
+            };
+            var encryptionVersion = reader.GetInt32(19);
+            if (encryptionVersion > 0)
+            {
+                entry.Encryption = new EncryptionMetadata
+                {
+                    Version = encryptionVersion,
+                    Mode = reader.GetString(20),
+                    Salt = reader.GetString(21)
+                };
+            }
+            entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
+            entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
+            entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
+            if (string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
+            {
+                entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
+            }
+
+            entry.Normalize();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Settings.LoadCachedEntry", ex);
+            return null;
         }
     }
 
@@ -323,41 +362,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
             foreach (var entry in entries)
             {
-                using var insert = connection.CreateCommand();
-                insert.CommandText = """
-                    INSERT INTO app_entries
-                    (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
-                     mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
-                     video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
-                     encryption_version, encryption_mode, encryption_salt)
-                    VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
-                     $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
-                     $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
-                     $encryptionVersion, $encryptionMode, $encryptionSalt)
-                    """;
-                insert.Parameters.AddWithValue("$name", entry.Name);
-                insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
-                insert.Parameters.AddWithValue("$uploadedAt", entry.UploadedAt);
-                insert.Parameters.AddWithValue("$sizeBytes", entry.SizeBytes);
-                insert.Parameters.AddWithValue("$metadataMessageId", entry.MetadataMessageId);
-                insert.Parameters.AddWithValue("$path", entry.Path);
-                insert.Parameters.AddWithValue("$folderColor", entry.FolderColor);
-                insert.Parameters.AddWithValue("$type", entry.Type);
-                insert.Parameters.AddWithValue("$mimeType", entry.MimeType);
-                insert.Parameters.AddWithValue("$chunkMessageIds", System.Text.Json.JsonSerializer.Serialize(entry.ChunkMessageIds, JsonOptions.Web));
-                insert.Parameters.AddWithValue("$chunkCount", entry.ChunkCount);
-                insert.Parameters.AddWithValue("$batchId", entry.BatchId);
-                insert.Parameters.AddWithValue("$previewMessageId", entry.PreviewMessageId);
-                insert.Parameters.AddWithValue("$videoPreviewMessageId", entry.VideoPreviewMessageId);
-                insert.Parameters.AddWithValue("$videoPreviewChunkMessageIds", System.Text.Json.JsonSerializer.Serialize(entry.VideoPreviewChunkMessageIds, JsonOptions.Web));
-                insert.Parameters.AddWithValue("$videoPreviewSizeBytes", entry.VideoPreviewSizeBytes);
-                insert.Parameters.AddWithValue("$filedd", entry.FileId);
-                insert.Parameters.AddWithValue("$folderdd", entry.FolderId);
-                insert.Parameters.AddWithValue("$parentFolderId", (object?)entry.ParentFolderId ?? DBNull.Value);
-                insert.Parameters.AddWithValue("$encryptionVersion", entry.Encryption?.Version ?? 0);
-                insert.Parameters.AddWithValue("$encryptionMode", entry.Encryption?.Mode ?? "");
-                insert.Parameters.AddWithValue("$encryptionSalt", entry.Encryption?.Salt ?? "");
-                insert.ExecuteNonQuery();
+                InsertCachedEntry(connection, entry);
             }
 
             tx.Commit();
@@ -398,6 +403,15 @@ public sealed class SettingsStore : IEncryptionSecretStore
                 encryption_version INTEGER NOT NULL DEFAULT 0,
                 encryption_mode TEXT NOT NULL DEFAULT '',
                 encryption_salt TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS folder_index_map (
+                folder_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                names_message_id TEXT NOT NULL,
+                serial_message_id TEXT NOT NULL DEFAULT '',
+                serial_sha256 TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """;
         cmd.ExecuteNonQuery();
@@ -484,6 +498,204 @@ public sealed class SettingsStore : IEncryptionSecretStore
             command.Parameters.AddWithValue("$key", key);
             return command.ExecuteScalar() as string ?? "";
         }
+    }
+
+    public void CacheFolderEntries(string folderId, IEnumerable<AppEntry> entries)
+    {
+        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? "root" : folderId;
+        var list = entries.ToList();
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var tx = connection.BeginTransaction();
+            using (var delete = connection.CreateCommand())
+            {
+                delete.CommandText = "DELETE FROM app_entries WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId";
+                delete.Parameters.AddWithValue("$folderId", normalizedFolderId);
+                delete.ExecuteNonQuery();
+            }
+
+            foreach (var entry in list)
+            {
+                entry.Normalize();
+                InsertCachedEntry(connection, entry);
+            }
+
+            tx.Commit();
+        }
+    }
+
+    public void DeleteCachedEntry(string metadataMessageId)
+    {
+        if (string.IsNullOrWhiteSpace(metadataMessageId))
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM app_entries WHERE names_message_id = $messageId";
+            command.Parameters.AddWithValue("$messageId", metadataMessageId);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    private static void InsertCachedEntry(SqliteConnection connection, AppEntry entry)
+    {
+        using var insert = connection.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO app_entries
+            (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
+             mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
+             video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
+             encryption_version, encryption_mode, encryption_salt)
+            VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
+             $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
+             $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
+             $encryptionVersion, $encryptionMode, $encryptionSalt)
+            """;
+        insert.Parameters.AddWithValue("$name", entry.Name);
+        insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
+        insert.Parameters.AddWithValue("$uploadedAt", entry.UploadedAt);
+        insert.Parameters.AddWithValue("$sizeBytes", entry.SizeBytes);
+        insert.Parameters.AddWithValue("$metadataMessageId", entry.MetadataMessageId);
+        insert.Parameters.AddWithValue("$path", entry.Path);
+        insert.Parameters.AddWithValue("$folderColor", entry.FolderColor);
+        insert.Parameters.AddWithValue("$type", entry.Type);
+        insert.Parameters.AddWithValue("$mimeType", entry.MimeType);
+        insert.Parameters.AddWithValue("$chunkMessageIds", System.Text.Json.JsonSerializer.Serialize(entry.ChunkMessageIds, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$chunkCount", entry.ChunkCount);
+        insert.Parameters.AddWithValue("$batchId", entry.BatchId);
+        insert.Parameters.AddWithValue("$previewMessageId", entry.PreviewMessageId);
+        insert.Parameters.AddWithValue("$videoPreviewMessageId", entry.VideoPreviewMessageId);
+        insert.Parameters.AddWithValue("$videoPreviewChunkMessageIds", System.Text.Json.JsonSerializer.Serialize(entry.VideoPreviewChunkMessageIds, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$videoPreviewSizeBytes", entry.VideoPreviewSizeBytes);
+        insert.Parameters.AddWithValue("$filedd", entry.FileId);
+        insert.Parameters.AddWithValue("$folderdd", entry.FolderId);
+        insert.Parameters.AddWithValue("$parentFolderId", (object?)entry.ParentFolderId ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$encryptionVersion", entry.Encryption?.Version ?? 0);
+        insert.Parameters.AddWithValue("$encryptionMode", entry.Encryption?.Mode ?? "");
+        insert.Parameters.AddWithValue("$encryptionSalt", entry.Encryption?.Salt ?? "");
+        insert.ExecuteNonQuery();
+    }
+
+    public IReadOnlyDictionary<string, FolderIndexMapping> LoadFolderIndexMappings()
+    {
+        lock (_lock)
+        {
+            var result = new Dictionary<string, FolderIndexMapping>(StringComparer.OrdinalIgnoreCase);
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT folder_id, thread_id, names_message_id, serial_message_id, serial_sha256
+                FROM folder_index_map
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var folderId = reader.GetString(0);
+                var threadId = reader.GetString(1);
+                var namesMessageId = reader.GetString(2);
+                if (string.IsNullOrWhiteSpace(folderId) || string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(namesMessageId))
+                {
+                    continue;
+                }
+
+                result[folderId] = new FolderIndexMapping(
+                    folderId,
+                    threadId,
+                    namesMessageId,
+                    reader.GetString(3),
+                    reader.GetString(4));
+            }
+
+            return result;
+        }
+    }
+
+    public void ReplaceFolderIndexMappings(IEnumerable<FolderIndexMapping> mappings)
+    {
+        var list = mappings
+            .Where(mapping => !string.IsNullOrWhiteSpace(mapping.FolderId) &&
+                              !string.IsNullOrWhiteSpace(mapping.ThreadId) &&
+                              !string.IsNullOrWhiteSpace(mapping.NamesMessageId))
+            .GroupBy(mapping => mapping.FolderId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var tx = connection.BeginTransaction();
+            using (var delete = connection.CreateCommand())
+            {
+                delete.CommandText = "DELETE FROM folder_index_map";
+                delete.ExecuteNonQuery();
+            }
+
+            foreach (var mapping in list)
+            {
+                InsertFolderIndexMapping(connection, mapping);
+            }
+
+            tx.Commit();
+        }
+    }
+
+    public void UpsertFolderIndexMapping(FolderIndexMapping mapping)
+    {
+        if (string.IsNullOrWhiteSpace(mapping.FolderId) ||
+            string.IsNullOrWhiteSpace(mapping.ThreadId) ||
+            string.IsNullOrWhiteSpace(mapping.NamesMessageId))
+        {
+            throw new ArgumentException("Mapeamento de índice de pasta inválido.", nameof(mapping));
+        }
+
+        lock (_lock)
+        {
+            using var connection = Open();
+            InsertFolderIndexMapping(connection, mapping);
+        }
+    }
+
+    public void DeleteFolderIndexMapping(string folderId)
+    {
+        if (string.IsNullOrWhiteSpace(folderId))
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM folder_index_map WHERE folder_id = $folderId";
+            command.Parameters.AddWithValue("$folderId", folderId);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    private static void InsertFolderIndexMapping(SqliteConnection connection, FolderIndexMapping mapping)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO folder_index_map
+            (folder_id, thread_id, names_message_id, serial_message_id, serial_sha256, updated_at)
+            VALUES ($folderId, $threadId, $namesMessageId, $serialMessageId, $serialSha256, CURRENT_TIMESTAMP)
+            ON CONFLICT(folder_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                names_message_id = excluded.names_message_id,
+                serial_message_id = excluded.serial_message_id,
+                serial_sha256 = excluded.serial_sha256,
+                updated_at = excluded.updated_at
+            """;
+        command.Parameters.AddWithValue("$folderId", mapping.FolderId);
+        command.Parameters.AddWithValue("$threadId", mapping.ThreadId);
+        command.Parameters.AddWithValue("$namesMessageId", mapping.NamesMessageId);
+        command.Parameters.AddWithValue("$serialMessageId", mapping.SerialMessageId ?? "");
+        command.Parameters.AddWithValue("$serialSha256", mapping.SerialSha256 ?? "");
+        command.ExecuteNonQuery();
     }
 
     void IEncryptionSecretStore.WriteEncryptionSecret(string key, string value)

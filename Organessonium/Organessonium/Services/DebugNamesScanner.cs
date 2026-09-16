@@ -70,12 +70,12 @@ public sealed class DebugNamesScanner
 
         onProgress?.Invoke("fetch completo: " + messages.Count + " mensagens");
 
-        var cached = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
-        foreach (var cachedEntry in _store.LoadCachedEntries())
+        var cached = new Dictionary<string, FolderIndexMapping>(StringComparer.OrdinalIgnoreCase);
+        foreach (var mapping in _store.LoadFolderIndexMappings().Values)
         {
-            if (!string.IsNullOrWhiteSpace(cachedEntry.MetadataMessageId))
+            if (!string.IsNullOrWhiteSpace(mapping.NamesMessageId))
             {
-                cached[cachedEntry.MetadataMessageId] = cachedEntry;
+                cached[mapping.NamesMessageId] = mapping;
             }
         }
 
@@ -84,14 +84,7 @@ public sealed class DebugNamesScanner
         foreach (var message in messages)
         {
             var result = await AnalyzeAsync(message, cancellationToken);
-            if (result.Verdict == Verdict.Skipped)
-            {
-                result.CacheStatus = cached.ContainsKey(result.Id) ? "NO-CACHE" : "sem-cache";
-            }
-            else
-            {
-                result.CacheStatus = cached.ContainsKey(result.Id) ? "no-cache" : "AUSENTE-NO-CACHE";
-            }
+            result.CacheStatus = cached.ContainsKey(result.Id) ? "no-cache" : "ausente-no-cache";
 
             results.Add(result);
             index++;
@@ -132,15 +125,24 @@ public sealed class DebugNamesScanner
         var envelope = await _metadata.ReadEnvelopeAsync(message, cancellationToken);
         if (envelope != null)
         {
-            result.Verdict = Verdict.Accepted;
             result.Source = envelope.Entry.EntryType;
             result.EntryType = envelope.Entry.EntryType;
             result.EntryName = envelope.Entry switch
             {
                 FileMetadata file => file.Name,
                 FolderMetadata folder => folder.Name,
+                FolderIndexMetadata index => index.FolderId + " -> " + index.ThreadId,
                 _ => ""
             };
+            if (envelope.Entry is FolderIndexMetadata)
+            {
+                result.Verdict = Verdict.Accepted;
+            }
+            else
+            {
+                result.Reason = "metadata de arquivo ou pasta não pertence ao canal names";
+            }
+
             return result;
         }
 
@@ -200,14 +202,17 @@ public sealed class DebugNamesScanner
             }
 
             var entryType = entryTypeElement.GetString() ?? "?";
-            if (entryType != "file" && entryType != "folder")
+            if (entryType != "file" && entryType != "folder" && entryType != "folderIndex")
             {
                 return ($"entryType-desconhecido (schema={schema})", schema, entryType);
             }
 
-            var validation = entryType == "file"
-                ? DiagnoseFileValidation(root, schema)
-                : DiagnoseFolderValidation(root, schema);
+            var validation = entryType switch
+            {
+                "file" => DiagnoseFileValidation(root, schema),
+                "folder" => DiagnoseFolderValidation(root, schema),
+                _ => DiagnoseFolderIndexValidation(root, schema)
+            };
             if (validation != null)
             {
                 return (validation, schema, entryType);
@@ -266,6 +271,23 @@ public sealed class DebugNamesScanner
         return $"json-ok-mas-nao-aceito (schema={schema}, entryType=folder)";
     }
 
+    private static string? DiagnoseFolderIndexValidation(JsonElement root, string schema)
+    {
+        FolderIndexMetadata index;
+        try
+        {
+            index = root.Deserialize<FolderIndexMetadata>(JsonOptions.Web) ?? new FolderIndexMetadata();
+        }
+        catch (Exception ex)
+        {
+            return $"deserialize-folderIndex-falhou: {ex.Message}";
+        }
+
+        if (string.IsNullOrWhiteSpace(index.FolderId)) return "folderId-ausente";
+        if (string.IsNullOrWhiteSpace(index.ThreadId)) return "threadId-ausente";
+        return $"json-ok-mas-nao-aceito (schema={schema}, entryType=folderIndex)";
+    }
+
     private static async Task<string> DiagnoseAttachmentAsync(
         DiscordMessageDto message,
         CancellationToken cancellationToken)
@@ -300,7 +322,7 @@ public sealed class DebugNamesScanner
 
     private string BuildReport(
         IReadOnlyList<MessageResult> results,
-        IReadOnlyDictionary<string, AppEntry> cached,
+        IReadOnlyDictionary<string, FolderIndexMapping> cached,
         int totalMessages)
     {
         var sb = new StringBuilder();
@@ -312,7 +334,7 @@ public sealed class DebugNamesScanner
 
         var accepted = results.Where(r => r.Verdict == Verdict.Accepted).ToList();
         var skipped = results.Where(r => r.Verdict == Verdict.Skipped).ToList();
-        sb.AppendLine($"ACEITAS: {accepted.Count} (files: {accepted.Count(r => r.EntryType == "file")}, folders: {accepted.Count(r => r.EntryType == "folder")})");
+        sb.AppendLine($"ACEITAS: {accepted.Count} (mappings folderIndex)");
         sb.AppendLine($"IGNORADAS: {skipped.Count}");
         sb.AppendLine();
 
@@ -348,8 +370,8 @@ public sealed class DebugNamesScanner
         sb.AppendLine($"no banco mas ausentes no scan atual: {inCacheNotInScan.Count}");
         foreach (var id in inCacheNotInScan)
         {
-            var entry = cached[id];
-            sb.AppendLine($"  {id} | {entry.Type} | {entry.Name}");
+            var mapping = cached[id];
+            sb.AppendLine($"  {id} | {mapping.FolderId} -> {mapping.ThreadId}");
         }
 
         sb.AppendLine($"no scan atual mas ausentes no banco: {inScanNotInCache.Count}");
