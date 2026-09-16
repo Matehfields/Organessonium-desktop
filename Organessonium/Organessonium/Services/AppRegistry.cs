@@ -341,7 +341,7 @@ public sealed class AppRegistry
     {
         var header = _metadata.SerializeFolderIndexHeader(folderId, parentFolderId, name);
         var post = await _discord.CreateForumPostAsync(
-            _settings.AppsForumId,
+            _settings.FoldersForumId,
             FolderThreadTitle(name, folderId),
             header,
             cancellationToken);

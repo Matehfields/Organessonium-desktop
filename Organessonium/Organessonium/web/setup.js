@@ -1,5 +1,6 @@
 const inpToken = document.getElementById('inp-token');
 const inpNames = document.getElementById('inp-names');
+const inpFolders = document.getElementById('inp-folders');
 const inpForum = document.getElementById('inp-forum');
 const inpSerial = document.getElementById('inp-serial');
 const btnConnect = document.getElementById('btn-connect');
@@ -36,15 +37,19 @@ const SETUP_I18N = {
         customNames:'Usar nomes diferentes para os canais',
         useIds:'Configurar pelos IDs dos canais',
         names:'Canal de índice names',
-        namesHint:'Canal de texto usado como índice de arquivos',
+        namesHint:'Canal de texto que mapeia cada pasta ao seu índice',
+        folders:'Fórum de índices folders',
+        foldersHint:'Fórum com um thread de metadados para cada pasta',
         forum:'Fórum de arquivos files',
-        forumHint:'Canal do tipo Fórum usado para armazenar os arquivos',
+        forumHint:'Fórum usado para armazenar os payloads dos arquivos',
         serial:'Canal de seriais serial',
         serialHint:'Canal de texto usado para armazenar os seriais das pastas',
         namesId:'ID do canal names',
-        namesIdHint:'ID do canal de texto usado como índice de arquivos',
+        namesIdHint:'ID do canal de texto que mapeia cada pasta ao seu índice',
+        foldersId:'ID do fórum folders',
+        foldersIdHint:'ID do fórum que armazena os índices por pasta',
         forumId:'ID do fórum files',
-        forumIdHint:'ID do canal do tipo Fórum usado para armazenar os arquivos',
+        forumIdHint:'ID do fórum usado para armazenar os payloads dos arquivos',
         serialId:'ID do canal serial',
         serialIdHint:'ID do canal de texto usado para armazenar os seriais das pastas',
         createChannels:'Criar canais automaticamente',
@@ -55,9 +60,10 @@ const SETUP_I18N = {
         connectingDiscord:'Conectando ao Discord...',
         tokenRequired:'Insira o token do bot.',
         namesRequired:'Informe um nome para o canal de índice.',
+        foldersRequired:'Informe um nome para o fórum de índices.',
         forumRequired:'Informe um nome para o fórum de arquivos.',
         serialRequired:'Informe um nome para o canal de seriais.',
-        idsRequired:'Informe os três IDs dos canais.'
+        idsRequired:'Informe os quatro IDs dos canais.'
         ,invalidIds:'Os IDs devem conter apenas números e ter entre 16 e 22 dígitos.'
         ,proxyTitle:'Rede e proxy'
         ,proxyMode:'Modo de conexão'
@@ -92,15 +98,19 @@ const SETUP_I18N = {
         customNames:'Use different channel names',
         useIds:'Configure using channel IDs',
         names:'Index channel names',
-        namesHint:'Text channel used as the file index',
+        namesHint:'Text channel that maps each folder to its index',
+        folders:'Folders index forum',
+        foldersHint:'Forum with one metadata thread for each folder',
         forum:'Files forum files',
-        forumHint:'Forum channel used to store files',
+        forumHint:'Forum used to store file payloads',
         serial:'Serial channel serial',
         serialHint:'Text channel used to store folder serials',
         namesId:'names channel ID',
-        namesIdHint:'ID of the text channel used as the file index',
+        namesIdHint:'ID of the text channel that maps each folder to its index',
+        foldersId:'folders forum ID',
+        foldersIdHint:'ID of the forum that stores one index per folder',
         forumId:'files forum ID',
-        forumIdHint:'ID of the forum channel used to store files',
+        forumIdHint:'ID of the forum used to store file payloads',
         serialId:'serial channel ID',
         serialIdHint:'ID of the text channel used to store folder serials',
         createChannels:'Create channels automatically',
@@ -111,9 +121,10 @@ const SETUP_I18N = {
         connectingDiscord:'Connecting to Discord...',
         tokenRequired:'Enter the bot token.',
         namesRequired:'Enter a name for the index channel.',
+        foldersRequired:'Enter a name for the folders index forum.',
         forumRequired:'Enter a name for the files forum.',
         serialRequired:'Enter a name for the serial channel.'
-        ,idsRequired:'Enter all three channel IDs.'
+        ,idsRequired:'Enter all four channel IDs.'
         ,invalidIds:'IDs must contain only numbers and be between 16 and 22 digits long.'
         ,proxyTitle:'Network and proxy'
         ,proxyMode:'Connection mode'
@@ -193,13 +204,15 @@ function applySetupPreferences() {
     document.querySelector('.subtitle').textContent = setupText('subtitle');
     labels[0].textContent = setupText('token');
     labels[1].innerHTML = setupText('names').replace('names', '<code>names</code>');
-    labels[2].innerHTML = setupText('forum').replace('files', '<code>files</code>');
-    labels[3].innerHTML = setupText('serial').replace('serial', '<code>serial</code>');
+    labels[2].innerHTML = setupText('folders').replace('folders', '<code>folders</code>');
+    labels[3].innerHTML = setupText('forum').replace('files', '<code>files</code>');
+    labels[4].innerHTML = setupText('serial').replace('serial', '<code>serial</code>');
     hints[0].textContent = setupText('tokenHint');
     hints[1].textContent = setupText('namesHint');
-    hints[2].textContent = setupText('forumHint');
-    hints[3].textContent = setupText('serialHint');
-btnCreateChannels.textContent = setupText('createChannels');
+    hints[2].textContent = setupText('foldersHint');
+    hints[3].textContent = setupText('forumHint');
+    hints[4].textContent = setupText('serialHint');
+    btnCreateChannels.textContent = setupText('createChannels');
     btnCustomChannelNames.textContent = setupText('customNames');
     btnChannelIds.textContent = setupText('useIds');
     btnToggleToken.title = setupText('toggle');
@@ -250,12 +263,14 @@ function prefillSetupFields(saved) {
     if (setupPrefilled || !saved) return;
     const token = typeof saved.botToken === 'string' ? saved.botToken : '';
     const namesId = typeof saved.namesChannelId === 'string' ? saved.namesChannelId : '';
+    const foldersId = typeof saved.foldersForumId === 'string' ? saved.foldersForumId : '';
     const forumId = typeof saved.appsForumId === 'string' ? saved.appsForumId : '';
     const serialId = typeof saved.serialChannelId === 'string' ? saved.serialChannelId : '';
     if (token && !inpToken.value) inpToken.value = token;
-    if (namesId || forumId || serialId) {
+    if (namesId || foldersId || forumId || serialId) {
         channelInputMode = 'ids';
         inpNames.value = namesId;
+        inpFolders.value = foldersId;
         inpForum.value = forumId;
         inpSerial.value = serialId;
         channelFields.classList.remove('hidden');
@@ -337,6 +352,7 @@ btnToggleToken.addEventListener('click', () => {
 btnCustomChannelNames.addEventListener('click', () => {
     channelInputMode = 'names';
     if (!inpNames.value.trim() || /^\d+$/.test(inpNames.value.trim())) inpNames.value = 'names';
+    if (!inpFolders.value.trim() || /^\d+$/.test(inpFolders.value.trim())) inpFolders.value = 'folders';
     if (!inpForum.value.trim() || /^\d+$/.test(inpForum.value.trim())) inpForum.value = 'files';
     if (!inpSerial.value.trim() || /^\d+$/.test(inpSerial.value.trim())) inpSerial.value = 'serial';
     channelFields.classList.remove('hidden');
@@ -348,6 +364,7 @@ btnCustomChannelNames.addEventListener('click', () => {
 btnChannelIds.addEventListener('click', () => {
     channelInputMode = 'ids';
     if (inpNames.value.trim() === 'names') inpNames.value = '';
+    if (inpFolders.value.trim() === 'folders') inpFolders.value = '';
     if (inpForum.value.trim() === 'files') inpForum.value = '';
     if (inpSerial.value.trim() === 'serial') inpSerial.value = '';
     channelFields.classList.remove('hidden');
@@ -389,7 +406,7 @@ window._onProxyTestResult = function(success, message, protocol) {
     proxyTestResult.classList.remove('hidden');
 };
 
-[inpToken, inpNames, inpForum, inpSerial].forEach(inp =>
+[inpToken, inpNames, inpFolders, inpForum, inpSerial].forEach(inp =>
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') tryConnect(false); })
 );
 
@@ -403,17 +420,19 @@ function tryConnect(allowCreate) {
     btnConnect.disabled = true;
     const token  = inpToken.value.trim();
     const names  = channelInputMode === 'auto' ? 'names' : inpNames.value.trim();
+    const folders = channelInputMode === 'auto' ? 'folders' : inpFolders.value.trim();
     const forum  = channelInputMode === 'auto' ? 'files' : inpForum.value.trim();
     const serial = channelInputMode === 'auto' ? 'serial' : inpSerial.value.trim();
 if (!token)  { showErr(setupText('tokenRequired')); return; }
     if (channelInputMode === 'ids') {
-        if (!names || !forum || !serial) { showErr(setupText('idsRequired')); return; }
-        if (!/^\d{16,22}$/.test(names) || !/^\d{16,22}$/.test(forum) || !/^\d{16,22}$/.test(serial)) { showErr(setupText('invalidIds')); return; }
+        if (!names || !folders || !forum || !serial) { showErr(setupText('idsRequired')); return; }
+        if (!/^\d{16,22}$/.test(names) || !/^\d{16,22}$/.test(folders) || !/^\d{16,22}$/.test(forum) || !/^\d{16,22}$/.test(serial)) { showErr(setupText('invalidIds')); return; }
     }
     if (!names)  { showErr(setupText('namesRequired')); return; }
+    if (!folders)  { showErr(setupText('foldersRequired')); return; }
     if (!forum)  { showErr(setupText('forumRequired')); return; }
     if (!serial)  { showErr(setupText('serialRequired')); return; }
-    window.bridge.connect(token, names, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()));
+    window.bridge.connect(token, names, folders, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()));
 }
 
 function applyChannelFieldMode() {
@@ -421,15 +440,19 @@ function applyChannelFieldMode() {
     const hints = document.querySelectorAll('.hint');
     const ids = channelInputMode === 'ids';
     labels[1].innerHTML = setupText(ids ? 'namesId' : 'names').replace('names', '<code>names</code>');
-    labels[2].innerHTML = setupText(ids ? 'forumId' : 'forum').replace('files', '<code>files</code>');
-    labels[3].innerHTML = setupText(ids ? 'serialId' : 'serial').replace('serial', '<code>serial</code>');
+    labels[2].innerHTML = setupText(ids ? 'foldersId' : 'folders').replace('folders', '<code>folders</code>');
+    labels[3].innerHTML = setupText(ids ? 'forumId' : 'forum').replace('files', '<code>files</code>');
+    labels[4].innerHTML = setupText(ids ? 'serialId' : 'serial').replace('serial', '<code>serial</code>');
     hints[1].textContent = setupText(ids ? 'namesIdHint' : 'namesHint');
-    hints[2].textContent = setupText(ids ? 'forumIdHint' : 'forumHint');
-    hints[3].textContent = setupText(ids ? 'serialIdHint' : 'serialHint');
+    hints[2].textContent = setupText(ids ? 'foldersIdHint' : 'foldersHint');
+    hints[3].textContent = setupText(ids ? 'forumIdHint' : 'forumHint');
+    hints[4].textContent = setupText(ids ? 'serialIdHint' : 'serialHint');
     inpNames.placeholder = ids ? '123456789012345678' : 'names';
+    inpFolders.placeholder = ids ? '123456789012345678' : 'folders';
     inpForum.placeholder = ids ? '123456789012345678' : 'files';
     inpSerial.placeholder = ids ? '123456789012345678' : 'serial';
     inpNames.inputMode = ids ? 'numeric' : 'text';
+    inpFolders.inputMode = ids ? 'numeric' : 'text';
     inpForum.inputMode = ids ? 'numeric' : 'text';
     inpSerial.inputMode = ids ? 'numeric' : 'text';
 }

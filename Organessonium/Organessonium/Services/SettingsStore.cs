@@ -91,6 +91,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             reader.Dispose();
             settings.BotToken = Get(values, "botToken", settings.BotToken);
             settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
+            settings.FoldersForumId = Get(values, "foldersForumId", settings.FoldersForumId);
             settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
             settings.SerialChannelId = Get(values, "serialChannelId", settings.SerialChannelId);
             settings.Theme = Get(values, "theme", settings.Theme);
@@ -133,6 +134,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             using var tx = connection.BeginTransaction();
             Upsert(connection, "botToken", settings.BotToken);
             Upsert(connection, "namesChannelId", settings.NamesChannelId);
+            Upsert(connection, "foldersForumId", settings.FoldersForumId);
             Upsert(connection, "appsForumId", settings.AppsForumId);
             Upsert(connection, "serialChannelId", settings.SerialChannelId);
             Upsert(connection, "theme", settings.Theme);
@@ -466,6 +468,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         var settings = Load();
         settings.BotToken = Get(values, "botToken", settings.BotToken);
         settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
+        settings.FoldersForumId = Get(values, "foldersForumId", settings.FoldersForumId);
         settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
         settings.SerialChannelId = Get(values, "serialChannelId", settings.SerialChannelId);
         settings.Theme = Get(values, "theme", settings.Theme);

@@ -10,6 +10,9 @@ public sealed class AppSettings
     [JsonPropertyName("namesChannelId")]
     public string NamesChannelId { get; set; } = "";
 
+    [JsonPropertyName("foldersForumId")]
+    public string FoldersForumId { get; set; } = "";
+
     [JsonPropertyName("appsForumId")]
     public string AppsForumId { get; set; } = "";
 
@@ -83,7 +86,9 @@ public sealed class AppSettings
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(BotToken) &&
         !string.IsNullOrWhiteSpace(NamesChannelId) &&
-        !string.IsNullOrWhiteSpace(AppsForumId);
+        !string.IsNullOrWhiteSpace(FoldersForumId) &&
+        !string.IsNullOrWhiteSpace(AppsForumId) &&
+        !string.IsNullOrWhiteSpace(SerialChannelId);
 
     public AppSettings Clone()
     {
@@ -91,6 +96,7 @@ public sealed class AppSettings
         {
             BotToken = BotToken,
             NamesChannelId = NamesChannelId,
+            FoldersForumId = FoldersForumId,
             AppsForumId = AppsForumId,
             SerialChannelId = SerialChannelId,
             Theme = Theme,

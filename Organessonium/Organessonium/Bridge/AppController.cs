@@ -209,13 +209,15 @@ public sealed class AppController : IAsyncDisposable
     {
         var token = ArgString(args, 0).Trim();
         var names = ArgString(args, 1, "names").Trim();
-        var forum = ArgString(args, 2, "files").Trim();
-        var serial = ArgString(args, 3, "serial").Trim();
-        var allowCreate = ArgBool(args, 4, false);
-        var proxyJson = ArgString(args, 5);
+        var folders = ArgString(args, 2, "folders").Trim();
+        var forum = ArgString(args, 3, "files").Trim();
+        var serial = ArgString(args, 4, "serial").Trim();
+        var allowCreate = ArgBool(args, 5, false);
+        var proxyJson = ArgString(args, 6);
 
         if (string.IsNullOrWhiteSpace(token)) { await _bridge.CallAsync("_onSetupError", "Insira o token do bot."); return; }
         if (string.IsNullOrWhiteSpace(names)) { names = "names"; }
+        if (string.IsNullOrWhiteSpace(folders)) { folders = "folders"; }
         if (string.IsNullOrWhiteSpace(forum)) { forum = "files"; }
         if (string.IsNullOrWhiteSpace(serial)) { serial = "serial"; }
 
@@ -245,9 +247,10 @@ public sealed class AppController : IAsyncDisposable
         _store.Save(settings);
 
         await _bridge.CallAsync("_onSetupConnecting", "Procurando canais no servidor...");
-        if (LooksLikeDiscordId(names) && LooksLikeDiscordId(forum) && LooksLikeDiscordId(serial))
+        if (LooksLikeDiscordId(names) && LooksLikeDiscordId(folders) && LooksLikeDiscordId(forum) && LooksLikeDiscordId(serial))
         {
             settings.NamesChannelId = names;
+            settings.FoldersForumId = folders;
             settings.AppsForumId = forum;
             settings.SerialChannelId = serial;
         }
@@ -255,8 +258,9 @@ public sealed class AppController : IAsyncDisposable
         {
             try
             {
-                var resolved = await ResolveDiscordChannelsAsync(token, names, forum, serial, allowCreate);
+                var resolved = await ResolveDiscordChannelsAsync(token, names, folders, forum, serial, allowCreate);
                 settings.NamesChannelId = resolved.NamesChannelId;
+                settings.FoldersForumId = resolved.FoldersForumId;
                 settings.AppsForumId = resolved.AppsForumId;
                 settings.SerialChannelId = resolved.SerialChannelId;
             }
@@ -313,6 +317,7 @@ public sealed class AppController : IAsyncDisposable
         var settings = _store.Load();
         settings.BotToken = "";
         settings.NamesChannelId = "";
+        settings.FoldersForumId = "";
         settings.AppsForumId = "";
         settings.SerialChannelId = "";
         _store.Save(settings);
@@ -329,13 +334,21 @@ public sealed class AppController : IAsyncDisposable
     private async Task<ResolvedDiscordChannels> ResolveDiscordChannelsAsync(
         string token,
         string namesInput,
-        string forumInput,
+        string foldersInput,
+        string filesInput,
         string serialInput,
         bool allowCreate)
     {
         var namesName = NormalizeDiscordChannelName(namesInput, "names");
-        var forumName = NormalizeDiscordChannelName(forumInput, "files");
+        var foldersName = NormalizeDiscordChannelName(foldersInput, "folders");
+        var filesName = NormalizeDiscordChannelName(filesInput, "files");
         var serialName = NormalizeDiscordChannelName(serialInput, "serial");
+        var channelNames = new[] { namesName, foldersName, filesName, serialName };
+        if (channelNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() != channelNames.Length)
+        {
+            throw new SetupChannelsMissingException("Os canais names, folders, files e serial precisam ter nomes diferentes.");
+        }
+
         using var api = new DiscordApiClient(token);
         var guilds = await api.GetCurrentUserGuildsAsync();
         if (guilds.Count == 0)
@@ -343,7 +356,7 @@ public sealed class AppController : IAsyncDisposable
             throw new SetupChannelsMissingException("O bot não está em nenhum servidor. Adicione o bot a um servidor e tente novamente.");
         }
 
-        var completeMatches = new List<(DiscordGuildDto Guild, DiscordChannelDto Names, DiscordChannelDto Forum, DiscordChannelDto Serial)>();
+        var completeMatches = new List<(DiscordGuildDto Guild, DiscordChannelDto Names, DiscordChannelDto Folders, DiscordChannelDto Files, DiscordChannelDto Serial)>();
         var wrongTypes = new List<string>();
         foreach (var guild in guilds)
         {
@@ -351,14 +364,17 @@ public sealed class AppController : IAsyncDisposable
             var namesChannels = channels
                 .Where(c => SameDiscordChannelName(c.Name, namesName) && IsTextChannel(c.Type))
                 .ToList();
-            var forumChannels = channels
-                .Where(c => SameDiscordChannelName(c.Name, forumName) && IsForumChannel(c.Type))
+            var foldersForums = channels
+                .Where(c => SameDiscordChannelName(c.Name, foldersName) && IsForumChannel(c.Type))
+                .ToList();
+            var filesForums = channels
+                .Where(c => SameDiscordChannelName(c.Name, filesName) && IsForumChannel(c.Type))
                 .ToList();
             var serialChannels = channels
                 .Where(c => SameDiscordChannelName(c.Name, serialName) && IsSerialChannel(c.Type))
                 .ToList();
 
-            if (namesChannels.Count > 1 || forumChannels.Count > 1 || serialChannels.Count > 1)
+            if (namesChannels.Count > 1 || foldersForums.Count > 1 || filesForums.Count > 1 || serialChannels.Count > 1)
             {
                 throw new SetupChannelsMissingException(
                     "Encontrei mais de um canal com o mesmo nome no servidor \"" + guild.Name +
@@ -370,9 +386,14 @@ public sealed class AppController : IAsyncDisposable
                 wrongTypes.Add("\"" + namesName + "\" no servidor \"" + guild.Name + "\" não é canal de texto.");
             }
 
-            if (channels.Any(c => SameDiscordChannelName(c.Name, forumName) && !IsForumChannel(c.Type)))
+            if (channels.Any(c => SameDiscordChannelName(c.Name, foldersName) && !IsForumChannel(c.Type)))
             {
-                wrongTypes.Add("\"" + forumName + "\" no servidor \"" + guild.Name + "\" não é fórum.");
+                wrongTypes.Add("\"" + foldersName + "\" no servidor \"" + guild.Name + "\" não é fórum.");
+            }
+
+            if (channels.Any(c => SameDiscordChannelName(c.Name, filesName) && !IsForumChannel(c.Type)))
+            {
+                wrongTypes.Add("\"" + filesName + "\" no servidor \"" + guild.Name + "\" não é fórum.");
             }
 
             if (channels.Any(c => SameDiscordChannelName(c.Name, serialName) && !IsSerialChannel(c.Type)))
@@ -380,9 +401,9 @@ public sealed class AppController : IAsyncDisposable
                 wrongTypes.Add("\"" + serialName + "\" no servidor \"" + guild.Name + "\" não é canal de texto.");
             }
 
-            if (namesChannels.Count == 1 && forumChannels.Count == 1 && serialChannels.Count == 1)
+            if (namesChannels.Count == 1 && foldersForums.Count == 1 && filesForums.Count == 1 && serialChannels.Count == 1)
             {
-                completeMatches.Add((guild, namesChannels[0], forumChannels[0], serialChannels[0]));
+                completeMatches.Add((guild, namesChannels[0], foldersForums[0], filesForums[0], serialChannels[0]));
             }
         }
 
@@ -390,20 +411,21 @@ public sealed class AppController : IAsyncDisposable
         {
             return new ResolvedDiscordChannels(
                 completeMatches[0].Names.Id,
-                completeMatches[0].Forum.Id,
+                completeMatches[0].Folders.Id,
+                completeMatches[0].Files.Id,
                 completeMatches[0].Serial.Id);
         }
 
         if (completeMatches.Count > 1)
         {
             throw new SetupChannelsMissingException(
-                "Encontrei canais \"" + namesName + "\", \"" + forumName + "\" e \"" + serialName +
+                "Encontrei canais \"" + namesName + "\", \"" + foldersName + "\", \"" + filesName + "\" e \"" + serialName +
                 "\" em mais de um servidor. Use nomes diferentes para evitar usar o servidor errado.");
         }
 
         if (!allowCreate)
         {
-            var message = "Não encontrei os canais \"" + namesName + "\", \"" + forumName + "\" e \"" + serialName +
+            var message = "Não encontrei os canais \"" + namesName + "\", \"" + foldersName + "\", \"" + filesName + "\" e \"" + serialName +
                 "\". Posso criá-los automaticamente ou você pode informar nomes diferentes.";
             if (wrongTypes.Count > 0)
             {
@@ -424,7 +446,8 @@ public sealed class AppController : IAsyncDisposable
         var targetChannels = await api.GetGuildChannelsAsync(targetGuild.Id);
         var existingWrongType = targetChannels.FirstOrDefault(c =>
             (SameDiscordChannelName(c.Name, namesName) && !IsTextChannel(c.Type)) ||
-            (SameDiscordChannelName(c.Name, forumName) && !IsForumChannel(c.Type)) ||
+            (SameDiscordChannelName(c.Name, foldersName) && !IsForumChannel(c.Type)) ||
+            (SameDiscordChannelName(c.Name, filesName) && !IsForumChannel(c.Type)) ||
             (SameDiscordChannelName(c.Name, serialName) && !IsSerialChannel(c.Type)));
         if (existingWrongType != null)
         {
@@ -434,9 +457,10 @@ public sealed class AppController : IAsyncDisposable
         }
 
         var namesExisting = targetChannels.Where(c => SameDiscordChannelName(c.Name, namesName) && IsTextChannel(c.Type)).ToList();
-        var forumExisting = targetChannels.Where(c => SameDiscordChannelName(c.Name, forumName) && IsForumChannel(c.Type)).ToList();
+        var foldersExisting = targetChannels.Where(c => SameDiscordChannelName(c.Name, foldersName) && IsForumChannel(c.Type)).ToList();
+        var filesExisting = targetChannels.Where(c => SameDiscordChannelName(c.Name, filesName) && IsForumChannel(c.Type)).ToList();
         var serialExisting = targetChannels.Where(c => SameDiscordChannelName(c.Name, serialName) && IsSerialChannel(c.Type)).ToList();
-        if (namesExisting.Count > 1 || forumExisting.Count > 1 || serialExisting.Count > 1)
+        if (namesExisting.Count > 1 || foldersExisting.Count > 1 || filesExisting.Count > 1 || serialExisting.Count > 1)
         {
             throw new SetupChannelsMissingException(
                 "Encontrei canais duplicados no servidor. Informe nomes diferentes para evitar usar o canal errado.");
@@ -445,13 +469,16 @@ public sealed class AppController : IAsyncDisposable
         var namesChannel = namesExisting.Count == 1
             ? namesExisting[0]
             : await api.CreateGuildChannelAsync(targetGuild.Id, namesName, 0);
-        var forumChannel = forumExisting.Count == 1
-            ? forumExisting[0]
-            : await api.CreateGuildChannelAsync(targetGuild.Id, forumName, 15);
+        var foldersChannel = foldersExisting.Count == 1
+            ? foldersExisting[0]
+            : await api.CreateGuildChannelAsync(targetGuild.Id, foldersName, 15);
+        var filesChannel = filesExisting.Count == 1
+            ? filesExisting[0]
+            : await api.CreateGuildChannelAsync(targetGuild.Id, filesName, 15);
         var serialChannel = serialExisting.Count == 1
             ? serialExisting[0]
             : await api.CreateGuildChannelAsync(targetGuild.Id, serialName, 0);
-        return new ResolvedDiscordChannels(namesChannel.Id, forumChannel.Id, serialChannel.Id);
+        return new ResolvedDiscordChannels(namesChannel.Id, foldersChannel.Id, filesChannel.Id, serialChannel.Id);
     }
 
     private async Task LoadAppsAsync()
@@ -6235,7 +6262,7 @@ private static string ClassifyConnectError(Exception ex)
     private sealed record BridgeMessage(
         [property: JsonPropertyName("method")] string Method,
         [property: JsonPropertyName("args")] JsonElement[] Args);
-    private sealed record ResolvedDiscordChannels(string NamesChannelId, string AppsForumId, string SerialChannelId);
+    private sealed record ResolvedDiscordChannels(string NamesChannelId, string FoldersForumId, string AppsForumId, string SerialChannelId);
     private sealed record UploadTask(FileInfo File, string Path);
     private sealed record UploadConflictResponse(string Action, bool ApplyToAll);
     private sealed record UploadConflictResolution(List<UploadTask> Tasks, List<AppEntry> OverwriteEntries);

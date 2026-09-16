@@ -5,10 +5,10 @@ Este repositório contém a versão desktop C# WPF + WebView2 do Organessônium.
 ## Arquitetura de dados
 
 - `Bridge/AppController.cs` coordena upload, download, previews, transferências e a ponte WebView2.
-- `Services/ForumUploader.cs` cria posts e mensagens com attachments no fórum de arquivos.
+- `Services/ForumUploader.cs` cria posts e mensagens com attachments no fórum `files`.
 - `Services/ForumDownloader.cs` resolve as mensagens referenciadas pelo metadata, baixa as partes e monta o arquivo final na ordem dos índices.
-- `Services/AppRegistry.cs` resolve o mapa `folderId -> threadId`, abre somente o índice da pasta requisitada e atualiza os caches afetados por cada operação.
-- `Services/MetadataService.cs` publica e lê o mapping no `names` e os metadados de filhos diretos nos threads de índice.
+- `Services/AppRegistry.cs` resolve o mapa `folderId -> threadId`, abre somente o índice da pasta requisitada no fórum `folders` e atualiza os caches afetados por cada operação.
+- `Services/MetadataService.cs` publica e lê o mapping no `names` e os metadados de filhos diretos nos threads de índice de `folders`.
 - `Services/SerialIndexService.cs` lê, valida, mantém em memória e publica o serial binário de uma única pasta por vez no canal `serial`.
 - `Services/FolderSerialCodec.cs` codifica e decodifica o formato binário versionado `OSER` usado pelos seriais.
 - `Services/SettingsStore.cs` mantém configurações, os caches locais `app_entries` e `folder_index_map`, previews e estados de transferência no diretório de dados.
@@ -29,7 +29,7 @@ Depois de renderizar o conteúdo conhecido, o app reconcilia em segundo plano o 
 
 O canal de texto `names` é pequeno e contém somente mappings `folderId -> threadId`; ele não armazena mais metadata global de arquivos ou pastas. A mensagem do mapping é JSON inline minificado e inclui também a referência do serial atual quando ele existir. O ID da própria mensagem de `names` é mantido no cache local para atualização e remoção direta.
 
-O fórum configurado em `appsForumId` contém dois tipos de post: posts de payload já usados por upload e posts `index-*` de índice de pasta. Cada post de índice possui uma primeira mensagem `folderIndexHeader` para identificação e, depois, somente os metadados `file` e `folder` dos filhos diretos daquela pasta. O `threadId` de payload continua pertencendo ao arquivo; o `threadId` de índice de uma pasta é resolvido pelo mapping em `names`.
+O fórum configurado em `foldersForumId` corresponde ao canal `folders` e contém somente posts `index-*` de índice de pasta. Cada post de índice possui uma primeira mensagem `folderIndexHeader` para identificação e, depois, somente os metadados `file` e `folder` dos filhos diretos daquela pasta. O fórum configurado em `appsForumId` corresponde ao canal `files` e contém somente os posts de payload usados por upload. O `threadId` de payload continua pertencendo ao arquivo; o `threadId` de índice de uma pasta é resolvido pelo mapping em `names`.
 
 Regra principal: a presenca de um campo significa que o recurso existe. A ausencia significa que o recurso nao existe ou nao se aplica.
 
@@ -64,9 +64,9 @@ O metadata novo nao deve incluir campos nulos, arrays vazios, objetos vazios, `e
 
 ### Configuração manual do Discord
 
-Antes de usar este protocolo, configure os três canais no assistente do app: um canal de texto `names`, um fórum em `appsForumId` e um canal de texto `serial`. O bot precisa de acesso de leitura ao histórico, envio de mensagens e anexos, criação de posts públicos no fórum, edição e exclusão das próprias mensagens e gerenciamento de threads.
+Antes de usar este protocolo, configure os quatro canais no assistente do app: o canal de texto `names`, o fórum `folders`, o fórum `files` e o canal de texto `serial`. O bot precisa de acesso de leitura ao histórico, envio de mensagens e anexos, criação de posts públicos nos fóruns, edição e exclusão das próprias mensagens e gerenciamento de threads.
 
-Não há migração nem fallback automático. Para migrar um servidor antigo, remova do `names` todos os metadados globais antigos. Para cada pasta, crie manualmente o post de índice com o cabeçalho acima, mova para ele apenas os metadados diretos dos seus filhos e publique no `names` um mapping para o thread correspondente. Inclua o mapping de `root`. Alternativamente, com `names` totalmente vazio, deixe o app criar automaticamente o índice de `root` na primeira abertura e recrie a estrutura pelo aplicativo. Não misture o layout antigo e o novo.
+Não há migração nem fallback automático. Para migrar um servidor antigo, crie o fórum `folders`, remova do `names` todos os metadados globais antigos e recrie nele os posts de índice de cada pasta com o cabeçalho acima. Publique no `names` um mapping para cada thread correspondente, inclusive `root`. O fórum `files` deve manter somente os payloads. Não misture o layout antigo e o novo.
 
 ### Imagem com thumbnail
 

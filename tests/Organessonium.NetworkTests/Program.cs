@@ -23,6 +23,7 @@ internal static class Program
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
         ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
+        ("fourChannelSettingsRequireFoldersForum", FourChannelSettingsRequireFoldersForumAsync),
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
@@ -81,6 +82,30 @@ internal static class Program
     {
         public static TestOutcome Pass() => new(true, "");
         public static TestOutcome Fail(string message) => new(false, message);
+    }
+
+    private static Task<TestOutcome> FourChannelSettingsRequireFoldersForumAsync()
+    {
+        var configured = new AppSettings
+        {
+            BotToken = "token",
+            NamesChannelId = "names-id",
+            FoldersForumId = "folders-id",
+            AppsForumId = "files-id",
+            SerialChannelId = "serial-id"
+        };
+        var cloned = configured.Clone();
+        var missingFolders = configured.Clone();
+        missingFolders.FoldersForumId = "";
+        var valid = configured.IsConfigured &&
+                    !missingFolders.IsConfigured &&
+                    cloned.NamesChannelId == "names-id" &&
+                    cloned.FoldersForumId == "folders-id" &&
+                    cloned.AppsForumId == "files-id" &&
+                    cloned.SerialChannelId == "serial-id";
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("a configuração não preservou os quatro canais separados"));
     }
 
     private static async Task<TestOutcome> EncryptedPayloadRoundTripAndChunksAsync()
