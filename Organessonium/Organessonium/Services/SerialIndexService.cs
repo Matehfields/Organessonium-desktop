@@ -345,7 +345,10 @@ public sealed class SerialIndexService
                 : new AppEntry();
             entry.Name = child.Name;
             entry.MetadataMessageId = child.NamesMessageId;
-            entry.ParentFolderId = string.IsNullOrWhiteSpace(child.ParentFolderId) ? serial.FolderId : child.ParentFolderId;
+            // A serial contains only direct children of its own folder. Use
+            // that relationship even when an older serial stored a stale
+            // parentFolderId.
+            entry.ParentFolderId = serial.FolderId;
             entry.Path = PathRules.Normalize(folderPath);
             entry.Type = child.IsFolder ? "folder" : "file";
             entry.FileId = child.IsFolder ? "" : child.Id;

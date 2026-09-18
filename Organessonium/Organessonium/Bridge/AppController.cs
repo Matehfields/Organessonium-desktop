@@ -161,8 +161,10 @@ public sealed class AppController : IAsyncDisposable
             case "logout": _ = RunAsync(LogoutAsync); return Task.CompletedTask;
             case "openGuide": return OpenGuideAsync();
             case "setCurrentPath":
-                _currentPath = PathRules.Normalize(ArgString(args, 0));
-                _ = RunAsync(() => LoadFolderAtPathAsync(_currentPath, ArgString(args, 1)));
+                var requestedPath = PathRules.Normalize(ArgString(args, 0));
+                var requestedFolderId = ArgString(args, 1);
+                _currentPath = requestedPath;
+                _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
@@ -517,10 +519,12 @@ public sealed class AppController : IAsyncDisposable
                 try
                 {
                     await registry.RefreshMappingsAsync();
+                    await registry.ArchiveActiveFolderThreadsAsync();
                     _ = CleanupSupersededRemoteSerialsAsync(registry);
                     var refreshed = await registry.RefreshFolderAsync(AppRegistry.RootFolderId, "/");
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+                    await PublishLibraryFileCountAsync(registry);
                 }
                 catch (OperationCanceledException)
                 {
@@ -564,16 +568,21 @@ public sealed class AppController : IAsyncDisposable
                     IsFolderEntry(entry) &&
                     PathRules.ChildPath(entry).Equals(normalizedPath, StringComparison.OrdinalIgnoreCase))?.FolderId ?? ""
             : folderId;
-        if (string.IsNullOrWhiteSpace(normalizedFolderId))
-        {
-            await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
-            return;
-        }
 
         var registry = Registry();
         try
         {
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
+            if (string.IsNullOrWhiteSpace(normalizedFolderId))
+            {
+                normalizedFolderId = await registry.ResolveFolderIdByPathAsync(normalizedPath);
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedFolderId))
+            {
+                return;
+            }
+
             var cached = await registry.LoadCachedFolderAsync(normalizedFolderId, normalizedPath);
             ReplaceLoadedFolder(normalizedFolderId, cached);
             await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
@@ -664,6 +673,32 @@ public sealed class AppController : IAsyncDisposable
 
         _loadedApps = entries;
         await _bridge.CallAsync("_onLocalAppsChanged", entries);
+        _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
+    }
+
+    private async Task PublishLibraryFileCountAsync(AppRegistry registry)
+    {
+        if (_loggingOut)
+        {
+            return;
+        }
+
+        try
+        {
+            var count = await registry.GetFolderFileCountAsync(AppRegistry.RootFolderId);
+            if (count.HasValue && !_loggingOut)
+            {
+                await _bridge.CallAsync("_onLibraryFileCount", count.Value);
+            }
+        }
+        catch (OperationCanceledException) when (_loggingOut)
+        {
+            // Logout intentionally stops background registry work.
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.LibraryFileCount", ex);
+        }
     }
 
     private Task SetBackgroundActivityAsync(string message, bool active)

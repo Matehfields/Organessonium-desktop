@@ -63,6 +63,44 @@ public sealed class AppRegistry
             _ => RefreshFolderCoreAsync(normalizedFolderId, folderPath, cancellationToken));
     }
 
+    public async Task<string?> ResolveFolderIdByPathAsync(
+        string folderPath,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedPath = PathRules.Normalize(folderPath);
+        if (normalizedPath == "/")
+        {
+            return RootFolderId;
+        }
+
+        var currentFolderId = RootFolderId;
+        var currentPath = "/";
+        foreach (var segment in normalizedPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var entries = await LoadCachedFolderAsync(currentFolderId, currentPath, cancellationToken);
+            var folder = entries.FirstOrDefault(entry =>
+                entry.Type == "folder" &&
+                entry.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
+            if (folder == null || string.IsNullOrWhiteSpace(folder.FolderId))
+            {
+                entries = await RefreshFolderAsync(currentFolderId, currentPath, cancellationToken);
+                folder = entries.FirstOrDefault(entry =>
+                    entry.Type == "folder" &&
+                    entry.Name.Equals(segment, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (folder == null || string.IsNullOrWhiteSpace(folder.FolderId))
+            {
+                return null;
+            }
+
+            currentFolderId = folder.FolderId;
+            currentPath = PathRules.ChildPath(folder);
+        }
+
+        return currentFolderId;
+    }
+
     public async Task<long?> GetFolderFileCountAsync(
         string folderId,
         CancellationToken cancellationToken = default)
@@ -116,6 +154,50 @@ public sealed class AppRegistry
         {
             _mappingRefreshGate.Release();
         }
+    }
+
+    public async Task<int> ArchiveActiveFolderThreadsAsync(CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<DiscordChannelDto> active;
+        try
+        {
+            active = await _discord.GetActiveThreadsAsync(_settings.FoldersForumId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.ArchiveActiveFolderThreads", ex, _settings.FoldersForumId);
+            return 0;
+        }
+
+        var targets = active
+            .Where(thread => !string.IsNullOrWhiteSpace(thread.Id))
+            .ToList();
+        if (targets.Count == 0)
+        {
+            return 0;
+        }
+
+        var archived = 0;
+        var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+        await Parallel.ForEachAsync(
+            targets,
+            new ParallelOptions
+            {
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = workers
+            },
+            async (thread, token) =>
+            {
+                if (await ArchiveFolderThreadAsync(thread.Id, token))
+                {
+                    Interlocked.Increment(ref archived);
+                }
+            });
+        return archived;
     }
 
     public async Task<List<AppEntry>> LoadFolderTreeAsync(
@@ -199,16 +281,24 @@ public sealed class AppRegistry
         }
 
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
-        await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
-        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
-        ReplaceEntry(siblings, entry);
-        _store.CacheFolderEntries(parentFolderId, siblings);
-        RecordDescriptors(siblings);
-        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
-
-        if (entry.Type == "folder")
+        await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken, onRateLimitWait);
+        try
         {
-            await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), [], cancellationToken);
+            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+            var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+            ReplaceEntry(siblings, entry);
+            _store.CacheFolderEntries(parentFolderId, siblings);
+            RecordDescriptors(siblings);
+            await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+
+            if (entry.Type == "folder")
+            {
+                await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), [], cancellationToken);
+            }
+        }
+        finally
+        {
+            await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
 
         return entry.MetadataMessageId;
@@ -223,19 +313,35 @@ public sealed class AppRegistry
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         entry.ParentFolderId = parentFolderId;
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
-        await _metadata.UpsertEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
-        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
-        ReplaceEntry(siblings, entry);
-        _store.CacheFolderEntries(parentFolderId, siblings);
-        RecordDescriptors(siblings);
-        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
-
-        if (entry.Type == "folder")
+        await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken, onRateLimitWait);
+        try
         {
-            var mapping = await GetMappingAsync(entry.FolderId, cancellationToken);
-            await _discord.RenameThreadAsync(mapping.ThreadId, FolderThreadTitle(entry.Name, entry.FolderId), cancellationToken, onRateLimitWait);
-            var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
-            await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
+            await _metadata.UpsertEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+            var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+            ReplaceEntry(siblings, entry);
+            _store.CacheFolderEntries(parentFolderId, siblings);
+            RecordDescriptors(siblings);
+            await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+
+            if (entry.Type == "folder")
+            {
+                var mapping = await GetMappingAsync(entry.FolderId, cancellationToken);
+                await _discord.UnarchiveThreadAsync(mapping.ThreadId, cancellationToken, onRateLimitWait);
+                try
+                {
+                    await _discord.RenameThreadAsync(mapping.ThreadId, FolderThreadTitle(entry.Name, entry.FolderId), cancellationToken, onRateLimitWait);
+                    var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
+                    await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
+                }
+                finally
+                {
+                    await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
+                }
+            }
+        }
+        finally
+        {
+            await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
     }
 
@@ -257,22 +363,38 @@ public sealed class AppRegistry
         }
 
         var source = await GetMappingAsync(sourceFolderId, cancellationToken);
-        await _metadata.DeleteEntryAsync(_discord, source.ThreadId, entry, cancellationToken);
-        var sourceChildren = _store.LoadCachedEntriesForFolder(sourceFolderId);
-        RemoveEntry(sourceChildren, entry);
-        _store.CacheFolderEntries(sourceFolderId, sourceChildren);
-        await SynchronizeFolderSerialAsync(sourceFolderId, entry.Path, sourceChildren, cancellationToken);
+        await _discord.UnarchiveThreadAsync(source.ThreadId, cancellationToken, onRateLimitWait);
+        try
+        {
+            await _metadata.DeleteEntryAsync(_discord, source.ThreadId, entry, cancellationToken);
+            var sourceChildren = _store.LoadCachedEntriesForFolder(sourceFolderId);
+            RemoveEntry(sourceChildren, entry);
+            _store.CacheFolderEntries(sourceFolderId, sourceChildren);
+            await SynchronizeFolderSerialAsync(sourceFolderId, entry.Path, sourceChildren, cancellationToken);
+        }
+        finally
+        {
+            await ArchiveFolderThreadAsync(source.ThreadId, cancellationToken);
+        }
 
         entry.ParentFolderId = destinationFolderId;
         entry.Path = PathRules.Normalize(targetPath);
         entry.MetadataMessageId = "";
         var destination = await GetMappingAsync(destinationFolderId, cancellationToken);
-        await _metadata.SendEntryAsync(_discord, destination.ThreadId, entry, cancellationToken, onRateLimitWait);
-        var destinationChildren = _store.LoadCachedEntriesForFolder(destinationFolderId);
-        ReplaceEntry(destinationChildren, entry);
-        _store.CacheFolderEntries(destinationFolderId, destinationChildren);
-        RecordDescriptors(destinationChildren);
-        await SynchronizeFolderSerialAsync(destinationFolderId, entry.Path, destinationChildren, cancellationToken);
+        await _discord.UnarchiveThreadAsync(destination.ThreadId, cancellationToken, onRateLimitWait);
+        try
+        {
+            await _metadata.SendEntryAsync(_discord, destination.ThreadId, entry, cancellationToken, onRateLimitWait);
+            var destinationChildren = _store.LoadCachedEntriesForFolder(destinationFolderId);
+            ReplaceEntry(destinationChildren, entry);
+            _store.CacheFolderEntries(destinationFolderId, destinationChildren);
+            RecordDescriptors(destinationChildren);
+            await SynchronizeFolderSerialAsync(destinationFolderId, entry.Path, destinationChildren, cancellationToken);
+        }
+        finally
+        {
+            await ArchiveFolderThreadAsync(destination.ThreadId, cancellationToken);
+        }
 
         if (entry.Type == "folder")
         {
@@ -289,11 +411,19 @@ public sealed class AppRegistry
 
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
-        await _metadata.DeleteEntryAsync(_discord, parent.ThreadId, entry, cancellationToken);
-        var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
-        RemoveEntry(siblings, entry);
-        _store.CacheFolderEntries(parentFolderId, siblings);
-        await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+        await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken);
+        try
+        {
+            await _metadata.DeleteEntryAsync(_discord, parent.ThreadId, entry, cancellationToken);
+            var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+            RemoveEntry(siblings, entry);
+            _store.CacheFolderEntries(parentFolderId, siblings);
+            await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
+        }
+        finally
+        {
+            await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
+        }
 
         if (entry.Type != "folder" || string.IsNullOrWhiteSpace(entry.FolderId))
         {
@@ -328,6 +458,7 @@ public sealed class AppRegistry
             _store.CacheFolderEntries(folderId, entries);
             RecordDescriptors(entries);
             await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
+            await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
             return entries;
         }
         finally
@@ -420,6 +551,7 @@ public sealed class AppRegistry
         _store.UpsertFolderIndexMapping(mapping);
         _descriptors[folderId] = new FolderDescriptor(folderId, parentFolderId, name, folderPath);
         await SynchronizeFolderSerialAsync(folderId, folderPath, [], cancellationToken);
+        await ArchiveFolderThreadAsync(post.ThreadId, cancellationToken);
         return _mappings[folderId];
     }
 
@@ -505,12 +637,22 @@ public sealed class AppRegistry
         long count = serial.Children.LongCount(child => !child.IsFolder);
         foreach (var child in serial.Children.Where(child => child.IsFolder))
         {
-            if (string.IsNullOrWhiteSpace(child.Id) || !_mappings.ContainsKey(child.Id))
+            if (string.IsNullOrWhiteSpace(child.Id))
             {
                 return null;
             }
 
-            var nested = await CountFolderFilesAsync(child.Id, visitedFolderIds, cancellationToken);
+            FolderIndexMapping childMapping;
+            try
+            {
+                childMapping = await GetMappingAsync(child.Id, cancellationToken);
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+
+            var nested = await CountFolderFilesAsync(childMapping.FolderId, visitedFolderIds, cancellationToken);
             if (!nested.HasValue)
             {
                 return null;
@@ -520,6 +662,37 @@ public sealed class AppRegistry
         }
 
         return count;
+    }
+
+    private async Task<bool> ArchiveFolderThreadAsync(
+        string threadId,
+        CancellationToken cancellationToken,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        if (string.IsNullOrWhiteSpace(threadId))
+        {
+            return false;
+        }
+
+        try
+        {
+            await _discord.ArchiveThreadAsync(threadId, cancellationToken, onRateLimitWait);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (DiscordApiException ex) when ((int)ex.StatusCode is 403 or 404)
+        {
+            AppLogger.Error("Registry.ArchiveFolderThread", ex, threadId);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.ArchiveFolderThread", ex, threadId);
+            return false;
+        }
     }
 
     private async Task<bool> DeleteSupersededSerialIfCurrentAsync(

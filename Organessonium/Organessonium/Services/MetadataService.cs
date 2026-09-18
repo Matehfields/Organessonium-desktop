@@ -207,12 +207,22 @@ public sealed class MetadataService
         foreach (var envelope in envelopes)
         {
             var entry = ToAppEntry(envelope);
-            if (entry == null || !string.Equals(entry.ParentFolderId ?? "root", normalizedFolderId, StringComparison.OrdinalIgnoreCase))
+            if (entry == null)
+            {
+                continue;
+            }
+
+            // The folder thread is authoritative for direct membership. Older
+            // metadata may not have a parentFolderId, so accept that legacy
+            // shape and normalize it to the folder being read.
+            if (!string.IsNullOrWhiteSpace(entry.ParentFolderId) &&
+                !string.Equals(entry.ParentFolderId, normalizedFolderId, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
             entry.Path = PathRules.Normalize(folderPath);
+            entry.ParentFolderId = normalizedFolderId;
             if (entry.Type == "folder" && mappings.TryGetValue(entry.FolderId, out var mapping))
             {
                 entry.ThreadId = mapping.ThreadId;

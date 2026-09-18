@@ -38,6 +38,7 @@ let visibleThumbnailIds = new Set();
 let folderLoadingPath = '';
 let folderStatisticsTimer = 0;
 let folderFileCounts = new Map();
+let libraryFileCount = null;
 let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
 let activeVideoResizeCleanup = null;
@@ -645,6 +646,15 @@ window._onRegistryLoadProgress = count => {
     setStatus(registryValidationUsesCache ? t('validatingServer') + ' ' + progress : progress, true);
 };
 
+window._onLibraryFileCount = count => {
+    const total = Number(count);
+    if (!Number.isFinite(total) || total < 0) return;
+    libraryFileCount = Math.floor(total);
+    if (currentPath === '/' && !registryValidationUsesCache) {
+        setStatus(t('loaded', { count:libraryFileCount }), false);
+    }
+};
+
 window._onAppsBatch = apps => {
     if (!Array.isArray(apps) || !apps.length) return;
     const byId = new Map(allApps.map(app => [appIdentityKey(app), app]));
@@ -663,7 +673,7 @@ window._onAppsLoaded = apps => {
     render();
     const total = apps.reduce((s,a) => s+(a.sizeBytes||0), 0);
     storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
-    setStatus(t('loaded', { count:apps.length }), false);
+    setStatus(t('loaded', { count:libraryFileCount ?? apps.length }), false);
     registryValidationUsesCache = false;
     scheduleVisibleThumbnails();
 };
@@ -671,6 +681,7 @@ window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
     folderFileCounts.clear();
     requestedFolderStatistics.clear();
+    libraryFileCount = null;
     allApps = apps;
     syncOpenMarkdownApps();
     render();
