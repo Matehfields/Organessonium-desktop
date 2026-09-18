@@ -33,6 +33,7 @@ public sealed class AppController : IAsyncDisposable
     private const int SpreadsheetMaxSheets = 20;
     private const int PresentationMaxSlides = 80;
     private const long MarkdownInlineImageLimit = EncryptionService.MaximumPlaintextPayloadBytes;
+    private sealed record FolderFileStatistic(string FolderId, long FileCount);
     private readonly Window _owner;
     private readonly SettingsStore _store;
     private WebMessageBridge _bridge;
@@ -165,6 +166,7 @@ public sealed class AppController : IAsyncDisposable
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
@@ -515,6 +517,7 @@ public sealed class AppController : IAsyncDisposable
                 try
                 {
                     await registry.RefreshMappingsAsync();
+                    _ = CleanupSupersededRemoteSerialsAsync(registry);
                     var refreshed = await registry.RefreshFolderAsync(AppRegistry.RootFolderId, "/");
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
@@ -535,6 +538,22 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
+    private async Task CleanupSupersededRemoteSerialsAsync(AppRegistry registry)
+    {
+        try
+        {
+            await registry.CleanupSupersededRemoteSerialsAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // App shutdown can interrupt this best-effort maintenance task.
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.SerialCleanup", ex);
+        }
+    }
+
     private async Task LoadFolderAtPathAsync(string folderPath, string folderId)
     {
         var normalizedPath = PathRules.Normalize(folderPath);
@@ -547,27 +566,36 @@ public sealed class AppController : IAsyncDisposable
             : folderId;
         if (string.IsNullOrWhiteSpace(normalizedFolderId))
         {
+            await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
             return;
         }
 
         var registry = Registry();
-        var cached = await registry.LoadCachedFolderAsync(normalizedFolderId, normalizedPath);
-        ReplaceLoadedFolder(normalizedFolderId, cached);
-        await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-
         try
         {
-            var refreshed = await registry.RefreshFolderAsync(normalizedFolderId, normalizedPath);
-            ReplaceLoadedFolder(normalizedFolderId, refreshed);
+            await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
+            var cached = await registry.LoadCachedFolderAsync(normalizedFolderId, normalizedPath);
+            ReplaceLoadedFolder(normalizedFolderId, cached);
             await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+
+            try
+            {
+                var refreshed = await registry.RefreshFolderAsync(normalizedFolderId, normalizedPath);
+                ReplaceLoadedFolder(normalizedFolderId, refreshed);
+                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+            }
+            catch (OperationCanceledException)
+            {
+                // A navigation request can be abandoned during app shutdown.
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Registry.FolderRefresh", ex, normalizedFolderId);
+            }
         }
-        catch (OperationCanceledException)
+        finally
         {
-            // A navigation request can be abandoned during app shutdown.
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Registry.FolderRefresh", ex, normalizedFolderId);
+            await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
         }
     }
     private void MergeLoadedApps(IReadOnlyList<AppEntry> batch)
@@ -641,6 +669,55 @@ public sealed class AppController : IAsyncDisposable
     private Task SetBackgroundActivityAsync(string message, bool active)
     {
         return _bridge.CallAsync("_onBackgroundActivity", message, active);
+    }
+
+    private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson)
+    {
+        if (_loggingOut)
+        {
+            return;
+        }
+
+        var folderIds = ParseVisibleFolderIds(visibleFolderIdsJson);
+        if (folderIds.Count == 0)
+        {
+            return;
+        }
+
+        var registry = Registry();
+        var path = _currentPath;
+        var statistics = new ConcurrentBag<FolderFileStatistic>();
+        var workers = Math.Clamp(_store.Load().SearchWorkers, 1, 4);
+        await Parallel.ForEachAsync(
+            folderIds,
+            new ParallelOptions { MaxDegreeOfParallelism = workers },
+            async (folderId, cancellationToken) =>
+            {
+                try
+                {
+                    var count = await registry.GetFolderFileCountAsync(folderId, cancellationToken);
+                    if (count.HasValue)
+                    {
+                        statistics.Add(new FolderFileStatistic(folderId, count.Value));
+                    }
+                }
+                catch (OperationCanceledException) when (_loggingOut)
+                {
+                    // Logout intentionally stops pending background work.
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("Registry.FolderStatistics", ex, folderId);
+                }
+            });
+
+        if (!_loggingOut && path == _currentPath && statistics.Count > 0)
+        {
+            await _bridge.CallAsync(
+                "_onFolderStatistics",
+                path,
+                statistics.OrderBy(statistic => statistic.FolderId, StringComparer.Ordinal).ToList());
+        }
     }
 
     private async Task LoadVisibleThumbnailsAsync(string visibleIdsJson)
@@ -882,6 +959,28 @@ public sealed class AppController : IAsyncDisposable
             return [];
         }
     }
+
+    private static HashSet<string> ParseVisibleFolderIds(string visibleFolderIdsJson)
+    {
+        if (string.IsNullOrWhiteSpace(visibleFolderIdsJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(visibleFolderIdsJson, JsonOptions.Web)?
+                .Where(id => !string.IsNullOrWhiteSpace(id) && id.Length <= 128)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(40)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     private static bool IsThumbnailCandidate(AppEntry app, string path)
     {
         return app.Type == "file" &&

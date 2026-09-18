@@ -16,8 +16,12 @@ public sealed class AppRegistry
     private readonly ConcurrentDictionary<string, FolderIndexMapping> _mappings;
     private readonly ConcurrentDictionary<string, FolderDescriptor> _descriptors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<List<AppEntry>>> _folderRefreshes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _folderFileCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _mappingRefreshGate = new(1, 1);
     private readonly SemaphoreSlim _rootCreationGate = new(1, 1);
+    private readonly SemaphoreSlim _entryMutationGate = new(1, 1);
+    private readonly SemaphoreSlim _serialSynchronizationGate = new(1, 1);
+    private int _remoteSerialCleanupStarted;
 
     public AppRegistry(DiscordApiClient discord, SettingsStore store, AppSettings settings)
     {
@@ -59,6 +63,28 @@ public sealed class AppRegistry
             _ => RefreshFolderCoreAsync(normalizedFolderId, folderPath, cancellationToken));
     }
 
+    public async Task<long?> GetFolderFileCountAsync(
+        string folderId,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        if (_folderFileCounts.TryGetValue(normalizedFolderId, out var cached))
+        {
+            return cached;
+        }
+
+        var count = await CountFolderFilesAsync(
+            normalizedFolderId,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            cancellationToken);
+        if (count.HasValue)
+        {
+            _folderFileCounts[normalizedFolderId] = count.Value;
+        }
+
+        return count;
+    }
+
     public async Task RefreshMappingsAsync(CancellationToken cancellationToken = default)
     {
         await _mappingRefreshGate.WaitAsync(cancellationToken);
@@ -84,6 +110,7 @@ public sealed class AppRegistry
                 _mappings[mapping.FolderId] = mapping;
             }
             _store.ReplaceFolderIndexMappings(canonical);
+            _folderFileCounts.Clear();
         }
         finally
         {
@@ -123,6 +150,44 @@ public sealed class AppRegistry
         AppEntry entry,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        await _entryMutationGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait);
+        }
+        finally
+        {
+            _entryMutationGate.Release();
+        }
+    }
+
+    public async Task CleanupSupersededRemoteSerialsAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref _remoteSerialCleanupStarted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _serials.CleanupSupersededRemoteSerialsAsync(
+                MappingSnapshot(),
+                _settings.SearchWorkers,
+                DeleteSupersededSerialIfCurrentAsync,
+                cancellationToken);
+        }
+        catch
+        {
+            Volatile.Write(ref _remoteSerialCleanupStarted, 0);
+            throw;
+        }
+    }
+
+    private async Task<string> AddEntryCoreAsync(
+        AppEntry entry,
+        CancellationToken cancellationToken,
+        Func<TimeSpan, Task>? onRateLimitWait)
     {
         entry.Normalize();
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
@@ -364,34 +429,124 @@ public sealed class AppRegistry
         IEnumerable<AppEntry> entries,
         CancellationToken cancellationToken)
     {
-        var normalizedFolderId = NormalizeFolderId(folderId);
-        if (!_mappings.TryGetValue(normalizedFolderId, out var mapping))
+        await _serialSynchronizationGate.WaitAsync(cancellationToken);
+        try
         {
-            return;
+            _folderFileCounts.Clear();
+            var normalizedFolderId = NormalizeFolderId(folderId);
+            if (!_mappings.TryGetValue(normalizedFolderId, out var mapping))
+            {
+                return;
+            }
+
+            var descriptor = ResolveFolderDescriptor(normalizedFolderId, folderPath);
+            var serial = _serials.BuildFolderSerial(
+                normalizedFolderId,
+                descriptor.ParentFolderId,
+                descriptor.Name,
+                entries,
+                MappingSnapshot());
+            var updated = await _serials.SaveFolderAsync(serial, mapping, cancellationToken);
+            if (updated == mapping)
+            {
+                return;
+            }
+
+            DiscordMessageDto message;
+            try
+            {
+                message = await _discord.UpdateMessageAsync(
+                    _settings.NamesChannelId,
+                    mapping.NamesMessageId,
+                    _metadata.SerializeFolderIndex(updated),
+                    cancellationToken);
+            }
+            catch
+            {
+                await _serials.TryDeleteRemoteSerialAsync(
+                    updated.SerialMessageId,
+                    mapping.SerialMessageId,
+                    CancellationToken.None);
+                await _serials.InvalidateCachedFolderAsync(normalizedFolderId);
+                throw;
+            }
+
+            var persisted = updated with { NamesMessageId = message.Id };
+            _mappings[normalizedFolderId] = persisted;
+            _store.UpsertFolderIndexMapping(persisted);
+            await _serials.DeleteSupersededRemoteSerialAsync(
+                mapping.SerialMessageId,
+                persisted.SerialMessageId,
+                cancellationToken);
+        }
+        finally
+        {
+            _serialSynchronizationGate.Release();
+        }
+    }
+
+    private async Task<long?> CountFolderFilesAsync(
+        string folderId,
+        HashSet<string> visitedFolderIds,
+        CancellationToken cancellationToken)
+    {
+        if (!visitedFolderIds.Add(folderId))
+        {
+            return null;
         }
 
-        var descriptor = ResolveFolderDescriptor(normalizedFolderId, folderPath);
-        var serial = _serials.BuildFolderSerial(
-            normalizedFolderId,
-            descriptor.ParentFolderId,
-            descriptor.Name,
-            entries,
-            MappingSnapshot());
-        var updated = await _serials.SaveFolderAsync(serial, mapping, cancellationToken);
-        if (updated == mapping)
+        var mapping = await GetMappingAsync(folderId, cancellationToken);
+        var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        if (serial == null)
         {
-            return;
+            return null;
         }
 
-        var message = await _discord.UpdateMessageAsync(
-            _settings.NamesChannelId,
-            mapping.NamesMessageId,
-            _metadata.SerializeFolderIndex(updated),
-            cancellationToken);
-        var persisted = updated with { NamesMessageId = message.Id };
-        _mappings[normalizedFolderId] = persisted;
-        _store.UpsertFolderIndexMapping(persisted);
-        await _serials.DeleteSupersededRemoteSerialAsync(mapping.SerialMessageId, persisted.SerialMessageId, cancellationToken);
+        long count = serial.Children.LongCount(child => !child.IsFolder);
+        foreach (var child in serial.Children.Where(child => child.IsFolder))
+        {
+            if (string.IsNullOrWhiteSpace(child.Id) || !_mappings.ContainsKey(child.Id))
+            {
+                return null;
+            }
+
+            var nested = await CountFolderFilesAsync(child.Id, visitedFolderIds, cancellationToken);
+            if (!nested.HasValue)
+            {
+                return null;
+            }
+
+            count += nested.Value;
+        }
+
+        return count;
+    }
+
+    private async Task<bool> DeleteSupersededSerialIfCurrentAsync(
+        string folderId,
+        string expectedCurrentMessageId,
+        string staleMessageId,
+        CancellationToken cancellationToken)
+    {
+        await _serialSynchronizationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_mappings.TryGetValue(folderId, out var current) ||
+                !current.SerialMessageId.Equals(expectedCurrentMessageId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            await _serials.TryDeleteRemoteSerialAsync(
+                staleMessageId,
+                expectedCurrentMessageId,
+                cancellationToken);
+            return true;
+        }
+        finally
+        {
+            _serialSynchronizationGate.Release();
+        }
     }
 
     private FolderDescriptor ResolveFolderDescriptor(string folderId, string folderPath)

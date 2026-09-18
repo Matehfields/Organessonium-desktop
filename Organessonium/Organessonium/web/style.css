@@ -981,6 +981,11 @@ html[data-motion="reduced"] *{
 }
 .empty-state p{font-size:15px;font-weight:600;}
 .empty-state small{font-size:12px;}
+.empty-state.folder-loading > span{display:none;}
+.empty-state.folder-loading::before{
+    content:"";width:32px;height:32px;border:3px solid var(--border);
+    border-top-color:var(--text-secondary);border-radius:50%;animation:spin .7s linear infinite;
+}
 
 /* ─── Statusbar ──────────────────────────────────────────────────────────── */
 .statusbar{

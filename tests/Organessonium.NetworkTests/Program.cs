@@ -28,6 +28,7 @@ internal static class Program
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
+        ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -599,6 +600,46 @@ internal static class Program
             : TestOutcome.Fail($"índice incompleto ou sequencial: recebidos={received.Count}, callbacks={announced}, paralelo={handler.MaximumConcurrentRequests}");
     }
 
+    private static async Task<TestOutcome> ParallelAttachmentUploadsBypassRouteLockAsync()
+    {
+        var directory = Directory.CreateTempSubdirectory("organessonium_parallel_upload_test_");
+        try
+        {
+            var parts = Enumerable.Range(1, 3)
+                .Select(index => new FileInfo(Path.Combine(directory.FullName, $"part-{index}.bin")))
+                .ToList();
+            foreach (var part in parts)
+            {
+                await File.WriteAllBytesAsync(part.FullName, RandomNumberGenerator.GetBytes(1024));
+            }
+
+            using var handler = new ParallelAttachmentUploadHandler();
+            using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+            using var uploadGate = new SemaphoreSlim(3, 3);
+            var uploader = new ForumUploader(discord, "files-forum");
+            var result = await uploader.UploadResumableAsync(
+                "archive.bin",
+                parts,
+                "",
+                "",
+                new Dictionary<int, string>(),
+                cancellationToken: default,
+                maxParallelParts: 3,
+                uploadGate: uploadGate);
+
+            var valid = result.ChunkMessageIds.Count == 3 &&
+                        result.ChunkMessageIds.All(id => !string.IsNullOrWhiteSpace(id)) &&
+                        handler.MaximumConcurrentAttachments >= 2;
+            return valid
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail($"as partes do upload foram serializadas: paralelo={handler.MaximumConcurrentAttachments}");
+        }
+        finally
+        {
+            try { directory.Delete(true); } catch { }
+        }
+    }
+
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)
     {
         store = new InMemoryEncryptionSecretStore();
@@ -707,6 +748,57 @@ internal static class Program
             }
 
             return null;
+        }
+    }
+
+    private sealed class ParallelAttachmentUploadHandler : HttpMessageHandler
+    {
+        private readonly object _sync = new();
+        private int _activeAttachments;
+        private int _maximumConcurrentAttachments;
+        private int _nextMessageId;
+
+        public int MaximumConcurrentAttachments
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _maximumConcurrentAttachments;
+                }
+            }
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            lock (_sync)
+            {
+                _activeAttachments++;
+                _maximumConcurrentAttachments = Math.Max(_maximumConcurrentAttachments, _activeAttachments);
+            }
+
+            try
+            {
+                await Task.Delay(50, cancellationToken);
+                var messageId = Interlocked.Increment(ref _nextMessageId).ToString();
+                var path = request.RequestUri?.AbsolutePath ?? "";
+                var payload = path.EndsWith("/threads", StringComparison.Ordinal)
+                    ? "{\"id\":\"file-thread\",\"message\":{\"id\":\"" + messageId + "\",\"content\":\"\",\"attachments\":[]}}"
+                    : "{\"id\":\"" + messageId + "\",\"content\":\"\",\"attachments\":[]}";
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(payload, Encoding.UTF8, "application/json")
+                };
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    _activeAttachments--;
+                }
+            }
         }
     }
 

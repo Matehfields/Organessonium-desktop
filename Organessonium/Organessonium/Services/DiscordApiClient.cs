@@ -365,7 +365,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         FileInfo file,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -377,7 +378,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     content,
                     file,
                     cancellationToken,
-                    onRateLimitWait);
+                    onRateLimitWait,
+                    serializeRoute);
             }
             catch (DiscordApiException ex) when (ex.DiscordCode == MaxActiveThreadsCode && attempt < 2)
             {
@@ -464,14 +466,15 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         FileInfo file,
         CancellationToken cancellationToken,
-        Func<TimeSpan, Task>? onRateLimitWait)
+        Func<TimeSpan, Task>? onRateLimitWait,
+        bool serializeRoute)
     {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
             request.Content = BuildForumThreadContent(title, content, file);
             return request;
-        }, cancellationToken, onRateLimitWait);
+        }, cancellationToken, onRateLimitWait, serializeRoute);
         var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
         var messageId = channel.Message?.Id ?? "";
         if (string.IsNullOrWhiteSpace(messageId))
@@ -554,14 +557,15 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         FileInfo file,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true)
     {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
             request.Content = BuildMessageFileContent(content, file);
             return request;
-        }, cancellationToken, onRateLimitWait);
+        }, cancellationToken, onRateLimitWait, serializeRoute);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 

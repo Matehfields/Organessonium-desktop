@@ -96,7 +96,8 @@ public sealed class ForumUploader
                     : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), parts.Count),
                 first,
                 cancellationToken,
-                onRateLimitWait));
+                onRateLimitWait,
+                serializeRoute: false));
             threadId = post.ThreadId;
             chunkMessages[0] = post.MessageId;
             if (onChunkUploaded != null)
@@ -135,7 +136,8 @@ public sealed class ForumUploader
                             : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), parts.Count),
                         parts[index],
                         cancellationToken,
-                        onRateLimitWait));
+                        onRateLimitWait,
+                        serializeRoute: false));
                     chunkMessages[index] = message.Id;
                     if (onChunkUploaded != null)
                     {
@@ -245,7 +247,8 @@ public sealed class ForumUploader
                             : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), totalParts),
                         first!.File,
                         cancellationToken,
-                        onRateLimitWait);
+                        onRateLimitWait,
+                        serializeRoute: false);
                 });
                 threadId = post.ThreadId;
                 chunkMessages[0] = post.MessageId;
@@ -299,7 +302,8 @@ public sealed class ForumUploader
                                 : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), totalParts),
                             prepared!.File,
                             cancellationToken,
-                            onRateLimitWait);
+                            onRateLimitWait,
+                            serializeRoute: false);
                     });
                     chunkMessages[index] = message.Id;
                     if (onChunkUploaded != null)
@@ -355,7 +359,8 @@ public sealed class ForumUploader
                     : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
-                onRateLimitWait);
+                onRateLimitWait,
+                serializeRoute: false);
             chunkMessages.Add(message.Id);
             uploadedParts?.Invoke(i + 1);
         }

@@ -194,26 +194,128 @@ public sealed class SerialIndexService
         }
     }
 
+    public Task InvalidateCachedFolderAsync(string folderId)
+    {
+        _loadedFolders.TryRemove(folderId, out _);
+        var file = CacheFile(folderId);
+        try
+        {
+            if (file.Exists)
+            {
+                file.Delete();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Serial.InvalidateCache", ex, file.FullName);
+        }
+
+        return Task.CompletedTask;
+    }
+
     public async Task DeleteSupersededRemoteSerialAsync(
         string previousMessageId,
         string currentMessageId,
         CancellationToken cancellationToken = default)
     {
+        await TryDeleteRemoteSerialAsync(previousMessageId, currentMessageId, cancellationToken);
+    }
+
+    public async Task TryDeleteRemoteSerialAsync(
+        string messageId,
+        string? preservedMessageId = null,
+        CancellationToken cancellationToken = default)
+    {
         if (string.IsNullOrWhiteSpace(_settings.SerialChannelId) ||
-            string.IsNullOrWhiteSpace(previousMessageId) ||
-            previousMessageId.Equals(currentMessageId, StringComparison.Ordinal))
+            string.IsNullOrWhiteSpace(messageId) ||
+            messageId.Equals(preservedMessageId, StringComparison.Ordinal))
         {
             return;
         }
 
         try
         {
-            await _discord.DeleteMessageAsync(_settings.SerialChannelId, previousMessageId, cancellationToken);
+            await _discord.DeleteMessageAsync(_settings.SerialChannelId, messageId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (DiscordApiException ex) when ((int)ex.StatusCode == 404)
         {
-            // The mapping already points at the new serial.
+            // The message was already removed by a previous reconciliation.
         }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Serial.DeleteRemote", ex, messageId);
+        }
+    }
+
+    public async Task<int> CleanupSupersededRemoteSerialsAsync(
+        IReadOnlyDictionary<string, FolderIndexMapping> mappings,
+        int workers,
+        Func<string, string, string, CancellationToken, Task<bool>>? deleteIfCurrent,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.SerialChannelId) || mappings.Count == 0)
+        {
+            return 0;
+        }
+
+        var currentByFolder = mappings.Values
+            .Where(mapping => !string.IsNullOrWhiteSpace(mapping.SerialMessageId))
+            .GroupBy(mapping => mapping.FolderId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        if (currentByFolder.Count == 0)
+        {
+            return 0;
+        }
+
+        var messages = await _discord.GetMessagesInParallelAsync(
+            _settings.SerialChannelId,
+            Math.Clamp(workers, 1, 8),
+            cancellationToken);
+        var records = new List<(string MessageId, SerialMessageEnvelope Envelope)>();
+        foreach (var message in messages)
+        {
+            if (message.Author?.Bot != true ||
+                !message.Attachments.Any(attachment => attachment.FileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) ||
+                !SerialMessageEnvelope.TryParse(message.Content, out var envelope))
+            {
+                continue;
+            }
+
+            records.Add((message.Id, envelope));
+        }
+
+        var removed = 0;
+        foreach (var group in records.GroupBy(record => record.Envelope.FolderId, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!currentByFolder.TryGetValue(group.Key, out var mapping) ||
+                !group.Any(record => record.MessageId.Equals(mapping.SerialMessageId, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            foreach (var record in group.Where(record => !record.MessageId.Equals(mapping.SerialMessageId, StringComparison.Ordinal)))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (deleteIfCurrent != null)
+                {
+                    if (await deleteIfCurrent(group.Key, mapping.SerialMessageId, record.MessageId, cancellationToken))
+                    {
+                        removed++;
+                    }
+                }
+                else
+                {
+                    await TryDeleteRemoteSerialAsync(record.MessageId, mapping.SerialMessageId, cancellationToken);
+                    removed++;
+                }
+            }
+        }
+
+        return removed;
     }
 
     public IReadOnlyList<AppEntry> MaterializeEntries(

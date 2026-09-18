@@ -35,6 +35,10 @@ let cardPreviewFrame = 0;
 let thumbnailRequestTimer = 0;
 let thumbnailObserver = null;
 let visibleThumbnailIds = new Set();
+let folderLoadingPath = '';
+let folderStatisticsTimer = 0;
+let folderFileCounts = new Map();
+let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
 let activeVideoResizeCleanup = null;
 let pdfPreviewState = null;
@@ -665,12 +669,28 @@ window._onAppsLoaded = apps => {
 };
 window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
+    folderFileCounts.clear();
+    requestedFolderStatistics.clear();
     allApps = apps;
     syncOpenMarkdownApps();
     render();
     const total = allApps.reduce((sum, app) => sum + (app.sizeBytes || 0), 0);
     storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
     scheduleVisibleThumbnails();
+};
+window._onFolderLoadState = (path, loading) => {
+    if (path !== currentPath) return;
+    folderLoadingPath = loading ? path : '';
+    render();
+};
+window._onFolderStatistics = (path, statistics) => {
+    if (!Array.isArray(statistics)) return;
+    statistics.forEach(statistic => {
+        if (!statistic || !statistic.folderId || !Number.isFinite(Number(statistic.fileCount))) return;
+        folderFileCounts.set(statistic.folderId, Number(statistic.fileCount));
+        requestedFolderStatistics.delete(statistic.folderId);
+    });
+    if (path === currentPath) render();
 };
 window._onBackgroundActivity = (message, active) => {
     const activity = $('background-activity');
@@ -2093,6 +2113,26 @@ function setOpProgress(id, percent) {
     bar.style.width = safe + '%';
     const percentEl = $('op-percent-' + id);
     if (percentEl) percentEl.textContent = safe + '%';
+}
+
+function requestVisibleFolderStatistics() {
+    if (!window.bridge || typeof window.bridge.loadVisibleFolderStatistics !== 'function') return;
+    const requestedAt = Date.now();
+    const folderIds = allApps
+        .filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.folderId)
+        .map(app => app.folderId)
+        .filter(folderId => !folderFileCounts.has(folderId) && (requestedAt - (requestedFolderStatistics.get(folderId) || 0)) > 1000);
+    if (!folderIds.length) return;
+    folderIds.forEach(folderId => requestedFolderStatistics.set(folderId, requestedAt));
+    window.bridge.loadVisibleFolderStatistics(JSON.stringify(folderIds));
+}
+
+function scheduleVisibleFolderStatistics() {
+    clearTimeout(folderStatisticsTimer);
+    folderStatisticsTimer = setTimeout(() => {
+        folderStatisticsTimer = 0;
+        requestVisibleFolderStatistics();
+    }, 80);
 }
 
 function refreshBatchProgress(id) {
@@ -4586,6 +4626,7 @@ function makeMoveItem(path, label, depth) {
 function navigate(path, addHistory = true) {
     if (addHistory && path !== currentPath) { historyBack.push(currentPath); historyForward = []; }
     currentPath = path; searchQuery = ''; $('search-input').value = '';
+    folderLoadingPath = path;
     const folder = path === '/'
         ? null
         : allApps.find(app => isFolderApp(app) && folderPathForApp(app) === path);
@@ -5346,8 +5387,16 @@ function render() {
 
     filesGrid.innerHTML=''; filesList.innerHTML='';
     const total=folders.length+files.length;
-    if (!total) { emptyState.classList.remove('hidden'); return; }
+    if (!total) {
+        const loadingFolder = !searchQuery && folderLoadingPath === currentPath;
+        emptyState.classList.remove('hidden');
+        emptyState.classList.toggle('folder-loading', loadingFolder);
+        $('empty-title').textContent = loadingFolder ? t('loading') : t('emptyTitle');
+        $('empty-help').textContent = loadingFolder ? '' : t('emptyHelp');
+        return;
+    }
     emptyState.classList.add('hidden');
+    emptyState.classList.remove('folder-loading');
 
     if (viewMode==='grid') {
         filesGrid.classList.remove('hidden'); filesList.classList.add('hidden');
@@ -5371,6 +5420,7 @@ function render() {
     }
     updateSelectionUI();
     scheduleCardPreviewSync();
+    scheduleVisibleFolderStatistics();
 }
 
 function renderPathCrumbs() {
@@ -5447,8 +5497,11 @@ function makeFileCard(app) {
 
 function makeDriveFolderCard(name) {
     const fp = currentPath==='/' ? '/' + name : currentPath + '/' + name;
-    const count = allApps.filter(a => a.type !== 'folder' && ((a.path||'/') === fp || (a.path||'/').startsWith(fp + '/'))).length;
     const explicit = allApps.find(a => a.type === 'folder' && (a.path||'/') === currentPath && a.name === name);
+    const loadedCount = allApps.filter(a => a.type !== 'folder' && ((a.path||'/') === fp || (a.path||'/').startsWith(fp + '/'))).length;
+    const count = explicit && explicit.folderId
+        ? (folderFileCounts.has(explicit.folderId) ? folderFileCounts.get(explicit.folderId) : '...')
+        : loadedCount;
     const folderObj = explicit || { name, threadId:'folder_implicit_' + name, type:'folder', path:currentPath, folderColor:TYPE_COLOR.folder };
     const color = folderObj.folderColor || TYPE_COLOR.folder;
     const card = document.createElement('div');
