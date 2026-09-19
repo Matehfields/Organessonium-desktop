@@ -683,11 +683,28 @@ function scheduleNativeTitleBarDragRegion() {
         const region = $('titlebar-drag-region');
         if (!region || !window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
         const rect = region.getBoundingClientRect();
-        window.bridge.setTitleBarDragRegion(
-            Math.round(rect.left),
-            Math.round(rect.top),
-            Math.round(rect.width),
-            Math.round(rect.height));
+        const topbar = region.closest('.topbar');
+        const topbarRect = topbar?.getBoundingClientRect();
+        const rectangles = [];
+        if (rect.width > 0 && topbarRect && topbarRect.height > 0) {
+            rectangles.push(
+                Math.round(rect.left),
+                Math.round(topbarRect.top),
+                Math.round(rect.width),
+                Math.round(topbarRect.height));
+        }
+
+        const sidebarBrand = $('sidebar-brand');
+        const sidebarRect = sidebarBrand?.getBoundingClientRect();
+        if (sidebarRect && sidebarRect.width > 0 && topbarRect && topbarRect.height > 0) {
+            rectangles.push(
+                Math.round(sidebarRect.left),
+                Math.round(topbarRect.top),
+                Math.round(sidebarRect.width),
+                Math.round(topbarRect.height));
+        }
+
+        if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
     });
 }
 

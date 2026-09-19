@@ -45,6 +45,7 @@ public partial class MainWindow : Window
     private int _lastTitleBarLeftInset = -1;
     private int _lastTitleBarRightInset = -1;
     private int _lastTitleBarHeight = -1;
+    private RectInt32[]? _lastNativeDragRectangles;
     private readonly Dictionary<IntPtr, NativeFileDropTarget> _oleDropTargets = new();
 
     private const int WmDropFiles = 0x0233;
@@ -136,12 +137,7 @@ public partial class MainWindow : Window
 
             var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(handle));
             var titleBar = appWindow.TitleBar;
-            titleBar.ExtendsContentIntoTitleBar = true;
-            titleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
-
-            var transparent = Windows.UI.Color.FromArgb(0, 0, 0, 0);
-            titleBar.ButtonBackgroundColor = transparent;
-            titleBar.ButtonInactiveBackgroundColor = transparent;
+            ConfigureNativeTitleBar(titleBar);
 
             _nativeTitleBar = titleBar;
             _usesIntegratedTitleBar = true;
@@ -152,6 +148,17 @@ public partial class MainWindow : Window
             _usesIntegratedTitleBar = false;
             AppLogger.Debug("Window.TitleBar", "Native title bar integration unavailable: " + ex.Message);
         }
+    }
+
+    private static void ConfigureNativeTitleBar(AppWindowTitleBar titleBar)
+    {
+        titleBar.ExtendsContentIntoTitleBar = true;
+        titleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        titleBar.IconShowOptions = IconShowOptions.HideIconAndSystemMenu;
+
+        var transparent = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+        titleBar.ButtonBackgroundColor = transparent;
+        titleBar.ButtonInactiveBackgroundColor = transparent;
     }
 
     private async Task PublishNativeTitleBarMetricsAsync(bool force = false)
@@ -195,9 +202,30 @@ public partial class MainWindow : Window
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var width = Math.Max(0, ToTitleBarPixels(ActualWidth, dpiScale) - _nativeTitleBar.RightInset);
         var height = Math.Max(0, _nativeTitleBar.Height);
-        _nativeTitleBar.SetDragRectangles(width > 0 && height > 0
+        ApplyNativeTitleBarDragRectangles(width > 0 && height > 0
             ? [new RectInt32(0, 0, width, height)]
             : Array.Empty<RectInt32>());
+    }
+
+    private void ApplyNativeTitleBarDragRectangles(RectInt32[] rectangles)
+    {
+        if (!_usesIntegratedTitleBar || _nativeTitleBar == null)
+        {
+            return;
+        }
+
+        if (_lastNativeDragRectangles != null &&
+            _lastNativeDragRectangles.SequenceEqual(rectangles))
+        {
+            return;
+        }
+
+        // Reset before changing the rectangles because Windows App SDK can leave
+        // the previous area non-interactive after a title-bar resize.
+        _nativeTitleBar.ResetToDefault();
+        ConfigureNativeTitleBar(_nativeTitleBar);
+        _nativeTitleBar.SetDragRectangles(rectangles);
+        _lastNativeDragRectangles = rectangles;
     }
 
     private void SetNativeTitleBarDragRegion(JsonElement message)
@@ -210,7 +238,8 @@ public partial class MainWindow : Window
         }
 
         var values = args.EnumerateArray().ToArray();
-        if (values.Length != 4 || !values.All(value => value.TryGetDouble(out _)))
+        if (values.Length == 0 || values.Length % 4 != 0 ||
+            !values.All(value => value.TryGetDouble(out _)))
         {
             return;
         }
@@ -218,13 +247,20 @@ public partial class MainWindow : Window
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var maximumWidth = ToTitleBarPixels(ActualWidth, dpiScale);
         var maximumHeight = Math.Min(ToTitleBarPixels(ActualHeight, dpiScale), _nativeTitleBar.Height);
-        var x = Math.Clamp(ToTitleBarPixels(values[0].GetDouble(), dpiScale), 0, maximumWidth);
-        var y = Math.Clamp(ToTitleBarPixels(values[1].GetDouble(), dpiScale), 0, maximumHeight);
-        var width = Math.Clamp(ToTitleBarPixels(values[2].GetDouble(), dpiScale), 0, maximumWidth - x);
-        var height = Math.Clamp(ToTitleBarPixels(values[3].GetDouble(), dpiScale), 0, maximumHeight - y);
-        _nativeTitleBar.SetDragRectangles(width > 0 && height > 0
-            ? [new RectInt32(x, y, width, height)]
-            : Array.Empty<RectInt32>());
+        var rectangles = new List<RectInt32>(values.Length / 4);
+        for (var index = 0; index < values.Length; index += 4)
+        {
+            var x = Math.Clamp(ToTitleBarPixels(values[index].GetDouble(), dpiScale), 0, maximumWidth);
+            var y = Math.Clamp(ToTitleBarPixels(values[index + 1].GetDouble(), dpiScale), 0, maximumHeight);
+            var width = Math.Clamp(ToTitleBarPixels(values[index + 2].GetDouble(), dpiScale), 0, maximumWidth - x);
+            var height = Math.Clamp(ToTitleBarPixels(values[index + 3].GetDouble(), dpiScale), 0, maximumHeight - y);
+            if (width > 0 && height > 0)
+            {
+                rectangles.Add(new RectInt32(x, y, width, height));
+            }
+        }
+
+        ApplyNativeTitleBarDragRectangles(rectangles.ToArray());
     }
 
     private static int ToTitleBarDip(int pixels, double dpiScale)

@@ -199,7 +199,7 @@ img{
 
 body.sidebar-collapsed{--sidebar-width:72px;}
 body.sidebar-collapsed .app-sidebar{padding-inline:8px;}
-body.sidebar-collapsed .sidebar-header{justify-content:center;gap:3px;}
+body.sidebar-collapsed .sidebar-header{justify-content:center;gap:3px;padding-left:0;}
 body.sidebar-collapsed .sidebar-brand{flex:0 0 auto;padding-left:0;}
 body.sidebar-collapsed .brand-name,
 body.sidebar-collapsed .app-sidebar [data-sidebar-label],
