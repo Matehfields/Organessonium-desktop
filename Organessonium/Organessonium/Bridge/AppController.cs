@@ -2090,7 +2090,8 @@ public sealed class AppController : IAsyncDisposable
         var nextIndex = -1;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
-        using var uploadGate = new SemaphoreSlim(Math.Clamp(settings.UploadThreads, 1, 16));
+        using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
+        using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
         await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes);
@@ -2124,7 +2125,8 @@ public sealed class AppController : IAsyncDisposable
                         settings,
                         new UiThrottle(),
                         cancellationToken,
-                        uploadGate: uploadGate,
+                        adaptiveUploadGate: uploadGate,
+                        memoryCoordinator: memoryCoordinator,
                         useBatchUi: true,
                         onBytesUploaded: async bytes =>
                         {
@@ -2231,7 +2233,8 @@ public sealed class AppController : IAsyncDisposable
         UiThrottle throttle,
         CancellationToken cancellationToken,
         TransferState? existingTransferState = null,
-        SemaphoreSlim? uploadGate = null,
+        AdaptiveUploadGate? adaptiveUploadGate = null,
+        UploadMemoryCoordinator? memoryCoordinator = null,
         bool useBatchUi = false,
         Func<long, Task>? onBytesUploaded = null,
         bool deferSerialSynchronization = false)
@@ -2323,7 +2326,25 @@ public sealed class AppController : IAsyncDisposable
                 useBatchUi,
                 progressTracker: progressTracker);
             targetPath = PathRules.Normalize(string.IsNullOrWhiteSpace(transferState.TargetPath) ? targetPath : transferState.TargetPath);
-            if (transferState.Encryption != null)
+            UploadMemoryPlan? memoryPlan = null;
+            if (transferState.Encryption != null && memoryCoordinator != null)
+            {
+                memoryPlan = memoryCoordinator.SelectPlan(sourceLength);
+            }
+
+            var useMemoryPipeline = memoryPlan?.UseMemory == true;
+            if (useMemoryPipeline)
+            {
+                adaptiveUploadGate?.LimitForMemory(memoryPlan!.MemorySafeWorkers);
+                if (IsUploadPartDirectoryForSource(file, transferState.TempPath))
+                {
+                    CleanDir(new DirectoryInfo(transferState.TempPath));
+                    transferState.TempPath = "";
+                    await _transferManager.SaveAsync(transferState, cancellationToken);
+                }
+            }
+
+            if (transferState.Encryption != null && !useMemoryPipeline)
             {
                 generatedPartDirectory = CreateUploadPartDirectory(file, transferState.FileId);
                 transferState.TempPath = generatedPartDirectory.FullName;
@@ -2403,18 +2424,48 @@ public sealed class AppController : IAsyncDisposable
                     EncryptedPayloadRoles.Original,
                     0,
                     totalChunks);
-                upload = await uploader.UploadResumableGeneratedAsync(
-                    name,
-                    totalChunks,
-                    index => PrepareEncryptedUploadPartAsync(
+
+                async Task<PreparedUploadPart> PrepareOriginalPartAsync(int index)
+                {
+                    if (useMemoryPipeline && memoryCoordinator != null)
+                    {
+                        var inMemory = await PrepareEncryptedUploadPartInMemoryAsync(
+                            file,
+                            sourceLength,
+                            memoryCoordinator,
+                            encryptionContext,
+                            EncryptedPayloadRoles.Original,
+                            index,
+                            totalChunks,
+                            cancellationToken);
+                        if (inMemory != null)
+                        {
+                            return inMemory;
+                        }
+                    }
+
+                    generatedPartDirectory ??= CreateUploadPartDirectory(file, transferState.FileId);
+                    if (!string.Equals(transferState.TempPath, generatedPartDirectory.FullName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        transferState.TempPath = generatedPartDirectory.FullName;
+                        await _transferManager.SaveAsync(transferState, cancellationToken);
+                    }
+
+                    return await PrepareEncryptedUploadPartAsync(
                         file,
                         sourceLength,
-                        generatedPartDirectory!,
+                        generatedPartDirectory,
                         encryptionContext,
                         EncryptedPayloadRoles.Original,
                         index,
                         totalChunks,
-                        cancellationToken),
+                        cancellationToken);
+                }
+
+                upload = await uploader.UploadResumableGeneratedAsync(
+                    name,
+                    totalChunks,
+                    PrepareOriginalPartAsync,
                     transferState.ThreadId,
                     transferState.BatchId,
                     uploadedMap,
@@ -2422,10 +2473,10 @@ public sealed class AppController : IAsyncDisposable
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportRateLimitWaitAsync,
-                    settings.UploadThreads,
-                    uploadGate,
-                    encryptionContext,
-                    TryDeleteFile);
+                    maxParallelParts: settings.UploadThreads,
+                    encryptedPayload: encryptionContext,
+                    cleanupPart: TryDeleteFile,
+                    adaptiveUploadGate: adaptiveUploadGate);
             }
             else
             {
@@ -2439,8 +2490,8 @@ public sealed class AppController : IAsyncDisposable
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportRateLimitWaitAsync,
-                    settings.UploadThreads,
-                    uploadGate);
+                    maxParallelParts: settings.UploadThreads,
+                    adaptiveUploadGate: adaptiveUploadGate);
             }
             threadId = upload.ThreadId;
 
@@ -4406,6 +4457,8 @@ public sealed class AppController : IAsyncDisposable
         var throttle = new UiThrottle();
         var resumed = 0;
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
+        using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
 
         for (var i = 0; i < states.Count; i++)
         {
@@ -4439,6 +4492,8 @@ public sealed class AppController : IAsyncDisposable
                         throttle,
                         cancellationToken,
                         state,
+                        adaptiveUploadGate: uploadGate,
+                        memoryCoordinator: memoryCoordinator,
                         deferSerialSynchronization: true);
                     ReplaceLocalEntry(all, uploaded);
                     TrackFolderSerial(serialFolderIds, uploaded.ParentFolderId);
@@ -6513,6 +6568,29 @@ private static string ClassifyConnectError(Exception ex)
         return directory;
     }
 
+    private static bool IsUploadPartDirectoryForSource(FileInfo source, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || source.Directory == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var directory = new DirectoryInfo(path);
+            return directory.Name.StartsWith(".organessonium-upload-", StringComparison.OrdinalIgnoreCase) &&
+                   directory.Parent != null &&
+                   string.Equals(
+                       directory.Parent.FullName.TrimEnd('\\', '/'),
+                       source.Directory.FullName.TrimEnd('\\', '/'),
+                       StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private async Task<PreparedUploadPart> PrepareEncryptedUploadPartAsync(
         FileInfo source,
         long expectedLength,
@@ -6553,6 +6631,64 @@ private static string ClassifyConnectError(Exception ex)
             context.WithChunkIndex(index).WithChunkCount(totalParts),
             cancellationToken);
         return new PreparedUploadPart(target, length);
+    }
+
+    private async Task<PreparedUploadPart?> PrepareEncryptedUploadPartInMemoryAsync(
+        FileInfo source,
+        long expectedLength,
+        UploadMemoryCoordinator memoryCoordinator,
+        EncryptedPayloadContext context,
+        string role,
+        int index,
+        int totalParts,
+        CancellationToken cancellationToken)
+    {
+        if (index < 0 || index >= totalParts)
+        {
+            throw new ArgumentOutOfRangeException(nameof(index));
+        }
+
+        source.Refresh();
+        if (source.Length != expectedLength)
+        {
+            throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
+        }
+
+        var offset = checked((long)index * EncryptionService.MaximumPlaintextPayloadBytes);
+        var remaining = Math.Max(0, expectedLength - offset);
+        var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, remaining);
+        if (index > 0 && remaining <= 0)
+        {
+            throw new EndOfStreamException("O chunk solicitado não existe mais no arquivo de origem.");
+        }
+
+        if (!memoryCoordinator.TryRentBuffers(length, out var lease) || lease == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var encryptedLength = await _encryption.EncryptFileRangeIntoAsync(
+                source,
+                offset,
+                length,
+                lease.Plaintext[..length],
+                lease.Ciphertext[..checked(length + EncryptionService.EnvelopeOverheadBytes)],
+                context.WithChunkIndex(index).WithChunkCount(totalParts),
+                cancellationToken);
+            lease.ReleasePlaintext();
+            return new PreparedUploadPart(
+                EncryptedPayloadProtocol.FileName(role, index, totalParts),
+                encryptedLength,
+                length,
+                lease);
+        }
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
     }
 
     private static void TryDeleteFile(FileInfo file)

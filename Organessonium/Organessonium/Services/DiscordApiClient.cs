@@ -359,7 +359,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return result.ThreadId;
     }
 
-    public async Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
+    public Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
         string forumId,
         string title,
         string content,
@@ -367,6 +367,49 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool serializeRoute = true)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        return CreateForumPostWithFileDetailedAsync(
+            forumId,
+            title,
+            content,
+            file.Name,
+            file.OpenRead,
+            cancellationToken,
+            onRateLimitWait,
+            serializeRoute);
+    }
+
+    internal Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
+        string forumId,
+        string title,
+        string content,
+        PreparedUploadPart file,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        return CreateForumPostWithFileDetailedAsync(
+            forumId,
+            title,
+            content,
+            file.FileName,
+            file.OpenRead,
+            cancellationToken,
+            onRateLimitWait,
+            serializeRoute);
+    }
+
+    private async Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
+        string forumId,
+        string title,
+        string content,
+        string fileName,
+        Func<Stream> openRead,
+        CancellationToken cancellationToken,
+        Func<TimeSpan, Task>? onRateLimitWait,
+        bool serializeRoute)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -376,7 +419,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     forumId,
                     title,
                     content,
-                    file,
+                    fileName,
+                    openRead,
                     cancellationToken,
                     onRateLimitWait,
                     serializeRoute);
@@ -464,7 +508,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string forumId,
         string title,
         string content,
-        FileInfo file,
+        string fileName,
+        Func<Stream> openRead,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
         bool serializeRoute)
@@ -472,7 +517,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
-            request.Content = BuildForumThreadContent(title, content, file);
+            request.Content = BuildForumThreadContent(title, content, fileName, openRead);
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute);
         var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
@@ -481,7 +526,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         {
             var messages = await GetMessagesAsync(channel.Id, 5, cancellationToken);
             messageId = messages
-                .Where(message => message.Attachments.Any(a => a.FileName.Equals(file.Name, StringComparison.OrdinalIgnoreCase)))
+                .Where(message => message.Attachments.Any(a => a.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
                 .OrderBy(message => Snowflake(message.Id))
                 .Select(message => message.Id)
                 .FirstOrDefault() ?? "";
@@ -560,7 +605,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return archived;
     }
 
-    public async Task<DiscordMessageDto> SendFileMessageAsync(
+    public Task<DiscordMessageDto> SendFileMessageAsync(
         string channelId,
         string content,
         FileInfo file,
@@ -568,10 +613,49 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool serializeRoute = true)
     {
+        ArgumentNullException.ThrowIfNull(file);
+        return SendFileMessageAsync(
+            channelId,
+            content,
+            file.Name,
+            file.OpenRead,
+            cancellationToken,
+            onRateLimitWait,
+            serializeRoute);
+    }
+
+    internal Task<DiscordMessageDto> SendFileMessageAsync(
+        string channelId,
+        string content,
+        PreparedUploadPart file,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        return SendFileMessageAsync(
+            channelId,
+            content,
+            file.FileName,
+            file.OpenRead,
+            cancellationToken,
+            onRateLimitWait,
+            serializeRoute);
+    }
+
+    private async Task<DiscordMessageDto> SendFileMessageAsync(
+        string channelId,
+        string content,
+        string fileName,
+        Func<Stream> openRead,
+        CancellationToken cancellationToken,
+        Func<TimeSpan, Task>? onRateLimitWait,
+        bool serializeRoute)
+    {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
-            request.Content = BuildMessageFileContent(content, file);
+            request.Content = BuildMessageFileContent(content, fileName, openRead);
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
@@ -657,7 +741,11 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         }
     }
 
-    private static MultipartFormDataContent BuildForumThreadContent(string title, string content, FileInfo file)
+    private static MultipartFormDataContent BuildForumThreadContent(
+        string title,
+        string content,
+        string fileName,
+        Func<Stream> openRead)
     {
         var payload = JsonSerializer.Serialize(new
         {
@@ -665,33 +753,36 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             message = new
             {
                 content,
-                attachments = new[] { new { id = "0", filename = file.Name } }
+                attachments = new[] { new { id = "0", filename = fileName } }
             }
         }, JsonOptions.Web);
 
         var multipart = new MultipartFormDataContent();
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        multipart.Add(BuildFileContent(file), "files[0]", file.Name);
+        multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
         return multipart;
     }
 
-    private static MultipartFormDataContent BuildMessageFileContent(string content, FileInfo file)
+    private static MultipartFormDataContent BuildMessageFileContent(
+        string content,
+        string fileName,
+        Func<Stream> openRead)
     {
         var payload = JsonSerializer.Serialize(new
         {
             content,
-            attachments = new[] { new { id = "0", filename = file.Name } }
+            attachments = new[] { new { id = "0", filename = fileName } }
         }, JsonOptions.Web);
 
         var multipart = new MultipartFormDataContent();
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        multipart.Add(BuildFileContent(file), "files[0]", file.Name);
+        multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
         return multipart;
     }
 
-    private static StreamContent BuildFileContent(FileInfo file)
+    private static StreamContent BuildFileContent(Func<Stream> openRead)
     {
-        var content = new StreamContent(file.OpenRead());
+        var content = new StreamContent(openRead());
         content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         return content;
     }

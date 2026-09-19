@@ -140,6 +140,52 @@ public sealed class EncryptionService
         }
 
         var plaintext = GC.AllocateUninitializedArray<byte>(length);
+        var encrypted = GC.AllocateUninitializedArray<byte>(checked(length + EnvelopeOverheadBytes));
+        try
+        {
+            await EncryptFileRangeIntoAsync(
+                source,
+                offset,
+                length,
+                plaintext,
+                encrypted,
+                context,
+                cancellationToken);
+            destination.Directory?.Create();
+            await File.WriteAllBytesAsync(destination.FullName, encrypted, cancellationToken);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(encrypted);
+        }
+    }
+
+    internal async Task<int> EncryptFileRangeIntoAsync(
+        FileInfo source,
+        long offset,
+        int length,
+        Memory<byte> plaintextBuffer,
+        Memory<byte> encryptedBuffer,
+        EncryptedPayloadContext context,
+        CancellationToken cancellationToken = default)
+    {
+        if (offset < 0 || length < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+
+        if (plaintextBuffer.Length < length)
+        {
+            throw new ArgumentException("O buffer de plaintext é menor que o chunk solicitado.", nameof(plaintextBuffer));
+        }
+
+        var encryptedLength = checked(length + EnvelopeOverheadBytes);
+        if (encryptedBuffer.Length < encryptedLength)
+        {
+            throw new ArgumentException("O buffer de ciphertext é menor que o envelope solicitado.", nameof(encryptedBuffer));
+        }
+
         try
         {
             await using var input = new FileStream(
@@ -151,9 +197,9 @@ public sealed class EncryptionService
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             input.Position = offset;
             var readTotal = 0;
-            while (readTotal < plaintext.Length)
+            while (readTotal < length)
             {
-                var read = await input.ReadAsync(plaintext.AsMemory(readTotal), cancellationToken);
+                var read = await input.ReadAsync(plaintextBuffer.Slice(readTotal, length - readTotal), cancellationToken);
                 if (read == 0)
                 {
                     throw new EndOfStreamException("O arquivo mudou enquanto o chunk era preparado.");
@@ -162,20 +208,11 @@ public sealed class EncryptionService
                 readTotal += read;
             }
 
-            var encrypted = EncryptBytes(plaintext, context);
-            try
-            {
-                destination.Directory?.Create();
-                await File.WriteAllBytesAsync(destination.FullName, encrypted, cancellationToken);
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(encrypted);
-            }
+            return EncryptBytesInto(plaintextBuffer.Span[..length], encryptedBuffer.Span, context);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(plaintextBuffer.Span[..length]);
         }
     }
 
@@ -207,6 +244,27 @@ public sealed class EncryptionService
 
     public byte[] EncryptBytes(ReadOnlySpan<byte> plaintext, EncryptedPayloadContext context)
     {
+        var output = GC.AllocateUninitializedArray<byte>(checked(EnvelopeHeaderBytes + plaintext.Length + AuthenticationTagBytes));
+        try
+        {
+            EncryptBytesInto(plaintext, output, context);
+            return output;
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(output);
+            throw;
+        }
+    }
+
+    internal int EncryptBytesInto(ReadOnlySpan<byte> plaintext, Span<byte> destination, EncryptedPayloadContext context)
+    {
+        var outputLength = checked(EnvelopeHeaderBytes + plaintext.Length + AuthenticationTagBytes);
+        if (destination.Length < outputLength)
+        {
+            throw new ArgumentException("O buffer de destino não comporta o envelope criptografado.", nameof(destination));
+        }
+
         var roleCode = RoleCode(context.Role);
         ValidateChunkPosition(context.ChunkIndex, context.ChunkCount);
         var salt = DecodeFileSalt(context.Encryption);
@@ -216,8 +274,6 @@ public sealed class EncryptionService
             try
             {
                 var nonce = RandomNumberGenerator.GetBytes(NonceBytes);
-                var ciphertext = new byte[plaintext.Length];
-                var tag = new byte[AuthenticationTagBytes];
                 var header = new byte[EnvelopeHeaderBytes];
                 try
                 {
@@ -231,18 +287,18 @@ public sealed class EncryptionService
                     nonce.CopyTo(header.AsSpan(42, NonceBytes));
 
                     using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
-                    aes.Encrypt(nonce, plaintext, ciphertext, tag, header);
-                    var output = new byte[EnvelopeHeaderBytes + ciphertext.Length + tag.Length];
-                    header.CopyTo(output, 0);
-                    ciphertext.CopyTo(output, EnvelopeHeaderBytes);
-                    tag.CopyTo(output, EnvelopeHeaderBytes + ciphertext.Length);
-                    return output;
+                    header.CopyTo(destination);
+                    aes.Encrypt(
+                        nonce,
+                        plaintext,
+                        destination.Slice(EnvelopeHeaderBytes, plaintext.Length),
+                        destination.Slice(EnvelopeHeaderBytes + plaintext.Length, AuthenticationTagBytes),
+                        header);
+                    return outputLength;
                 }
                 finally
                 {
                     CryptographicOperations.ZeroMemory(nonce);
-                    CryptographicOperations.ZeroMemory(ciphertext);
-                    CryptographicOperations.ZeroMemory(tag);
                     CryptographicOperations.ZeroMemory(header);
                 }
             }

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Diagnostics;
 using Organessonium.Models;
 
 namespace Organessonium.Services;
@@ -45,7 +46,8 @@ public sealed class ForumUploader
         Func<TimeSpan, Task>? onRateLimitWait = null,
         int maxParallelParts = 1,
         SemaphoreSlim? uploadGate = null,
-        EncryptedPayloadContext? encryptedPayload = null)
+        EncryptedPayloadContext? encryptedPayload = null,
+        AdaptiveUploadGate? adaptiveUploadGate = null)
     {
         if (parts.Count == 0)
         {
@@ -66,8 +68,17 @@ public sealed class ForumUploader
         var completed = chunkMessages.Count(id => !string.IsNullOrWhiteSpace(id));
         uploadedParts?.Invoke(completed);
 
-        async Task<T> InUploadSlotAsync<T>(Func<Task<T>> action)
+        async Task<T> InUploadSlotAsync<T>(Func<Task<T>> action, Action<TimeSpan>? onCompleted = null)
         {
+            if (adaptiveUploadGate != null)
+            {
+                using var lease = await adaptiveUploadGate.EnterAsync(cancellationToken);
+                var started = Stopwatch.GetTimestamp();
+                var result = await action();
+                onCompleted?.Invoke(Stopwatch.GetElapsedTime(started));
+                return result;
+            }
+
             if (uploadGate == null)
             {
                 return await action();
@@ -97,7 +108,8 @@ public sealed class ForumUploader
                 first,
                 cancellationToken,
                 onRateLimitWait,
-                serializeRoute: false));
+                serializeRoute: false),
+                elapsed => adaptiveUploadGate?.ReportCompleted(first.Length, elapsed));
             threadId = post.ThreadId;
             chunkMessages[0] = post.MessageId;
             if (onChunkUploaded != null)
@@ -123,33 +135,38 @@ public sealed class ForumUploader
         if (pending.Length > 0)
         {
             var parallelism = Math.Min(Math.Clamp(maxParallelParts, 1, 16), pending.Length);
-            using var localGate = new SemaphoreSlim(parallelism, parallelism);
-            var uploads = pending.Select(async index =>
+            var nextPendingIndex = -1;
+            var uploads = Enumerable.Range(0, parallelism).Select(async _ =>
             {
-                await localGate.WaitAsync(cancellationToken);
-                try
+                while (true)
                 {
-                    var message = await InUploadSlotAsync(() => _discord.SendFileMessageAsync(
-                        threadId,
-                        encryptedPayload == null
-                            ? PartContent(batchId, index + 1, parts.Count)
-                            : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), parts.Count),
-                        parts[index],
-                        cancellationToken,
-                        onRateLimitWait,
-                        serializeRoute: false));
+                    var pendingIndex = Interlocked.Increment(ref nextPendingIndex);
+                    if (pendingIndex >= pending.Length)
+                    {
+                        return;
+                    }
+
+                    var index = pending[pendingIndex];
+                    var part = parts[index];
+                    var message = await InUploadSlotAsync(
+                        () => _discord.SendFileMessageAsync(
+                            threadId,
+                            encryptedPayload == null
+                                ? PartContent(batchId, index + 1, parts.Count)
+                                : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), parts.Count),
+                            part,
+                            cancellationToken,
+                            onRateLimitWait,
+                            serializeRoute: false),
+                        elapsed => adaptiveUploadGate?.ReportCompleted(part.Length, elapsed));
                     chunkMessages[index] = message.Id;
                     if (onChunkUploaded != null)
                     {
-                        await onChunkUploaded(new ForumUploadedChunk(threadId, batchId, index, message.Id, parts[index].Length));
+                        await onChunkUploaded(new ForumUploadedChunk(threadId, batchId, index, message.Id, part.Length));
                     }
 
                     var current = Interlocked.Increment(ref completed);
                     uploadedParts?.Invoke(current);
-                }
-                finally
-                {
-                    localGate.Release();
                 }
             });
             await Task.WhenAll(uploads);
@@ -172,7 +189,8 @@ public sealed class ForumUploader
         int maxParallelParts = 1,
         SemaphoreSlim? uploadGate = null,
         EncryptedPayloadContext? encryptedPayload = null,
-        Action<FileInfo>? cleanupPart = null)
+        Action<FileInfo>? cleanupPart = null,
+        AdaptiveUploadGate? adaptiveUploadGate = null)
     {
         if (totalParts <= 0)
         {
@@ -195,8 +213,17 @@ public sealed class ForumUploader
         var completed = chunkMessages.Count(id => !string.IsNullOrWhiteSpace(id));
         uploadedParts?.Invoke(completed);
 
-        async Task<T> InUploadSlotAsync<T>(Func<Task<T>> action)
+        async Task<T> InUploadSlotAsync<T>(Func<Task<T>> action, Action<TimeSpan>? onCompleted = null)
         {
+            if (adaptiveUploadGate != null)
+            {
+                using var lease = await adaptiveUploadGate.EnterAsync(cancellationToken);
+                var started = Stopwatch.GetTimestamp();
+                var result = await action();
+                onCompleted?.Invoke(Stopwatch.GetElapsedTime(started));
+                return result;
+            }
+
             if (uploadGate == null)
             {
                 return await action();
@@ -215,18 +242,25 @@ public sealed class ForumUploader
 
         void CleanupPart(PreparedUploadPart? prepared)
         {
-            if (prepared == null || cleanupPart == null)
+            if (prepared == null)
             {
                 return;
             }
 
             try
             {
-                cleanupPart(prepared.File);
+                if (prepared.File != null && cleanupPart != null)
+                {
+                    cleanupPart(prepared.File);
+                }
             }
             catch (Exception ex)
             {
-                AppLogger.Error("Discord.CleanupGeneratedPart", ex, prepared.File.FullName);
+                AppLogger.Error("Discord.CleanupGeneratedPart", ex, prepared.FileName);
+            }
+            finally
+            {
+                prepared.Dispose();
             }
         }
 
@@ -245,11 +279,11 @@ public sealed class ForumUploader
                         encryptedPayload == null
                             ? PartContent(batchId, 1, totalParts)
                             : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), totalParts),
-                        first!.File,
+                        first!,
                         cancellationToken,
                         onRateLimitWait,
                         serializeRoute: false);
-                });
+                }, elapsed => adaptiveUploadGate?.ReportCompleted(first!.Length, elapsed));
                 threadId = post.ThreadId;
                 chunkMessages[0] = post.MessageId;
                 if (onChunkUploaded != null)
@@ -259,7 +293,7 @@ public sealed class ForumUploader
                         batchId,
                         0,
                         post.MessageId,
-                        first!.File.Length,
+                        first!.Length,
                         first.LogicalSizeBytes));
                 }
 
@@ -285,45 +319,53 @@ public sealed class ForumUploader
         if (pending.Length > 0)
         {
             var parallelism = Math.Min(Math.Clamp(maxParallelParts, 1, 16), pending.Length);
-            using var localGate = new SemaphoreSlim(parallelism, parallelism);
-            var uploads = pending.Select(async index =>
+            var nextPendingIndex = -1;
+            var uploads = Enumerable.Range(0, parallelism).Select(async _ =>
             {
-                await localGate.WaitAsync(cancellationToken);
-                PreparedUploadPart? prepared = null;
-                try
+                while (true)
                 {
-                    var message = await InUploadSlotAsync(async () =>
+                    var pendingIndex = Interlocked.Increment(ref nextPendingIndex);
+                    if (pendingIndex >= pending.Length)
                     {
-                        prepared = await preparePart(index);
-                        return await _discord.SendFileMessageAsync(
-                            threadId,
-                            encryptedPayload == null
-                                ? PartContent(batchId, index + 1, totalParts)
-                                : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), totalParts),
-                            prepared!.File,
-                            cancellationToken,
-                            onRateLimitWait,
-                            serializeRoute: false);
-                    });
-                    chunkMessages[index] = message.Id;
-                    if (onChunkUploaded != null)
-                    {
-                        await onChunkUploaded(new ForumUploadedChunk(
-                            threadId,
-                            batchId,
-                            index,
-                            message.Id,
-                            prepared!.File.Length,
-                            prepared.LogicalSizeBytes));
+                        return;
                     }
 
-                    var current = Interlocked.Increment(ref completed);
-                    uploadedParts?.Invoke(current);
-                }
-                finally
-                {
-                    CleanupPart(prepared);
-                    localGate.Release();
+                    var index = pending[pendingIndex];
+                    PreparedUploadPart? prepared = null;
+                    try
+                    {
+                        var message = await InUploadSlotAsync(async () =>
+                        {
+                            prepared = await preparePart(index);
+                            return await _discord.SendFileMessageAsync(
+                                threadId,
+                                encryptedPayload == null
+                                    ? PartContent(batchId, index + 1, totalParts)
+                                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), totalParts),
+                                prepared!,
+                                cancellationToken,
+                                onRateLimitWait,
+                                serializeRoute: false);
+                        }, elapsed => adaptiveUploadGate?.ReportCompleted(prepared!.Length, elapsed));
+                        chunkMessages[index] = message.Id;
+                        if (onChunkUploaded != null)
+                        {
+                            await onChunkUploaded(new ForumUploadedChunk(
+                                threadId,
+                                batchId,
+                                index,
+                                message.Id,
+                                prepared!.Length,
+                                prepared.LogicalSizeBytes));
+                        }
+
+                        var current = Interlocked.Increment(ref completed);
+                        uploadedParts?.Invoke(current);
+                    }
+                    finally
+                    {
+                        CleanupPart(prepared);
+                    }
                 }
             });
             await Task.WhenAll(uploads);
@@ -476,4 +518,63 @@ public sealed record ForumUploadedChunk(
     long SizeBytes,
     long LogicalSizeBytes = -1);
 
-public sealed record PreparedUploadPart(FileInfo File, long LogicalSizeBytes);
+public sealed class PreparedUploadPart : IDisposable
+{
+    private UploadChunkBufferLease? _memoryLease;
+    private readonly int _memoryLength;
+
+    public PreparedUploadPart(FileInfo file, long logicalSizeBytes)
+    {
+        File = file ?? throw new ArgumentNullException(nameof(file));
+        FileName = file.Name;
+        Length = file.Length;
+        LogicalSizeBytes = logicalSizeBytes;
+    }
+
+    internal PreparedUploadPart(
+        string fileName,
+        int length,
+        long logicalSizeBytes,
+        UploadChunkBufferLease memoryLease)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            throw new ArgumentException("O nome do attachment é obrigatório.", nameof(fileName));
+        }
+
+        if (length < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(length));
+        }
+
+        FileName = fileName;
+        Length = length;
+        LogicalSizeBytes = logicalSizeBytes;
+        _memoryLease = memoryLease ?? throw new ArgumentNullException(nameof(memoryLease));
+        _memoryLength = length;
+    }
+
+    public FileInfo? File { get; }
+
+    public string FileName { get; }
+
+    public long Length { get; }
+
+    public long LogicalSizeBytes { get; }
+
+    internal Stream OpenRead()
+    {
+        if (File != null)
+        {
+            return File.OpenRead();
+        }
+
+        var lease = _memoryLease ?? throw new ObjectDisposedException(nameof(PreparedUploadPart));
+        return lease.OpenCiphertextStream(_memoryLength);
+    }
+
+    public void Dispose()
+    {
+        Interlocked.Exchange(ref _memoryLease, null)?.Dispose();
+    }
+}

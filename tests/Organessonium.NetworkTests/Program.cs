@@ -14,6 +14,7 @@ internal static class Program
     {
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
         ("encryptedFileRangeRoundTrip", EncryptedFileRangeRoundTripAsync),
+        ("encryptedFileRangeUsesCallerOwnedBuffers", EncryptedFileRangeUsesCallerOwnedBuffersAsync),
         ("encryptedPayloadMessageProtocol", EncryptedPayloadMessageProtocolAsync),
         ("encryptedPayloadTamperAndTruncation", EncryptedPayloadTamperAndTruncationAsync),
         ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
@@ -31,6 +32,10 @@ internal static class Program
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
+        ("memoryAttachmentRetryKeepsCiphertext", MemoryAttachmentRetryKeepsCiphertextAsync),
+        ("uploadMemoryPlannerKeepsLargeFilesBounded", UploadMemoryPlannerKeepsLargeFilesBoundedAsync),
+        ("uploadMemoryPlannerFallsBackUnderPressure", UploadMemoryPlannerFallsBackUnderPressureAsync),
+        ("adaptiveUploadGateReducesSlowWorkers", AdaptiveUploadGateReducesSlowWorkersAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -263,6 +268,118 @@ internal static class Program
         {
             try { sourceDir.Delete(true); } catch { }
         }
+    }
+
+    private static async Task<TestOutcome> EncryptedFileRangeUsesCallerOwnedBuffersAsync()
+    {
+        var sourceDir = Directory.CreateTempSubdirectory("organessonium_memory_range_test_");
+        try
+        {
+            var inputBytes = RandomNumberGenerator.GetBytes(196_608);
+            var source = new FileInfo(Path.Combine(sourceDir.FullName, "source.bin"));
+            await File.WriteAllBytesAsync(source.FullName, inputBytes);
+            const int offset = 4_096;
+            const int length = 131_072;
+            var plaintext = GC.AllocateUninitializedArray<byte>(length);
+            var ciphertext = GC.AllocateUninitializedArray<byte>(length + EncryptionService.EnvelopeOverheadBytes);
+            var service = CreateEncryptionService(out _);
+            var encryption = service.CreateFileEncryption(EncryptionModes.Standard);
+            var context = new EncryptedPayloadContext(
+                "memory-range",
+                encryption,
+                EncryptedPayloadRoles.Original,
+                1,
+                3);
+            try
+            {
+                var written = await service.EncryptFileRangeIntoAsync(
+                    source,
+                    offset,
+                    length,
+                    plaintext,
+                    ciphertext,
+                    context);
+                var restored = service.DecryptBytes(ciphertext.AsSpan(0, written), context);
+                try
+                {
+                    var matches = CryptographicOperations.FixedTimeEquals(
+                        inputBytes.AsSpan(offset, length),
+                        restored);
+                    var plaintextCleared = plaintext.All(value => value == 0);
+                    return matches && plaintextCleared && written == length + EncryptionService.EnvelopeOverheadBytes
+                        ? TestOutcome.Pass()
+                        : TestOutcome.Fail("o chunk em buffer não manteve o envelope, o conteúdo ou a limpeza do plaintext");
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(restored);
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(inputBytes);
+                CryptographicOperations.ZeroMemory(plaintext);
+                CryptographicOperations.ZeroMemory(ciphertext);
+            }
+        }
+        finally
+        {
+            try { sourceDir.Delete(true); } catch { }
+        }
+    }
+
+    private static Task<TestOutcome> UploadMemoryPlannerKeepsLargeFilesBoundedAsync()
+    {
+        const long mib = 1024L * 1024;
+        const long gib = 1024L * mib;
+        var snapshot = new UploadMemorySnapshot(
+            TotalPhysicalBytes: 32 * gib,
+            AvailablePhysicalBytes: 18 * gib,
+            ProcessWorkingSetBytes: 238 * mib);
+        var medium = UploadMemoryPlanner.CreatePlan(500 * mib, 16, UploadBufferStrategy.Auto, snapshot);
+        var veryLarge = UploadMemoryPlanner.CreatePlan(50 * gib, 16, UploadBufferStrategy.Auto, snapshot);
+        var valid = medium.UseMemory &&
+                    veryLarge.UseMemory &&
+                    medium.MemorySafeWorkers == 16 &&
+                    veryLarge.MemorySafeWorkers == medium.MemorySafeWorkers &&
+                    medium.EstimatedBufferBudgetBytes <= UploadMemoryPlanner.ProcessTargetBytes - snapshot.ProcessWorkingSetBytes;
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o plano de RAM não manteve limite constante para arquivos grandes"));
+    }
+
+    private static Task<TestOutcome> UploadMemoryPlannerFallsBackUnderPressureAsync()
+    {
+        const long mib = 1024L * 1024;
+        const long gib = 1024L * mib;
+        var lowMemory = new UploadMemorySnapshot(
+            TotalPhysicalBytes: 8 * gib,
+            AvailablePhysicalBytes: 1300 * mib,
+            ProcessWorkingSetBytes: 412 * mib);
+        var fallback = UploadMemoryPlanner.CreatePlan(500 * mib, 16, UploadBufferStrategy.Auto, lowMemory);
+        var small = UploadMemoryPlanner.CreatePlan(20 * mib, 16, UploadBufferStrategy.Auto, new UploadMemorySnapshot(32 * gib, 20 * gib, 240 * mib));
+        var forcedDisk = UploadMemoryPlanner.CreatePlan(500 * mib, 16, UploadBufferStrategy.Disk, new UploadMemorySnapshot(32 * gib, 20 * gib, 240 * mib));
+        var valid = !fallback.UseMemory &&
+                    fallback.MemorySafeWorkers == 0 &&
+                    !small.UseMemory &&
+                    !forcedDisk.UseMemory;
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("o plano de RAM não voltou ao fallback em disco sob baixa memória"));
+    }
+
+    private static Task<TestOutcome> AdaptiveUploadGateReducesSlowWorkersAsync()
+    {
+        using var gate = new AdaptiveUploadGate(16);
+        for (var sample = 0; sample < 4; sample++)
+        {
+            gate.ReportCompleted(10 * 1024 * 1024, TimeSpan.FromSeconds(80));
+        }
+
+        var valid = gate.CurrentLimit is >= 2 and < 16;
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail($"o limite de upload não reduziu para internet lenta: {gate.CurrentLimit}"));
     }
 
     private static Task<TestOutcome> EncryptedPayloadMessageProtocolAsync()
@@ -697,6 +814,34 @@ internal static class Program
         }
     }
 
+    private static async Task<TestOutcome> MemoryAttachmentRetryKeepsCiphertextAsync()
+    {
+        var payload = RandomNumberGenerator.GetBytes(4096);
+        using var pool = new UploadChunkBufferPool();
+        var releaseCount = 0;
+        using var lease = pool.Rent(1, payload.Length, () => Interlocked.Increment(ref releaseCount));
+        payload.CopyTo(lease.Ciphertext.Span);
+        using var part = new PreparedUploadPart("payload.bin", payload.Length, payload.Length, lease);
+        using var handler = new RetryingMemoryAttachmentHandler();
+        using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+        try
+        {
+            var result = await discord.SendFileMessageAsync("thread", "payload", part, serializeRoute: false);
+            part.Dispose();
+            var valid = result.Id == "retry-message" &&
+                        handler.Uploads.Count == 2 &&
+                        handler.Uploads.All(upload => CryptographicOperations.FixedTimeEquals(upload, payload)) &&
+                        releaseCount == 1;
+            return valid
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail("o retry HTTP não reutilizou corretamente o ciphertext em memória");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(payload);
+        }
+    }
+
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)
     {
         store = new InMemoryEncryptionSecretStore();
@@ -930,6 +1075,42 @@ internal static class Program
                     _activeAttachments--;
                 }
             }
+        }
+    }
+
+    private sealed class RetryingMemoryAttachmentHandler : HttpMessageHandler
+    {
+        private readonly List<byte[]> _uploads = new();
+        private int _attempt;
+
+        public IReadOnlyList<byte[]> Uploads => _uploads;
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var multipart = request.Content as MultipartFormDataContent
+                ?? throw new InvalidOperationException("O attachment de teste não foi enviado como multipart.");
+            var file = multipart.FirstOrDefault(content =>
+                string.Equals(content.Headers.ContentDisposition?.Name?.Trim('"'), "files[0]", StringComparison.Ordinal));
+            if (file == null)
+            {
+                throw new InvalidOperationException("O attachment de teste não contém files[0].");
+            }
+
+            _uploads.Add(await file.ReadAsByteArrayAsync(cancellationToken));
+            if (Interlocked.Increment(ref _attempt) == 1)
+            {
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                {
+                    Content = new StringContent("retry", Encoding.UTF8, "text/plain")
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"id\":\"retry-message\",\"content\":\"\",\"attachments\":[]}", Encoding.UTF8, "application/json")
+            };
         }
     }
 

@@ -23,7 +23,13 @@ public static class AppLogger
         // Logs are reserved for unexpected errors.
     }
 
-    private static void Write(string level, string area, string? details, Exception? exception)
+    public static void Debug(string area, string details)
+    {
+        System.Diagnostics.Debug.WriteLine($"[Organessonium] {area}: {details}");
+        Write("DEBUG", area, details, null, "Debug");
+    }
+
+    private static void Write(string level, string area, string? details, Exception? exception, string? subdirectory = null)
     {
         try
         {
@@ -32,6 +38,10 @@ public static class AppLogger
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "OrganessoniumData",
                     "Logs"));
+            if (!string.IsNullOrWhiteSpace(subdirectory))
+            {
+                dir = Directory.CreateDirectory(Path.Combine(dir.FullName, subdirectory));
+            }
             var stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss-fff");
             var path = Path.Combine(dir.FullName, stamp + ".log");
             var builder = new StringBuilder();
