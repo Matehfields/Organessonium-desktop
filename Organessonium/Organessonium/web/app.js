@@ -43,7 +43,7 @@ let libraryFolderCount = null;
 let libraryTotalBytes = null;
 let sidebarCollapsed = false;
 let nativeTitleBarMetrics = { enabled:false, leftInset:0, rightInset:0, height:48 };
-let nativeTitleBarDragFrame = 0;
+let nativeTitleBarDragTimer = 0;
 let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
 let activeVideoResizeCleanup = null;
@@ -677,9 +677,10 @@ function titleBarMetric(value, fallback) {
 }
 
 function scheduleNativeTitleBarDragRegion() {
-    if (!nativeTitleBarMetrics.enabled || nativeTitleBarDragFrame) return;
-    nativeTitleBarDragFrame = requestAnimationFrame(() => {
-        nativeTitleBarDragFrame = 0;
+    if (!nativeTitleBarMetrics.enabled) return;
+    if (nativeTitleBarDragTimer) window.clearTimeout(nativeTitleBarDragTimer);
+    nativeTitleBarDragTimer = window.setTimeout(() => {
+        nativeTitleBarDragTimer = 0;
         const region = $('titlebar-drag-region');
         if (!region || !window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
         const rect = region.getBoundingClientRect();
@@ -705,7 +706,7 @@ function scheduleNativeTitleBarDragRegion() {
         }
 
         if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
-    });
+    }, 200);
 }
 
 window._onNativeTitleBarMetrics = metrics => {

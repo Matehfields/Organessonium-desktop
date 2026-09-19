@@ -220,10 +220,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Reset before changing the rectangles because Windows App SDK can leave
-        // the previous area non-interactive after a title-bar resize.
-        _nativeTitleBar.ResetToDefault();
-        ConfigureNativeTitleBar(_nativeTitleBar);
         _nativeTitleBar.SetDragRectangles(rectangles);
         _lastNativeDragRectangles = rectangles;
     }
