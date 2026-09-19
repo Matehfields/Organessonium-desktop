@@ -1,0 +1,87 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+*.tmp
+*.temp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+tmp/
+temp/
+logs/
+bugreport/
+.codex/
+.codex_tmp/
+.debug-device/
+.codex-device-debug.txt
+video-overview.jpg
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+android/build/
+bin/
+obj/
+*.apk
+*.aab
+*.apks
+*.exe
+*.msix
+
+# Reference-only desktop project copied into this workspace.
+/organessonium-windows-reference/
+
+# Separate Flutter checkout kept only as an implementation reference.
+/organessonium flutter/
+
+# Local secrets/configs must never contain Discord bot tokens in git.
+.env
+.env.*
+config.local.*
+*.jks
+*.keystore
+*.p12
+key.properties
+android/key.properties
+android/local.properties
+
+# Local application data, caches and downloaded development content.
+OrganessoniumData/
+organessonium_data/
+cache/
+downloads/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
