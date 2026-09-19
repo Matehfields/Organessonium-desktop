@@ -211,7 +211,7 @@ body.sidebar-collapsed .sidebar-nav-item{width:56px;}
 .topbar{
     position:relative;
     display:flex;align-items:center;gap:10px;
-    padding:0 146px 0 16px;height:48px;flex-shrink:0;
+    padding:0 12px;height:48px;flex-shrink:0;
     background:var(--topbar-bg);
     border-bottom:1px solid var(--border);
     overflow:visible;
@@ -2888,7 +2888,6 @@ html[data-motion="reduced"] *{
 }
 
 @media (max-width:1080px){
-    .topbar{padding-right:138px;}
     .path-crumbs{display:none;}
     .sidebar-server-summary{padding-inline:7px;}
 }

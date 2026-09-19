@@ -4,7 +4,6 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
-        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         mc:Ignorable="d"
         Title="Organessônium"
         Icon="Assets/app.ico"
@@ -13,22 +12,11 @@
         MinHeight="580"
         MinWidth="900"
         Background="#111111"
-        WindowStyle="None"
         WindowStartupLocation="CenterScreen"
         WindowState="Maximized">
 
-    <shell:WindowChrome.WindowChrome>
-        <shell:WindowChrome CaptionHeight="48"
-                            ResizeBorderThickness="6"
-                            CornerRadius="0"
-                            GlassFrameThickness="0"
-                            UseAeroCaptionButtons="True" />
-    </shell:WindowChrome.WindowChrome>
-
     <Grid x:Name="RootHost" AllowDrop="True" Background="#101010">
-        <wv2:WebView2 x:Name="WebView"
-                      Visibility="Hidden"
-                      shell:WindowChrome.IsHitTestVisibleInChrome="True"/>
+        <wv2:WebView2 x:Name="WebView" Visibility="Hidden"/>
         <Grid x:Name="StartupSplash" Background="#101010" Panel.ZIndex="10">
             <TextBlock x:Name="SplashOmega"
                        Text="&#x03A9;"
