@@ -42,6 +42,8 @@ let libraryFileCount = null;
 let libraryFolderCount = null;
 let libraryTotalBytes = null;
 let sidebarCollapsed = false;
+let nativeTitleBarMetrics = { enabled:false, leftInset:0, rightInset:0, height:48 };
+let nativeTitleBarDragFrame = 0;
 let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
 let activeVideoResizeCleanup = null;
@@ -666,7 +668,43 @@ function syncSidebarChrome() {
     button.title = label;
     button.setAttribute('aria-label', label);
     button.setAttribute('aria-expanded', sidebarCollapsed ? 'false' : 'true');
+    scheduleNativeTitleBarDragRegion();
 }
+
+function titleBarMetric(value, fallback) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.round(number) : fallback;
+}
+
+function scheduleNativeTitleBarDragRegion() {
+    if (!nativeTitleBarMetrics.enabled || nativeTitleBarDragFrame) return;
+    nativeTitleBarDragFrame = requestAnimationFrame(() => {
+        nativeTitleBarDragFrame = 0;
+        const region = $('titlebar-drag-region');
+        if (!region || !window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
+        const rect = region.getBoundingClientRect();
+        window.bridge.setTitleBarDragRegion(
+            Math.round(rect.left),
+            Math.round(rect.top),
+            Math.round(rect.width),
+            Math.round(rect.height));
+    });
+}
+
+window._onNativeTitleBarMetrics = metrics => {
+    const value = metrics || {};
+    nativeTitleBarMetrics = {
+        enabled: value.enabled === true,
+        leftInset: titleBarMetric(value.leftInset, 0),
+        rightInset: titleBarMetric(value.rightInset, 0),
+        height: titleBarMetric(value.height, 48) || 48
+    };
+    document.documentElement.dataset.integratedTitlebar = nativeTitleBarMetrics.enabled ? 'true' : 'false';
+    document.documentElement.style.setProperty('--native-titlebar-left-inset', nativeTitleBarMetrics.leftInset + 'px');
+    document.documentElement.style.setProperty('--native-titlebar-right-inset', nativeTitleBarMetrics.rightInset + 'px');
+    document.documentElement.style.setProperty('--native-titlebar-height', nativeTitleBarMetrics.height + 'px');
+    scheduleNativeTitleBarDragRegion();
+};
 
 function toggleSidebar() {
     sidebarCollapsed = !sidebarCollapsed;
@@ -2377,7 +2415,10 @@ document.addEventListener('DOMContentLoaded', () => {
     initIcons();
     restoreSidebarState();
     syncMotionPreference();
-    window.addEventListener('resize', layoutAllPdfTextLayers);
+    window.addEventListener('resize', () => {
+        layoutAllPdfTextLayers();
+        scheduleNativeTitleBarDragRegion();
+    });
     applyI18n();
 
     $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);

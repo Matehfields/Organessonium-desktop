@@ -78,6 +78,7 @@ dataPath: args[10],
         resolveUploadConflict: function () { send('resolveUploadConflict', arguments); },
         applyWindowTheme: function () { send('applyWindowTheme', arguments); },
         setHostFullscreen: function () { send('setHostFullscreen', arguments); },
+        setTitleBarDragRegion: function () { send('setTitleBarDragRegion', arguments); },
         testProxy: function () { send('testProxy', arguments); },
         saveSettings: function () {
             const args = Array.from(arguments);

@@ -29,6 +29,9 @@
     --card-preview-size:170px;
     --card-gap:6px;
     --sidebar-width:232px;
+    --native-titlebar-left-inset:0px;
+    --native-titlebar-right-inset:0px;
+    --native-titlebar-height:48px;
 }
 
 [data-theme="light"]{
@@ -112,10 +115,10 @@ img{
     overflow:hidden;
 }
 .sidebar-header{
-    height:48px;
+    height:var(--native-titlebar-height);
     display:flex;align-items:center;gap:5px;
     flex:0 0 auto;
-    min-width:0;
+    min-width:0;padding-left:var(--native-titlebar-left-inset);
 }
 .sidebar-brand{
     min-width:0;flex:1 1 auto;
@@ -211,7 +214,8 @@ body.sidebar-collapsed .sidebar-nav-item{width:56px;}
 .topbar{
     position:relative;
     display:flex;align-items:center;gap:10px;
-    padding:0 12px;height:48px;flex-shrink:0;
+    padding:0 calc(12px + var(--native-titlebar-right-inset)) 0 12px;
+    height:var(--native-titlebar-height);flex-shrink:0;
     background:var(--topbar-bg);
     border-bottom:1px solid var(--border);
     overflow:visible;
@@ -249,6 +253,8 @@ body.sidebar-collapsed .sidebar-nav-item{width:56px;}
 }
 
 .nav-search-group{display:flex;align-items:center;gap:6px;flex:1 1 0;min-width:0;max-width:none;margin:0;overflow:hidden;}
+.titlebar-drag-region{display:none;align-self:stretch;min-width:32px;flex:1 1 auto;pointer-events:none;}
+html[data-integrated-titlebar="true"] .titlebar-drag-region{display:block;}
 .btn-nav{
     display:flex;align-items:center;justify-content:center;
     width:32px;height:32px;border-radius:50%;border:none;cursor:pointer;

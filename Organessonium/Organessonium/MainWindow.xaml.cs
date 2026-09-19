@@ -7,12 +7,15 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Organessonium.Bridge;
 using Organessonium.Services;
 using ComTypes = System.Runtime.InteropServices.ComTypes;
+using Windows.Graphics;
 
 namespace Organessonium;
 
@@ -37,6 +40,11 @@ public partial class MainWindow : Window
     private ResizeMode _savedResizeMode;
     private bool _savedTopmost;
     private bool _shutdownInProgress;
+    private AppWindowTitleBar? _nativeTitleBar;
+    private bool _usesIntegratedTitleBar;
+    private int _lastTitleBarLeftInset = -1;
+    private int _lastTitleBarRightInset = -1;
+    private int _lastTitleBarHeight = -1;
     private readonly Dictionary<IntPtr, NativeFileDropTarget> _oleDropTargets = new();
 
     private const int WmDropFiles = 0x0233;
@@ -52,7 +60,16 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         Activated += (_, _) => _ = RefreshSystemThemeAsync();
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
-        SourceInitialized += (_, _) => ApplyWindowTheme(_store.Load().Theme);
+        SourceInitialized += OnSourceInitialized;
+        SizeChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
+        StateChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
+    }
+
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        ApplyWindowTheme(_store.Load().Theme);
+        ConfigureIntegratedTitleBar();
+        Dispatcher.BeginInvoke(new Action(ResetNativeTitleBarDragRegion));
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -99,6 +116,125 @@ public partial class MainWindow : Window
         WebView.DefaultBackgroundColor = dark
             ? System.Drawing.Color.FromArgb(16, 16, 16)
             : System.Drawing.Color.FromArgb(248, 248, 248);
+    }
+
+    private void ConfigureIntegratedTitleBar()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ||
+            !AppWindowTitleBar.IsCustomizationSupported())
+        {
+            return;
+        }
+
+        try
+        {
+            var handle = new WindowInteropHelper(this).Handle;
+            if (handle == IntPtr.Zero)
+            {
+                return;
+            }
+
+            var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(handle));
+            var titleBar = appWindow.TitleBar;
+            titleBar.ExtendsContentIntoTitleBar = true;
+            titleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+
+            var transparent = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+            titleBar.ButtonBackgroundColor = transparent;
+            titleBar.ButtonInactiveBackgroundColor = transparent;
+
+            _nativeTitleBar = titleBar;
+            _usesIntegratedTitleBar = true;
+        }
+        catch (Exception ex)
+        {
+            _nativeTitleBar = null;
+            _usesIntegratedTitleBar = false;
+            AppLogger.Debug("Window.TitleBar", "Native title bar integration unavailable: " + ex.Message);
+        }
+    }
+
+    private async Task PublishNativeTitleBarMetricsAsync(bool force = false)
+    {
+        if (!_usesIntegratedTitleBar || _nativeTitleBar == null || _bridge == null)
+        {
+            return;
+        }
+
+        var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var leftInset = ToTitleBarDip(_nativeTitleBar.LeftInset, dpiScale);
+        var rightInset = ToTitleBarDip(_nativeTitleBar.RightInset, dpiScale);
+        var height = ToTitleBarDip(_nativeTitleBar.Height, dpiScale);
+        if (!force &&
+            leftInset == _lastTitleBarLeftInset &&
+            rightInset == _lastTitleBarRightInset &&
+            height == _lastTitleBarHeight)
+        {
+            return;
+        }
+
+        _lastTitleBarLeftInset = leftInset;
+        _lastTitleBarRightInset = rightInset;
+        _lastTitleBarHeight = height;
+        await _bridge.CallAsync("_onNativeTitleBarMetrics", new
+        {
+            enabled = true,
+            leftInset,
+            rightInset,
+            height
+        });
+    }
+
+    private void ResetNativeTitleBarDragRegion()
+    {
+        if (!_usesIntegratedTitleBar || _nativeTitleBar == null)
+        {
+            return;
+        }
+
+        var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var width = Math.Max(0, ToTitleBarPixels(ActualWidth, dpiScale) - _nativeTitleBar.RightInset);
+        var height = Math.Max(0, _nativeTitleBar.Height);
+        _nativeTitleBar.SetDragRectangles(width > 0 && height > 0
+            ? [new RectInt32(0, 0, width, height)]
+            : Array.Empty<RectInt32>());
+    }
+
+    private void SetNativeTitleBarDragRegion(JsonElement message)
+    {
+        if (!_usesIntegratedTitleBar || _nativeTitleBar == null ||
+            !message.TryGetProperty("args", out var args) ||
+            args.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var values = args.EnumerateArray().ToArray();
+        if (values.Length != 4 || !values.All(value => value.TryGetDouble(out _)))
+        {
+            return;
+        }
+
+        var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var maximumWidth = ToTitleBarPixels(ActualWidth, dpiScale);
+        var maximumHeight = Math.Min(ToTitleBarPixels(ActualHeight, dpiScale), _nativeTitleBar.Height);
+        var x = Math.Clamp(ToTitleBarPixels(values[0].GetDouble(), dpiScale), 0, maximumWidth);
+        var y = Math.Clamp(ToTitleBarPixels(values[1].GetDouble(), dpiScale), 0, maximumHeight);
+        var width = Math.Clamp(ToTitleBarPixels(values[2].GetDouble(), dpiScale), 0, maximumWidth - x);
+        var height = Math.Clamp(ToTitleBarPixels(values[3].GetDouble(), dpiScale), 0, maximumHeight - y);
+        _nativeTitleBar.SetDragRectangles(width > 0 && height > 0
+            ? [new RectInt32(x, y, width, height)]
+            : Array.Empty<RectInt32>());
+    }
+
+    private static int ToTitleBarDip(int pixels, double dpiScale)
+    {
+        return Math.Max(0, (int)Math.Round(pixels / Math.Max(1, dpiScale), MidpointRounding.AwayFromZero));
+    }
+
+    private static int ToTitleBarPixels(double dips, double dpiScale)
+    {
+        return Math.Max(0, (int)Math.Round(dips * Math.Max(1, dpiScale), MidpointRounding.AwayFromZero));
     }
 
     private void SetStartupSplashVisible(bool visible)
@@ -173,6 +309,7 @@ public partial class MainWindow : Window
             RefreshShellDropTargets();
             await _bridge.SetSystemPreferencesAsync(WindowThemeService.InitialTheme());
             await _bridge.SetSettingsAsync(_store.Load());
+            await PublishNativeTitleBarMetricsAsync(force: true);
             await _bridge.NotifyReadyAsync();
             if (_pendingSetupError != null)
             {
@@ -398,6 +535,9 @@ public partial class MainWindow : Window
                     return true;
                 case "openSetup":
                     OpenStartupSetup();
+                    return true;
+                case "setTitleBarDragRegion":
+                    SetNativeTitleBarDragRegion(document.RootElement);
                     return true;
                 default:
                     return false;
