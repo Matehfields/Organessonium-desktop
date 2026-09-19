@@ -47,7 +47,8 @@ public sealed class ForumUploader
         int maxParallelParts = 1,
         SemaphoreSlim? uploadGate = null,
         EncryptedPayloadContext? encryptedPayload = null,
-        AdaptiveUploadGate? adaptiveUploadGate = null)
+        AdaptiveUploadGate? adaptiveUploadGate = null,
+        Action<bool>? onTransferActivity = null)
     {
         if (parts.Count == 0)
         {
@@ -108,7 +109,9 @@ public sealed class ForumUploader
                 first,
                 cancellationToken,
                 onRateLimitWait,
-                serializeRoute: false),
+                serializeRoute: false,
+                onTransferActivity: onTransferActivity,
+                waitForTransientNetwork: true),
                 elapsed => adaptiveUploadGate?.ReportCompleted(first.Length, elapsed));
             threadId = post.ThreadId;
             chunkMessages[0] = post.MessageId;
@@ -157,7 +160,9 @@ public sealed class ForumUploader
                             part,
                             cancellationToken,
                             onRateLimitWait,
-                            serializeRoute: false),
+                            serializeRoute: false,
+                            onTransferActivity: onTransferActivity,
+                            waitForTransientNetwork: true),
                         elapsed => adaptiveUploadGate?.ReportCompleted(part.Length, elapsed));
                     chunkMessages[index] = message.Id;
                     if (onChunkUploaded != null)
@@ -190,7 +195,8 @@ public sealed class ForumUploader
         SemaphoreSlim? uploadGate = null,
         EncryptedPayloadContext? encryptedPayload = null,
         Action<FileInfo>? cleanupPart = null,
-        AdaptiveUploadGate? adaptiveUploadGate = null)
+        AdaptiveUploadGate? adaptiveUploadGate = null,
+        Action<bool>? onTransferActivity = null)
     {
         if (totalParts <= 0)
         {
@@ -282,7 +288,9 @@ public sealed class ForumUploader
                         first!,
                         cancellationToken,
                         onRateLimitWait,
-                        serializeRoute: false);
+                        serializeRoute: false,
+                        onTransferActivity: onTransferActivity,
+                        waitForTransientNetwork: true);
                 }, elapsed => adaptiveUploadGate?.ReportCompleted(first!.Length, elapsed));
                 threadId = post.ThreadId;
                 chunkMessages[0] = post.MessageId;
@@ -345,7 +353,9 @@ public sealed class ForumUploader
                                 prepared!,
                                 cancellationToken,
                                 onRateLimitWait,
-                                serializeRoute: false);
+                                serializeRoute: false,
+                                onTransferActivity: onTransferActivity,
+                                waitForTransientNetwork: true);
                         }, elapsed => adaptiveUploadGate?.ReportCompleted(prepared!.Length, elapsed));
                         chunkMessages[index] = message.Id;
                         if (onChunkUploaded != null)
@@ -402,7 +412,8 @@ public sealed class ForumUploader
                 parts[i],
                 cancellationToken,
                 onRateLimitWait,
-                serializeRoute: false);
+                serializeRoute: false,
+                waitForTransientNetwork: true);
             chunkMessages.Add(message.Id);
             uploadedParts?.Invoke(i + 1);
         }
@@ -432,7 +443,8 @@ public sealed class ForumUploader
                 content,
                 file,
                 cancellationToken,
-                onRateLimitWait);
+                onRateLimitWait,
+                waitForTransientNetwork: true);
             return message.Id;
         }
         catch (Exception ex)
@@ -468,7 +480,8 @@ public sealed class ForumUploader
                     : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
-                onRateLimitWait);
+                onRateLimitWait,
+                waitForTransientNetwork: true);
             chunkMessages.Add(message.Id);
             uploadedParts?.Invoke(i + 1);
         }

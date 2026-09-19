@@ -70,7 +70,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string channelId,
         int? limit = 500,
         CancellationToken cancellationToken = default,
-        Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch = null)
+        Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch = null,
+        bool waitForTransientNetwork = false)
     {
         var messages = new List<DiscordMessageDto>();
         string? before = null;
@@ -84,7 +85,10 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 url += "&before=" + before;
             }
 
-            using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), cancellationToken);
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, url),
+                cancellationToken,
+                waitForTransientNetwork: waitForTransientNetwork);
             var batch = await ReadJsonAsync<List<DiscordMessageDto>>(response, cancellationToken);
             if (batch.Count == 0)
             {
@@ -295,11 +299,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     public async Task<DiscordMessageDto> GetMessageAsync(
         string channelId,
         string messageId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool waitForTransientNetwork = false)
     {
         using var response = await SendAsync(
             () => new HttpRequestMessage(HttpMethod.Get, $"channels/{channelId}/messages/{messageId}"),
-            cancellationToken);
+            cancellationToken,
+            waitForTransientNetwork: waitForTransientNetwork);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
@@ -366,7 +372,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         FileInfo file,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         return CreateForumPostWithFileDetailedAsync(
@@ -377,7 +385,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             file.OpenRead,
             cancellationToken,
             onRateLimitWait,
-            serializeRoute);
+            serializeRoute,
+            onTransferActivity,
+            waitForTransientNetwork);
     }
 
     internal Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
@@ -387,7 +397,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         PreparedUploadPart file,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         return CreateForumPostWithFileDetailedAsync(
@@ -398,7 +410,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             file.OpenRead,
             cancellationToken,
             onRateLimitWait,
-            serializeRoute);
+            serializeRoute,
+            onTransferActivity,
+            waitForTransientNetwork);
     }
 
     private async Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
@@ -409,7 +423,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<Stream> openRead,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
-        bool serializeRoute)
+        bool serializeRoute,
+        Action<bool>? onTransferActivity,
+        bool waitForTransientNetwork)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -423,7 +439,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     openRead,
                     cancellationToken,
                     onRateLimitWait,
-                    serializeRoute);
+                    serializeRoute,
+                    onTransferActivity,
+                    waitForTransientNetwork);
             }
             catch (DiscordApiException ex) when (ex.DiscordCode == MaxActiveThreadsCode && attempt < 2)
             {
@@ -512,14 +530,16 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<Stream> openRead,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
-        bool serializeRoute)
+        bool serializeRoute,
+        Action<bool>? onTransferActivity,
+        bool waitForTransientNetwork)
     {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
             request.Content = BuildForumThreadContent(title, content, fileName, openRead);
             return request;
-        }, cancellationToken, onRateLimitWait, serializeRoute);
+        }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
         var messageId = channel.Message?.Id ?? "";
         if (string.IsNullOrWhiteSpace(messageId))
@@ -611,7 +631,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         FileInfo file,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         return SendFileMessageAsync(
@@ -621,7 +643,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             file.OpenRead,
             cancellationToken,
             onRateLimitWait,
-            serializeRoute);
+            serializeRoute,
+            onTransferActivity,
+            waitForTransientNetwork);
     }
 
     internal Task<DiscordMessageDto> SendFileMessageAsync(
@@ -630,7 +654,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         PreparedUploadPart file,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         return SendFileMessageAsync(
@@ -640,7 +666,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             file.OpenRead,
             cancellationToken,
             onRateLimitWait,
-            serializeRoute);
+            serializeRoute,
+            onTransferActivity,
+            waitForTransientNetwork);
     }
 
     private async Task<DiscordMessageDto> SendFileMessageAsync(
@@ -650,14 +678,16 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<Stream> openRead,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
-        bool serializeRoute)
+        bool serializeRoute,
+        Action<bool>? onTransferActivity,
+        bool waitForTransientNetwork)
     {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
             request.Content = BuildMessageFileContent(content, fileName, openRead);
             return request;
-        }, cancellationToken, onRateLimitWait, serializeRoute);
+        }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
@@ -665,36 +695,47 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         DiscordAttachmentDto attachment,
         CancellationToken cancellationToken = default)
     {
-        Exception? lastError = null;
-        foreach (var url in new[] { attachment.Url, attachment.ProxyUrl }
-                     .Where(value => !string.IsNullOrWhiteSpace(value))
-                     .Distinct(StringComparer.Ordinal))
+        for (var attempt = 1; ; attempt++)
         {
-            try
+            Exception? lastError = null;
+            foreach (var url in new[] { attachment.Url, attachment.ProxyUrl }
+                         .Where(value => !string.IsNullOrWhiteSpace(value))
+                         .Distinct(StringComparer.Ordinal))
             {
-                using var response = await _http.GetAsync(
-                    url,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-                if (response.IsSuccessStatusCode)
+                try
                 {
-                    return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                    using var response = await _http.GetAsync(
+                        url,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        cancellationToken);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        return await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                    }
+
+                    lastError = new HttpRequestException(
+                        $"Download do anexo retornou HTTP {(int)response.StatusCode}.",
+                        inner: null,
+                        statusCode: response.StatusCode);
                 }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                }
+            }
 
-                lastError = new HttpRequestException(
-                    $"Download do anexo retornou HTTP {(int)response.StatusCode}.");
-            }
-            catch (OperationCanceledException)
+            if (lastError == null || !NetworkRetryPolicy.IsTransient(lastError))
             {
-                throw;
+                throw new InvalidOperationException("Não foi possível baixar o anexo do serial.", lastError);
             }
-            catch (Exception ex)
-            {
-                lastError = ex;
-            }
+
+            AppLogger.Error("Discord.DownloadAttachmentRetry", lastError, $"{attachment.FileName}:attempt {attempt}");
+            await NetworkRetryPolicy.DelayAsync(attempt, cancellationToken);
         }
-
-        throw new InvalidOperationException("Não foi possível baixar o anexo do serial.", lastError);
     }
 
     public async Task DeleteChannelAsync(string channelId, CancellationToken cancellationToken = default)
@@ -791,9 +832,12 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<HttpRequestMessage> requestFactory,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
     {
-        for (var attempt = 0; attempt < 12; attempt++)
+        var shouldWaitForTransientNetwork = waitForTransientNetwork || onRateLimitWait != null;
+        for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = requestFactory();
             var routeKey = BuildRouteKey(request);
@@ -809,18 +853,28 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 await WaitForRouteAsync(routeKey, onRateLimitWait, cancellationToken);
 
                 HttpResponseMessage response;
+                var transferActivityStarted = false;
                 try
                 {
+                    onTransferActivity?.Invoke(true);
+                    transferActivityStarted = onTransferActivity != null;
                     response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 }
-                catch (HttpRequestException) when (attempt < 11)
+                catch (HttpRequestException) when (shouldWaitForTransientNetwork || attempt < 11)
                 {
-                    await WaitTransientRetryAsync(attempt, cancellationToken);
+                    await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
                     continue;
                 }
                 catch (HttpRequestException ex)
                 {
                     throw new DiscordApiException(HttpStatusCode.ServiceUnavailable, "Falha de rede ao falar com o Discord: " + ex.Message, ex);
+                }
+                finally
+                {
+                    if (transferActivityStarted)
+                    {
+                        onTransferActivity!(false);
+                    }
                 }
 
                 if ((int)response.StatusCode != 429)
@@ -834,9 +888,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     var statusCode = response.StatusCode;
                     var body = await response.Content.ReadAsStringAsync(cancellationToken);
                     response.Dispose();
-                    if (IsTransientStatus(statusCode) && attempt < 11)
+                    if (IsTransientStatus(statusCode) && (shouldWaitForTransientNetwork || attempt < 11))
                     {
-                        await WaitTransientRetryAsync(attempt, cancellationToken);
+                        await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
                         continue;
                     }
 
@@ -863,13 +917,17 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             or HttpStatusCode.InternalServerError
             or HttpStatusCode.BadGateway
             or HttpStatusCode.ServiceUnavailable
-            or HttpStatusCode.GatewayTimeout;
+            or HttpStatusCode.GatewayTimeout
+            || (int)statusCode == 520;
     }
 
-    private static Task WaitTransientRetryAsync(int attempt, CancellationToken cancellationToken)
+    private static Task WaitTransientRetryAsync(
+        int attempt,
+        Func<TimeSpan, Task>? onRateLimitWait,
+        CancellationToken cancellationToken)
     {
         var delayMs = Math.Min(8000, 500 * Math.Pow(2, Math.Min(attempt, 4)));
-        return Task.Delay(TimeSpan.FromMilliseconds(delayMs), cancellationToken);
+        return WaitWithProgressAsync(TimeSpan.FromMilliseconds(delayMs), onRateLimitWait, cancellationToken);
     }
 
     private static string BuildRouteKey(HttpRequestMessage request)

@@ -1991,11 +1991,12 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
         ? Math.max(previousPercent, Math.min(100, incomingPercent))
         : previousPercent;
     if (hasProgress) {
+        const displayPercent = Math.round(safePercent);
         row.dataset.progress = String(safePercent);
         indicator.style.setProperty('--progress', safePercent);
-        indicator.setAttribute('aria-label', safePercent + '%');
+        indicator.setAttribute('aria-label', displayPercent + '%');
         const percentEl = $('op-file-percent-' + id + '-' + fileIndex);
-        if (percentEl) percentEl.textContent = safePercent + '%';
+        if (percentEl) percentEl.textContent = displayPercent + '%';
     }
     indicator.className = 'op-file-progress ' + normalizedStatus;
     if (normalizedStatus === 'done') indicator.innerHTML = icon('check',15);
@@ -2063,26 +2064,46 @@ window._opsProgress = (id, percent, msg) => {
     setOpProgress(id, percent);
 };
 
-window._opsTransferMetrics = (id, direction, completedItems, totalItems, transferredBytes, totalBytes) => {
+window._opsTransferMetrics = (id, direction, completedItems, totalItems, transferredBytes, totalBytes, activeTransferSeconds) => {
     const item = $('op-' + id);
     if (!item) return;
     const now = performance.now();
     const reportedBytes = Math.max(0, Number(transferredBytes) || 0);
     const total = Math.max(0, Number(totalBytes) || 0);
+    const reportedActiveSeconds = Number(activeTransferSeconds);
+    const hasActiveClock = Number.isFinite(reportedActiveSeconds) && reportedActiveSeconds >= 0;
     let state = transferRateStates.get(id);
-    if (!state) {
-        state = { highWaterBytes:reportedBytes, samples:[[now, reportedBytes]], speed:0 };
+    if (!state || state.direction !== direction || state.hasActiveClock !== hasActiveClock) {
+        state = {
+            direction,
+            hasActiveClock,
+            highWaterBytes:reportedBytes,
+            activeSeconds:hasActiveClock ? reportedActiveSeconds : 0,
+            samples:[[now, reportedBytes, hasActiveClock ? reportedActiveSeconds : 0]],
+            speed:0
+        };
         transferRateStates.set(id, state);
     } else {
         state.highWaterBytes = Math.max(state.highWaterBytes, reportedBytes);
-        state.samples.push([now, state.highWaterBytes]);
-        const cutoff = now - 60000;
-        while (state.samples.length > 1 && state.samples[1][0] <= cutoff) state.samples.shift();
-        const baseline = state.samples[0];
-        const elapsed = now - baseline[0];
-        state.speed = elapsed >= 1000
-            ? Math.max(0, state.highWaterBytes - baseline[1]) / (elapsed / 1000)
-            : 0;
+        if (hasActiveClock) {
+            state.activeSeconds = Math.max(state.activeSeconds, reportedActiveSeconds);
+            state.samples.push([now, state.highWaterBytes, state.activeSeconds]);
+            while (state.samples.length > 1 && state.activeSeconds - state.samples[1][2] >= 60) state.samples.shift();
+            const baseline = state.samples[0];
+            const elapsed = state.activeSeconds - baseline[2];
+            state.speed = elapsed >= 1
+                ? Math.max(0, state.highWaterBytes - baseline[1]) / elapsed
+                : 0;
+        } else {
+            state.samples.push([now, state.highWaterBytes, 0]);
+            const cutoff = now - 60000;
+            while (state.samples.length > 1 && state.samples[1][0] <= cutoff) state.samples.shift();
+            const baseline = state.samples[0];
+            const elapsed = now - baseline[0];
+            state.speed = elapsed >= 1000
+                ? Math.max(0, state.highWaterBytes - baseline[1]) / (elapsed / 1000)
+                : 0;
+        }
     }
     const bytes = state.highWaterBytes;
     const completed = Math.max(Number(item.dataset.metricCompleted) || 0, Number(completedItems) || 0);
@@ -2123,7 +2144,7 @@ function setOpProgress(id, percent) {
     if (item) item.dataset.progress = String(safe);
     bar.style.width = safe + '%';
     const percentEl = $('op-percent-' + id);
-    if (percentEl) percentEl.textContent = safe + '%';
+    if (percentEl) percentEl.textContent = Math.round(safe) + '%';
 }
 
 function requestVisibleFolderStatistics() {

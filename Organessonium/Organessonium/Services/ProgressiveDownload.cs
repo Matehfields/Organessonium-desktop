@@ -128,13 +128,22 @@ private readonly IReadOnlyList<ProgressiveDownloadPart> _parts;
                 _nextPartIndex++;
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && attempt < MaxAttempts)
+            catch (Exception ex) when (ex is not OperationCanceledException &&
+                                       (NetworkRetryPolicy.IsTransient(ex) || attempt < MaxAttempts))
             {
                 last = ex;
                 Interlocked.Exchange(ref _availableBytes, before);
                 TryTruncate(before);
                 AppLogger.Error("ProgressiveVideo.ChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}");
-                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
+                if (NetworkRetryPolicy.IsTransient(ex))
+                {
+                    attempt--;
+                    await NetworkRetryPolicy.DelayAsync(attempt + 1, cancellationToken);
+                }
+                else
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

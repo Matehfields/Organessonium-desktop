@@ -35,6 +35,56 @@ public sealed class AppController : IAsyncDisposable
     private const long MarkdownInlineImageLimit = EncryptionService.MaximumPlaintextPayloadBytes;
     private sealed record FolderFileStatistic(string FolderId, long FileCount);
     private sealed record FolderLoadResult(string FolderId, IReadOnlyList<AppEntry> Entries);
+    private sealed class TransferActivityClock
+    {
+        private readonly object _sync = new();
+        private int _activeRequests;
+        private long _activeStarted;
+        private double _elapsedSeconds;
+
+        public void SetActive(bool active)
+        {
+            lock (_sync)
+            {
+                if (active)
+                {
+                    if (_activeRequests++ == 0)
+                    {
+                        _activeStarted = Stopwatch.GetTimestamp();
+                    }
+
+                    return;
+                }
+
+                if (_activeRequests <= 0)
+                {
+                    return;
+                }
+
+                if (--_activeRequests == 0)
+                {
+                    _elapsedSeconds += Stopwatch.GetElapsedTime(_activeStarted).TotalSeconds;
+                }
+            }
+        }
+
+        public double ElapsedSeconds
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    var elapsed = _elapsedSeconds;
+                    if (_activeRequests > 0)
+                    {
+                        elapsed += Stopwatch.GetElapsedTime(_activeStarted).TotalSeconds;
+                    }
+
+                    return Math.Max(0, elapsed);
+                }
+            }
+        }
+    }
     private readonly Window _owner;
     private readonly SettingsStore _store;
     private WebMessageBridge _bridge;
@@ -2092,9 +2142,10 @@ public sealed class AppController : IAsyncDisposable
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
         using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
         using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
+        var transferActivity = new TransferActivityClock();
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
-        await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes);
+        await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
 
         var workers = Enumerable.Range(0, fileParallelism).Select(async _ =>
         {
@@ -2131,13 +2182,28 @@ public sealed class AppController : IAsyncDisposable
                         onBytesUploaded: async bytes =>
                         {
                             var currentBytes = Interlocked.Add(ref uploadedBytes, Math.Max(0, bytes));
-                            await OpsTransferMetricsAsync(opId, "upload", Volatile.Read(ref done), tasks.Count, currentBytes, totalBytes);
+                            await OpsTransferMetricsAsync(
+                                opId,
+                                "upload",
+                                Volatile.Read(ref done),
+                                tasks.Count,
+                                currentBytes,
+                                totalBytes,
+                                transferActivity.ElapsedSeconds);
                         },
+                        transferActivity: transferActivity,
                         deferSerialSynchronization: true);
                     uploadedEntries[index] = uploaded;
                     var completed = Interlocked.Increment(ref done);
                     await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
-                    await OpsTransferMetricsAsync(opId, "upload", completed, tasks.Count, Interlocked.Read(ref uploadedBytes), totalBytes);
+                    await OpsTransferMetricsAsync(
+                        opId,
+                        "upload",
+                        completed,
+                        tasks.Count,
+                        Interlocked.Read(ref uploadedBytes),
+                        totalBytes,
+                        transferActivity.ElapsedSeconds);
                     await OpsProgressAsync(opId, Percent(completed + Volatile.Read(ref failed), tasks.Count), $"{completed}/{tasks.Count} concluídos");
                 }
                 catch (OperationCanceledException)
@@ -2237,6 +2303,7 @@ public sealed class AppController : IAsyncDisposable
         UploadMemoryCoordinator? memoryCoordinator = null,
         bool useBatchUi = false,
         Func<long, Task>? onBytesUploaded = null,
+        TransferActivityClock? transferActivity = null,
         bool deferSerialSynchronization = false)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
@@ -2360,7 +2427,7 @@ public sealed class AppController : IAsyncDisposable
                     fileIndex,
                     fileTotal,
                     -1,
-                    $"Limite do Discord - retomando em {seconds}s",
+                    $"Aguardando conexão com o Discord - retomando em {seconds}s",
                     throttle,
                     true,
                     useBatchUi,
@@ -2476,7 +2543,8 @@ public sealed class AppController : IAsyncDisposable
                     maxParallelParts: settings.UploadThreads,
                     encryptedPayload: encryptionContext,
                     cleanupPart: TryDeleteFile,
-                    adaptiveUploadGate: adaptiveUploadGate);
+                    adaptiveUploadGate: adaptiveUploadGate,
+                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);
             }
             else
             {
@@ -2491,7 +2559,8 @@ public sealed class AppController : IAsyncDisposable
                     cancellationToken,
                     ReportRateLimitWaitAsync,
                     maxParallelParts: settings.UploadThreads,
-                    adaptiveUploadGate: adaptiveUploadGate);
+                    adaptiveUploadGate: adaptiveUploadGate,
+                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);
             }
             threadId = upload.ThreadId;
 
@@ -3232,7 +3301,7 @@ public sealed class AppController : IAsyncDisposable
                             destDir,
                             transferState,
                             _transferManager,
-                            _ => { },
+                            msg => _ = OpsUpdateAsync(opId, "active", $"({i + 1}/{toDownload.Count}) {msg}"),
                             cancellationToken,
                             progress =>
                             {
@@ -4279,7 +4348,8 @@ public sealed class AppController : IAsyncDisposable
         int completedItems,
         int totalItems,
         long transferredBytes,
-        long totalBytes)
+        long totalBytes,
+        double? activeTransferSeconds = null)
     {
         await _bridge.CallAsync(
             "_opsTransferMetrics",
@@ -4288,7 +4358,10 @@ public sealed class AppController : IAsyncDisposable
             Math.Max(0, completedItems),
             Math.Max(1, totalItems),
             Math.Max(0, transferredBytes),
-            Math.Max(0, totalBytes));
+            Math.Max(0, totalBytes),
+            activeTransferSeconds.HasValue
+                ? Math.Max(0, activeTransferSeconds.Value)
+                : null);
     }
 
     private CancellationToken BeginTransferOperation(string opId)

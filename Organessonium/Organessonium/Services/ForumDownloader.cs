@@ -582,7 +582,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken);
+        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
         var attachment = message.Attachments.FirstOrDefault();
         if (attachment == null)
         {
@@ -608,7 +608,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken);
+        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
         var attachment = message.Attachments.FirstOrDefault();
         if (attachment == null)
         {
@@ -645,7 +645,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken);
+        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         return messages
             .Where(message => message.Content.StartsWith(contentPrefix, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(message => Snowflake(message.Id))
@@ -658,15 +658,26 @@ public sealed class ForumDownloader
         Action<DownloadProgress>? onProgress,
         CancellationToken cancellationToken)
     {
-        var total = Math.Max(0, attachment.Size);
         using var http = NetworkConfig.Current.CreateClient();
-        using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var output = new MemoryStream(total > 0 && total <= int.MaxValue ? (int)total : 0);
-        var downloaded = await CopyWithProgressAsync(input, output, 0, total, attachment.FileName, onProgress, cancellationToken);
-        onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, total));
-        return output.ToArray();
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                var total = Math.Max(0, attachment.Size);
+                using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var output = new MemoryStream(total > 0 && total <= int.MaxValue ? (int)total : 0);
+                var downloaded = await CopyWithProgressAsync(input, output, 0, total, attachment.FileName, onProgress, cancellationToken);
+                onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, total));
+                return output.ToArray();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && NetworkRetryPolicy.IsTransient(ex))
+            {
+                AppLogger.Error("Download.AttachmentRetry", ex, $"{attachment.FileName}:attempt {attempt}");
+                await NetworkRetryPolicy.DelayAsync(attempt, cancellationToken);
+            }
+        }
     }
 
     private async Task<byte[]> DownloadEncryptedAttachmentBytesAsync(
@@ -717,14 +728,26 @@ public sealed class ForumDownloader
         var fileName = string.IsNullOrWhiteSpace(attachment.FileName) ? "preview.bin" : attachment.FileName;
         var target = new FileInfo(Path.Combine(destDir.FullName, fileName));
         using var http = NetworkConfig.Current.CreateClient();
-        using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
-        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true);
-        var downloaded = await CopyWithProgressAsync(input, output, 0, Math.Max(0, attachment.Size), attachment.FileName, onProgress, cancellationToken);
-        onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, Math.Max(0, attachment.Size)));
-        target.Refresh();
-        return target.Exists && target.Length > 0 ? target : null;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                response.EnsureSuccessStatusCode();
+                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true);
+                var downloaded = await CopyWithProgressAsync(input, output, 0, Math.Max(0, attachment.Size), attachment.FileName, onProgress, cancellationToken);
+                onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, Math.Max(0, attachment.Size)));
+                target.Refresh();
+                return target.Exists && target.Length > 0 ? target : null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && NetworkRetryPolicy.IsTransient(ex))
+            {
+                TryDelete(target);
+                AppLogger.Error("Download.AttachmentFileRetry", ex, $"{attachment.FileName}:attempt {attempt}");
+                await NetworkRetryPolicy.DelayAsync(attempt, cancellationToken);
+            }
+        }
     }
 
     public async Task DeleteThreadAsync(string threadId, CancellationToken cancellationToken = default)
@@ -737,7 +760,7 @@ public sealed class ForumDownloader
 
     public async Task<string?> GetFirstAttachmentUrlAsync(string threadId, CancellationToken cancellationToken = default)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, 100, cancellationToken);
+        var messages = await _discord.GetMessagesAsync(threadId, 100, cancellationToken, waitForTransientNetwork: true);
         return messages
             .OrderBy(m => Snowflake(m.Id))
             .Where(message => !IsPreviewMessage(message.Content))
@@ -767,7 +790,7 @@ public sealed class ForumDownloader
     }
     private async Task<List<Part>> CollectPartsAsync(string threadId, CancellationToken cancellationToken, string? preferredBatchId = null)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken);
+        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         var candidates = new Dictionary<string, PartBatch>(StringComparer.OrdinalIgnoreCase);
         var hasPreferredBatch = !string.IsNullOrWhiteSpace(preferredBatchId);
         foreach (var message in messages.OrderByDescending(m => Snowflake(m.Id)))
@@ -830,7 +853,7 @@ public sealed class ForumDownloader
 
     private async Task<List<Part>> CollectPreviewPartsAsync(string threadId, string kind, CancellationToken cancellationToken)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken);
+        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         var candidates = new Dictionary<string, PartBatch>(StringComparer.OrdinalIgnoreCase);
         foreach (var message in messages.OrderByDescending(message => Snowflake(message.Id)))
         {
@@ -878,7 +901,7 @@ public sealed class ForumDownloader
         {
             try
             {
-                return await _discord.GetMessageAsync(threadId, messageId, cancellationToken);
+                return await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
             }
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < 4)
             {
@@ -1112,10 +1135,11 @@ public sealed class ForumDownloader
             Exception? last = null;
             var maxAttempts = encryption == null ? MaxChunkDownloadAttempts : MaxEncryptedPayloadDownloadAttempts;
             var encryptedTarget = encryption == null ? target : new FileInfo(target.FullName + ".encrypted");
+            var networkRetryCount = 0;
             for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 var countedBytes = 0L;
-                var useProxy = attempt % 2 == 0 &&
+                var useProxy = (attempt + networkRetryCount) % 2 == 0 &&
                                !string.IsNullOrWhiteSpace(part.ProxyUrl) &&
                                !string.Equals(part.ProxyUrl, part.Url, StringComparison.OrdinalIgnoreCase);
                 var sourceUrl = useProxy ? part.ProxyUrl : part.Url;
@@ -1175,7 +1199,8 @@ public sealed class ForumDownloader
 
                     return;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException && attempt < maxAttempts)
+                catch (Exception ex) when (ex is not OperationCanceledException &&
+                                           (NetworkRetryPolicy.IsTransient(ex) || attempt < maxAttempts))
                 {
                     last = ex;
                     if (countedBytes > 0)
@@ -1192,7 +1217,17 @@ public sealed class ForumDownloader
                     var retryDelayMs = isEmptyResponse
                         ? Math.Min(15000, 750 * Math.Pow(2, attempt - 1))
                         : 250 * attempt * attempt;
-                    await Task.Delay(TimeSpan.FromMilliseconds(retryDelayMs), cancellationToken);
+                    if (NetworkRetryPolicy.IsTransient(ex))
+                    {
+                        onProgress($"Conexão indisponível; aguardando retomada ({part.Name})...");
+                        networkRetryCount++;
+                        attempt--;
+                        await NetworkRetryPolicy.DelayAsync(networkRetryCount, cancellationToken);
+                    }
+                    else
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(retryDelayMs), cancellationToken);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1266,12 +1301,21 @@ public sealed class ForumDownloader
 
                 return;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && attempt < 4)
+            catch (Exception ex) when (ex is not OperationCanceledException &&
+                                       (NetworkRetryPolicy.IsTransient(ex) || attempt < 4))
             {
                 last = ex;
                 TryDelete(target);
                 AppLogger.Error("Download.StateChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}");
-                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
+                if (NetworkRetryPolicy.IsTransient(ex))
+                {
+                    attempt--;
+                    await NetworkRetryPolicy.DelayAsync(attempt + 1, cancellationToken);
+                }
+                else
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

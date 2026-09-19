@@ -36,7 +36,10 @@ public sealed class NetworkConfig
 
     public HttpClient CreateClient()
     {
-        return new HttpClient(CreateHandler(), disposeHandler: true);
+        return new HttpClient(CreateHandler(), disposeHandler: true)
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
     }
 
     public HttpMessageHandler CreateHandler()
