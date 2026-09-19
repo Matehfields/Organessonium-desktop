@@ -200,4 +200,10 @@ Ao abrir uma pasta, o cache e o serial daquela pasta são mostrados primeiro. Em
 
 Ao clicar em `Sair`, o app encerra a sessão, cancela transferências e prévias em andamento e limpa o diretório `OrganessoniumData`. O banco SQLite, caches, seriais e estados de transferência são removidos; somente `WebView` e `Logs` são preservados. O banco é recriado automaticamente quando uma nova sessão for configurada, sem exigir reinicialização do app.
 
+## Interface desktop
+
+A janela principal usa a WebView2 dentro de uma shell WPF. A área superior estende o conteúdo até a faixa de título, mas mantém os botões nativos de minimizar, maximizar e fechar do Windows, sem recriá-los no HTML. A barra lateral tem a marca do Organessônium e um botão para recolher ou expandir sua largura. Ela concentra os comandos de criação e envio, o acesso aos arquivos, transferências e configurações. Não há área de compartilhamento, perfil de usuário ou dispositivos porque esses recursos não existem no desktop atual.
+
+A grade e a lista de arquivos ficam em uma área de trabalho escura separada da lateral. O rodapé de status anterior não é exibido; mensagens continuam acessíveis pela região `aria-live`, enquanto atividades em segundo plano e transferências usam seus próprios painéis. O resumo lateral mostra bytes, itens, arquivos e pastas do servidor somente depois de receber o agregado completo dos seriais: `AppRegistry.GetLibraryStatisticsAsync` soma os agregados diretos de cada pasta da árvore, e `AppController` entrega o resultado à WebView2. Assim, o resumo não trata apenas os filhos da pasta atualmente aberta como a biblioteca inteira. O editor Markdown continua abrindo em suas guias locais existentes e não é alterado por essa shell.
+
 Para detalhes de arquitetura e compatibilidade entre versoes, veja `Information.md`.

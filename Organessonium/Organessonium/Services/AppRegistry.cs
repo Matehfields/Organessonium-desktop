@@ -4,6 +4,8 @@ using Organessonium.Models;
 
 namespace Organessonium.Services;
 
+public sealed record LibraryStatistics(long FileCount, long FolderCount, long TotalBytes);
+
 public sealed class AppRegistry
 {
     public const string RootFolderId = "root";
@@ -17,6 +19,7 @@ public sealed class AppRegistry
     private readonly ConcurrentDictionary<string, FolderDescriptor> _descriptors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<List<AppEntry>>> _folderRefreshes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _folderFileCounts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, LibraryStatistics> _libraryStatistics = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _deferredFolderSerials = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _duplicateFolderRepairs = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _mappingRefreshGate = new(1, 1);
@@ -129,6 +132,29 @@ public sealed class AppRegistry
         return count;
     }
 
+    public async Task<LibraryStatistics?> GetLibraryStatisticsAsync(
+        string folderId,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        if (_libraryStatistics.TryGetValue(normalizedFolderId, out var cached))
+        {
+            return cached;
+        }
+
+        var statistics = await ReadLibraryStatisticsAsync(
+            normalizedFolderId,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            cancellationToken);
+        if (statistics != null)
+        {
+            _folderFileCounts[normalizedFolderId] = statistics.FileCount;
+            _libraryStatistics[normalizedFolderId] = statistics;
+        }
+
+        return statistics;
+    }
+
     public async Task RefreshMappingsAsync(CancellationToken cancellationToken = default)
     {
         await _mappingRefreshGate.WaitAsync(cancellationToken);
@@ -155,6 +181,7 @@ public sealed class AppRegistry
             }
             _store.ReplaceFolderIndexMappings(canonical);
             _folderFileCounts.Clear();
+            _libraryStatistics.Clear();
         }
         finally
         {
@@ -894,6 +921,7 @@ public sealed class AppRegistry
         try
         {
             _folderFileCounts.Clear();
+            _libraryStatistics.Clear();
             var normalizedFolderId = NormalizeFolderId(folderId);
             if (!_mappings.TryGetValue(normalizedFolderId, out var mapping))
             {
@@ -1009,6 +1037,87 @@ public sealed class AppRegistry
         }
 
         return cachedCount;
+    }
+
+    private async Task<LibraryStatistics?> ReadLibraryStatisticsAsync(
+        string folderId,
+        HashSet<string> visitedFolderIds,
+        CancellationToken cancellationToken)
+    {
+        if (!visitedFolderIds.Add(folderId))
+        {
+            return null;
+        }
+
+        var mapping = await GetMappingAsync(folderId, cancellationToken);
+        var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        if (serial != null)
+        {
+            long fileCount = serial.Children.LongCount(child => !child.IsFolder);
+            long folderCount = serial.Children.LongCount(child => child.IsFolder);
+            long totalBytes = Math.Max(0, serial.Aggregate.TotalBytes);
+            foreach (var child in serial.Children.Where(child => child.IsFolder))
+            {
+                if (string.IsNullOrWhiteSpace(child.Id))
+                {
+                    return null;
+                }
+
+                FolderIndexMapping childMapping;
+                try
+                {
+                    childMapping = await GetMappingAsync(child.Id, cancellationToken);
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+
+                var nested = await ReadLibraryStatisticsAsync(
+                    childMapping.FolderId,
+                    visitedFolderIds,
+                    cancellationToken);
+                if (nested == null)
+                {
+                    return null;
+                }
+
+                fileCount += nested.FileCount;
+                folderCount += nested.FolderCount;
+                totalBytes += nested.TotalBytes;
+            }
+
+            return new LibraryStatistics(fileCount, folderCount, totalBytes);
+        }
+
+        var cachedEntries = _store.LoadCachedEntriesForFolder(folderId);
+        long cachedFileCount = cachedEntries.LongCount(entry => entry.Type != "folder");
+        long cachedFolderCount = cachedEntries.LongCount(entry => entry.Type == "folder");
+        long cachedTotalBytes = cachedEntries
+            .Where(entry => entry.Type != "folder")
+            .Sum(entry => Math.Max(0, entry.SizeBytes));
+        foreach (var child in cachedEntries.Where(entry => entry.Type == "folder"))
+        {
+            if (string.IsNullOrWhiteSpace(child.FolderId))
+            {
+                return null;
+            }
+
+            var nested = await ReadLibraryStatisticsAsync(
+                child.FolderId,
+                visitedFolderIds,
+                cancellationToken);
+            if (nested == null)
+            {
+                return null;
+            }
+
+            cachedFileCount += nested.FileCount;
+            cachedFolderCount += nested.FolderCount;
+            cachedTotalBytes += nested.TotalBytes;
+        }
+
+        return new LibraryStatistics(cachedFileCount, cachedFolderCount, cachedTotalBytes);
     }
 
     private async Task<bool> ArchiveFolderThreadAsync(

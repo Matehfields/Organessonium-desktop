@@ -7,69 +7,118 @@
 </head>
 <body>
 
-<header class="topbar">
-    <div class="topbar-brand">
-        <span class="logo-omega">Ω</span>
-            <span class="brand-name">Organessônium</span>
-    </div>
-    <div class="nav-search-group">
-        <button id="btn-back"    class="btn-nav" disabled><span data-icon="arrow_back"    data-size="20"></span></button>
-        <button id="btn-forward" class="btn-nav" disabled><span data-icon="arrow_forward" data-size="20"></span></button>
-        <div class="search-wrap">
-            <span class="search-icon-wrap" data-icon="search" data-size="18"></span>
-            <input id="search-input" type="text" placeholder="Pesquisar em Organessônium..." autocomplete="off"/>
-        </div>
-        <div id="path-crumbs" class="path-crumbs"></div>
-    </div>
-    <div class="topbar-actions">
-        <div class="view-toggle" role="group">
-            <button id="btn-grid" class="btn-view active"><span data-icon="grid_view"></span></button>
-            <button id="btn-list" class="btn-view"><span data-icon="view_list"></span></button>
-        </div>
-        <div class="sort-wrap">
-            <button id="btn-sort" class="btn-secondary">
-                <span data-icon="sort" data-size="17"></span>
-                <span id="sort-label">Nome</span>
-                <span data-icon="expand_more" data-size="15"></span>
+<div id="app-shell" class="app-shell">
+    <aside id="app-sidebar" class="app-sidebar" aria-label="Navegação principal">
+        <div class="sidebar-header">
+            <div id="sidebar-brand" class="topbar-brand sidebar-brand">
+                <span class="logo-omega">Ω</span>
+                <span class="brand-name">Organessônium</span>
+            </div>
+            <button id="btn-sidebar-toggle" class="sidebar-collapse" type="button" title="Recolher barra lateral" aria-label="Recolher barra lateral" aria-expanded="true">
+                <span data-icon="view_list" data-size="18"></span>
             </button>
-            <div id="sort-menu" class="dropdown hidden" role="menu">
-                <button data-sort="name-asc">Nome A→Z</button>
-                <button data-sort="name-desc">Nome Z→A</button>
-                <button data-sort="size-desc">Maior tamanho</button>
-                <button data-sort="size-asc">Menor tamanho</button>
-                <button data-sort="date-desc">Mais recente</button>
-                <button data-sort="date-asc">Mais antigo</button>
+        </div>
+
+        <div class="sidebar-create">
+            <button id="btn-sidebar-new" class="sidebar-new" type="button" aria-expanded="false">
+                <span data-icon="add" data-size="19"></span>
+                <span id="sidebar-new-text" data-sidebar-label>Novo</span>
+                <span class="sidebar-new-chevron" data-icon="expand_more" data-size="16" data-sidebar-label></span>
+            </button>
+            <div id="sidebar-new-menu" class="sidebar-new-menu hidden" role="menu">
+                <button id="sidebar-new-folder" type="button" role="menuitem"><span data-icon="create_new_folder" data-size="17"></span><span id="sidebar-new-folder-text">Nova pasta</span></button>
+                <button id="sidebar-upload" type="button" role="menuitem"><span data-icon="upload" data-size="17"></span><span id="sidebar-upload-text">Enviar arquivos</span></button>
+                <button id="sidebar-upload-folder" type="button" role="menuitem"><span data-icon="folder_open" data-size="17"></span><span id="sidebar-upload-folder-text">Enviar pasta</span></button>
             </div>
         </div>
-        <button id="btn-refresh"       class="btn-icon" title="Atualizar"><span data-icon="refresh"></span></button>
-        <button id="btn-new-folder"    class="btn-icon" title="Nova pasta"><span data-icon="create_new_folder"></span></button>
-        <button id="btn-upload-folder" class="btn-icon" title="Enviar pasta"><span data-icon="folder_open"></span></button>
-        <button id="btn-upload"        class="btn-primary"><span data-icon="upload" data-size="17"></span> Enviar</button>
-        <button id="btn-settings"      class="btn-icon"  title="Configurações"><span data-icon="settings"></span></button>
-    </div>
-</header>
 
-<main id="main-area" role="main" aria-label="Arquivos">
-    <div id="drag-overlay" class="drag-overlay hidden">
-        <div class="drag-content">
-            <span class="drag-icon-wrap" data-icon="cloud_upload" data-size="96"></span>
-            <p class="drag-text">Solte para fazer upload</p>
+        <nav class="sidebar-nav" aria-label="Áreas do aplicativo">
+            <button id="sidebar-files" class="sidebar-nav-item active" type="button" aria-current="page">
+                <span data-icon="folder" data-size="19"></span><span id="sidebar-files-text" data-sidebar-label>Arquivos</span>
+            </button>
+            <button id="sidebar-transfers" class="sidebar-nav-item" type="button">
+                <span data-icon="schedule" data-size="19"></span><span id="sidebar-transfers-text" data-sidebar-label>Transferências</span>
+            </button>
+        </nav>
+
+        <section class="sidebar-server-summary" aria-labelledby="sidebar-storage-title">
+            <div class="sidebar-summary-heading" id="sidebar-storage-title">Armazenamento no servidor</div>
+            <strong id="storage-display" class="sidebar-storage-value">0 B</strong>
+            <div class="sidebar-stat-list">
+                <div class="sidebar-stat-row"><span data-icon="insert_drive_file" data-size="17"></span><span id="server-items-label" data-sidebar-label>Itens no servidor</span><strong id="server-item-count">—</strong></div>
+                <div class="sidebar-stat-row"><span data-icon="description" data-size="17"></span><span id="server-files-label" data-sidebar-label>Arquivos</span><strong id="server-file-count">—</strong></div>
+                <div class="sidebar-stat-row"><span data-icon="folder" data-size="17"></span><span id="server-folders-label" data-sidebar-label>Pastas</span><strong id="server-folder-count">—</strong></div>
+            </div>
+        </section>
+
+        <div class="sidebar-footer">
+            <button id="sidebar-settings" class="sidebar-nav-item" type="button">
+                <span data-icon="settings" data-size="19"></span><span id="sidebar-settings-text" data-sidebar-label>Configurações</span>
+            </button>
         </div>
-    </div>
-    <div id="files-grid" class="files-grid" role="listbox" aria-label="Arquivos"></div>
-    <div id="files-list" class="files-list hidden" role="table"></div>
-    <div id="empty-state" class="empty-state hidden">
-        <span data-icon="upload" data-size="64"></span>
-        <p id="empty-title">Nenhum arquivo aqui</p>
-        <small id="empty-help">Arraste arquivos ou clique em "Enviar"</small>
-    </div>
-</main>
 
-<footer class="statusbar" role="status" aria-live="polite">
-    <span id="status-text">Carregando...</span>
-    <div id="status-loader" class="loader hidden"></div>
-    <div class="status-right"><span id="storage-display"></span></div>
-</footer>
+    </aside>
+
+    <section class="app-workspace">
+        <header class="topbar">
+            <div class="nav-search-group">
+                <button id="btn-back"    class="btn-nav" disabled><span data-icon="arrow_back"    data-size="20"></span></button>
+                <button id="btn-forward" class="btn-nav" disabled><span data-icon="arrow_forward" data-size="20"></span></button>
+                <div class="search-wrap">
+                    <span class="search-icon-wrap" data-icon="search" data-size="18"></span>
+                    <input id="search-input" type="text" placeholder="Pesquisar em Organessônium..." autocomplete="off"/>
+                </div>
+                <div id="path-crumbs" class="path-crumbs"></div>
+            </div>
+            <div class="topbar-actions">
+                <div class="view-toggle" role="group">
+                    <button id="btn-grid" class="btn-view active"><span data-icon="grid_view"></span></button>
+                    <button id="btn-list" class="btn-view"><span data-icon="view_list"></span></button>
+                </div>
+                <div class="sort-wrap">
+                    <button id="btn-sort" class="btn-secondary">
+                        <span data-icon="sort" data-size="17"></span>
+                        <span id="sort-label">Nome</span>
+                        <span data-icon="expand_more" data-size="15"></span>
+                    </button>
+                    <div id="sort-menu" class="dropdown hidden" role="menu">
+                        <button data-sort="name-asc">Nome A→Z</button>
+                        <button data-sort="name-desc">Nome Z→A</button>
+                        <button data-sort="size-desc">Maior tamanho</button>
+                        <button data-sort="size-asc">Menor tamanho</button>
+                        <button data-sort="date-desc">Mais recente</button>
+                        <button data-sort="date-asc">Mais antigo</button>
+                    </div>
+                </div>
+                <button id="btn-refresh"       class="btn-icon" title="Atualizar"><span data-icon="refresh"></span></button>
+                <button id="btn-new-folder"    class="btn-icon" title="Nova pasta"><span data-icon="create_new_folder"></span></button>
+                <button id="btn-upload-folder" class="btn-icon" title="Enviar pasta"><span data-icon="folder_open"></span></button>
+                <button id="btn-upload"        class="btn-primary"><span data-icon="upload" data-size="17"></span> Enviar</button>
+            </div>
+        </header>
+
+        <main id="main-area" role="main" aria-label="Arquivos">
+            <div id="drag-overlay" class="drag-overlay hidden">
+                <div class="drag-content">
+                    <span class="drag-icon-wrap" data-icon="cloud_upload" data-size="96"></span>
+                    <p class="drag-text">Solte para fazer upload</p>
+                </div>
+            </div>
+            <div id="files-grid" class="files-grid" role="listbox" aria-label="Arquivos"></div>
+            <div id="files-list" class="files-list hidden" role="table"></div>
+            <div id="empty-state" class="empty-state hidden">
+                <span data-icon="upload" data-size="64"></span>
+                <p id="empty-title">Nenhum arquivo aqui</p>
+                <small id="empty-help">Arraste arquivos ou clique em "Enviar"</small>
+            </div>
+        </main>
+
+        <div class="statusbar" role="status" aria-live="polite">
+            <span id="status-text">Carregando...</span>
+            <div id="status-loader" class="loader hidden"></div>
+        </div>
+    </section>
+</div>
 
 <div id="background-activity" class="background-activity hidden" role="status" aria-live="polite">
     <span class="background-activity-spinner" aria-hidden="true"></span>

@@ -845,10 +845,16 @@ public sealed class AppController : IAsyncDisposable
 
         try
         {
-            var count = await registry.GetFolderFileCountAsync(AppRegistry.RootFolderId);
-            if (count.HasValue && !_loggingOut)
+            var statistics = await registry.GetLibraryStatisticsAsync(AppRegistry.RootFolderId);
+            if (statistics != null && !_loggingOut)
             {
-                await _bridge.CallAsync("_onLibraryFileCount", count.Value);
+                await _bridge.CallAsync("_onLibraryStatistics", new
+                {
+                    fileCount = statistics.FileCount,
+                    folderCount = statistics.FolderCount,
+                    totalBytes = statistics.TotalBytes
+                });
+                await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
             }
         }
         catch (OperationCanceledException) when (_loggingOut)

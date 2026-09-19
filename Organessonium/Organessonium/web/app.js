@@ -39,6 +39,9 @@ let folderLoadingPath = '';
 let folderStatisticsTimer = 0;
 let folderFileCounts = new Map();
 let libraryFileCount = null;
+let libraryFolderCount = null;
+let libraryTotalBytes = null;
+let sidebarCollapsed = false;
 let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
 let activeVideoResizeCleanup = null;
@@ -69,6 +72,8 @@ const I18N = {
         searchPlaceholder:'Pesquisar em Organessônium...',
         back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta',
         uploadFolder:'Enviar pasta', upload:'Enviar', settings:'Configurações',
+        sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
+        sidebarItems:'Itens no servidor', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
         sortNameAsc:'Nome A-Z', sortNameDesc:'Nome Z-A', sortSizeDesc:'Maior tamanho',
         sortSizeAsc:'Menor tamanho', sortDateDesc:'Mais recente', sortDateAsc:'Mais antigo',
@@ -197,6 +202,8 @@ const I18N = {
         searchPlaceholder:'Search in Organessônium...',
         back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder',
         uploadFolder:'Upload folder', upload:'Upload', settings:'Settings',
+        sidebarNew:'New', sidebarFiles:'Files', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
+        sidebarItems:'Items on server', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
         sortName:'Name', sortSize:'Size', sortDate:'Date',
         sortNameAsc:'Name A-Z', sortNameDesc:'Name Z-A', sortSizeDesc:'Largest',
         sortSizeAsc:'Smallest', sortDateDesc:'Newest', sortDateAsc:'Oldest',
@@ -326,6 +333,8 @@ const $ = id => document.getElementById(id);
 const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     emptyState  = $('empty-state'),  statusText     = $('status-text'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
+    serverItemCount = $('server-item-count'), serverFileCount = $('server-file-count'),
+    serverFolderCount = $('server-folder-count'),
     opsPanel    = $('ops-panel'),    opsList        = $('ops-list'),
     sortMenu    = $('sort-menu'),    ctxMenu        = $('ctx-menu'),
     dragOverlay = $('drag-overlay'),
@@ -425,6 +434,21 @@ function applyI18n() {
     setA11y('btn-settings', 'settings');
     setA11y('background-activity-close', 'close');
     $('btn-upload').lastChild.nodeValue = ' ' + t('upload');
+    setText('sidebar-new-text', 'sidebarNew');
+    setA11y('btn-sidebar-new', 'sidebarNew');
+    setText('sidebar-new-folder-text', 'newFolder');
+    setText('sidebar-upload-text', 'upload');
+    setText('sidebar-upload-folder-text', 'uploadFolder');
+    setText('sidebar-files-text', 'sidebarFiles');
+    setA11y('sidebar-files', 'sidebarFiles');
+    setText('sidebar-transfers-text', 'sidebarTransfers');
+    setA11y('sidebar-transfers', 'sidebarTransfers');
+    setText('sidebar-storage-title', 'sidebarStorage');
+    setText('server-items-label', 'sidebarItems');
+    setText('server-files-label', 'sidebarFiles');
+    setText('server-folders-label', 'sidebarFolders');
+    setText('sidebar-settings-text', 'settings');
+    setA11y('sidebar-settings', 'settings');
     $('sort-label').textContent = sortLabel(sortMode);
     setA11y('preview-zoom-out', 'zoomOut');
     setA11y('preview-zoom-in', 'zoomIn');
@@ -575,6 +599,8 @@ function applyI18n() {
     if ($('rename-name-input')) $('rename-name-input').placeholder = t('renameName');
     updateSelectionUI();
     refreshOpsTitle();
+    syncSidebarChrome();
+    refreshSidebarSummary();
     refreshOpenEditorsI18n();
 }
 
@@ -611,6 +637,77 @@ function toggleLanguageMenu() {
     box.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function formatServerCount(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count) || count < 0) return '—';
+    return new Intl.NumberFormat(resolveLanguage() === 'pt-BR' ? 'pt-BR' : 'en-US').format(Math.floor(count));
+}
+
+function refreshSidebarSummary() {
+    const hasFiles = Number.isFinite(libraryFileCount);
+    const hasFolders = Number.isFinite(libraryFolderCount);
+    const hasBytes = Number.isFinite(libraryTotalBytes);
+    if (storageDisp) storageDisp.textContent = hasBytes ? fmtSize(libraryTotalBytes) : '—';
+    if (serverFileCount) serverFileCount.textContent = hasFiles ? formatServerCount(libraryFileCount) : '—';
+    if (serverFolderCount) serverFolderCount.textContent = hasFolders ? formatServerCount(libraryFolderCount) : '—';
+    if (serverItemCount) {
+        serverItemCount.textContent = hasFiles && hasFolders
+            ? formatServerCount(libraryFileCount + libraryFolderCount)
+            : '—';
+    }
+}
+
+function syncSidebarChrome() {
+    document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+    const button = $('btn-sidebar-toggle');
+    if (!button) return;
+    const label = t(sidebarCollapsed ? 'sidebarExpand' : 'sidebarCollapse');
+    button.innerHTML = icon(sidebarCollapsed ? 'arrow_forward' : 'arrow_back', 18);
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-expanded', sidebarCollapsed ? 'false' : 'true');
+}
+
+function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    try { localStorage.setItem('organessonium.sidebarCollapsed', sidebarCollapsed ? 'true' : 'false'); } catch (_) {}
+    syncSidebarChrome();
+}
+
+function restoreSidebarState() {
+    try { sidebarCollapsed = localStorage.getItem('organessonium.sidebarCollapsed') === 'true'; } catch (_) {}
+    syncSidebarChrome();
+}
+
+function closeSidebarNewMenu() {
+    const menu = $('sidebar-new-menu');
+    const button = $('btn-sidebar-new');
+    if (menu) menu.classList.add('hidden');
+    if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function toggleSidebarNewMenu() {
+    const menu = $('sidebar-new-menu');
+    const button = $('btn-sidebar-new');
+    if (!menu || !button) return;
+    const open = menu.classList.toggle('hidden') === false;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function showTransfers() {
+    opsPanel.classList.remove('hidden');
+    $('sidebar-files')?.classList.remove('active');
+    $('sidebar-files')?.removeAttribute('aria-current');
+    $('sidebar-transfers')?.classList.add('active');
+}
+
+function showFilesWorkspace() {
+    activateWorkspaceTab('files');
+    $('sidebar-transfers')?.classList.remove('active');
+    $('sidebar-files')?.classList.add('active');
+    $('sidebar-files')?.setAttribute('aria-current', 'page');
+}
+
 // ─── Java → JS ────────────────────────────────────────────────────────────────
 window.onBridgeReady = () => { loadSettings(); setStatus(t('loading'), true); window.bridge.loadApps(); };
 
@@ -635,8 +732,7 @@ window._onCachedAppsLoaded = apps => {
     allApps = apps;
     syncOpenMarkdownApps();
     render();
-    const total = allApps.reduce((sum, app) => sum + (app.sizeBytes || 0), 0);
-    storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
+    refreshSidebarSummary();
     setStatus(t('validatingServer'), true);
     scheduleVisibleThumbnails();
 };
@@ -650,9 +746,21 @@ window._onLibraryFileCount = count => {
     const total = Number(count);
     if (!Number.isFinite(total) || total < 0) return;
     libraryFileCount = Math.floor(total);
+    refreshSidebarSummary();
     if (currentPath === '/' && !registryValidationUsesCache) {
         setStatus(t('loaded', { count:libraryFileCount }), false);
     }
+};
+
+window._onLibraryStatistics = statistics => {
+    const value = statistics || {};
+    const fileCount = Number(value.fileCount);
+    const folderCount = Number(value.folderCount);
+    const totalBytes = Number(value.totalBytes);
+    libraryFileCount = Number.isFinite(fileCount) && fileCount >= 0 ? Math.floor(fileCount) : null;
+    libraryFolderCount = Number.isFinite(folderCount) && folderCount >= 0 ? Math.floor(folderCount) : null;
+    libraryTotalBytes = Number.isFinite(totalBytes) && totalBytes >= 0 ? Math.floor(totalBytes) : null;
+    refreshSidebarSummary();
 };
 
 window._onAppsBatch = apps => {
@@ -663,16 +771,14 @@ window._onAppsBatch = apps => {
     syncOpenMarkdownApps();
     render();
     scheduleVisibleThumbnails();
-    const total = allApps.reduce((sum, app) => sum + (app.sizeBytes || 0), 0);
-    storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
+    refreshSidebarSummary();
 };
 
 window._onAppsLoaded = apps => {
     allApps = apps;
     syncOpenMarkdownApps();
     render();
-    const total = apps.reduce((s,a) => s+(a.sizeBytes||0), 0);
-    storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
+    refreshSidebarSummary();
     setStatus(t('loaded', { count:libraryFileCount ?? apps.length }), false);
     registryValidationUsesCache = false;
     scheduleVisibleThumbnails();
@@ -682,11 +788,12 @@ window._onLocalAppsChanged = apps => {
     folderFileCounts.clear();
     requestedFolderStatistics.clear();
     libraryFileCount = null;
+    libraryFolderCount = null;
+    libraryTotalBytes = null;
     allApps = apps;
     syncOpenMarkdownApps();
     render();
-    const total = allApps.reduce((sum, app) => sum + (app.sizeBytes || 0), 0);
-    storageDisp.textContent = t('storageUsed', { size:fmtSize(total) });
+    refreshSidebarSummary();
     scheduleVisibleThumbnails();
 };
 window._onFolderLoadState = (path, loading) => {
@@ -2268,9 +2375,20 @@ function requestCancelTransfers() {
 
 document.addEventListener('DOMContentLoaded', () => {
     initIcons();
+    restoreSidebarState();
     syncMotionPreference();
     window.addEventListener('resize', layoutAllPdfTextLayers);
     applyI18n();
+
+    $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
+    $('btn-sidebar-new').addEventListener('click', e => { e.stopPropagation(); toggleSidebarNewMenu(); });
+    $('sidebar-new-folder').addEventListener('click', () => { closeSidebarNewMenu(); openFolderModal(); });
+    $('sidebar-upload').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startUpload(); });
+    $('sidebar-upload-folder').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startFolderUpload(); });
+    $('sidebar-files').addEventListener('click', showFilesWorkspace);
+    $('sidebar-transfers').addEventListener('click', showTransfers);
+    $('sidebar-settings').addEventListener('click', openSettings);
+    document.addEventListener('click', e => { if (!e.target.closest('.sidebar-create')) closeSidebarNewMenu(); });
 
     $('btn-upload').addEventListener('click',        () => window.bridge.startUpload());
     $('btn-upload-folder').addEventListener('click', () => window.bridge.startFolderUpload());
@@ -2392,7 +2510,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('preview-zoom-reset').addEventListener('click', () => { if (activeImgWrap) activeImgWrap._zoomReset(); });
 
     // Settings
-    $('btn-settings').addEventListener('click',    openSettings);
+    $('btn-settings')?.addEventListener('click',   openSettings);
     $('settings-close').addEventListener('click',  closeSettings);
     settingsOverlay.addEventListener('click',      closeSettings);
     if ($('btn-save-settings')) $('btn-save-settings').addEventListener('click', saveSettings);
