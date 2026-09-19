@@ -208,6 +208,7 @@ public sealed class AppRegistry
 
     public async Task<List<AppEntry>> LoadFolderTreeAsync(
         AppEntry folder,
+        bool allowOrphanThread = false,
         CancellationToken cancellationToken = default)
     {
         if (folder.Type != "folder" || string.IsNullOrWhiteSpace(folder.FolderId))
@@ -216,9 +217,10 @@ public sealed class AppRegistry
         }
 
         var result = new List<AppEntry>();
-        async Task VisitAsync(string folderId, string path)
+        async Task VisitAsync(AppEntry current)
         {
-            var children = await RefreshFolderAsync(folderId, path, cancellationToken);
+            var path = PathRules.ChildPath(current);
+            var children = await LoadFolderTreeChildrenAsync(current, path, allowOrphanThread, cancellationToken);
             foreach (var child in children)
             {
                 result.Add(child);
@@ -226,12 +228,41 @@ public sealed class AppRegistry
 
             foreach (var child in children.Where(child => child.Type == "folder" && !string.IsNullOrWhiteSpace(child.FolderId)))
             {
-                await VisitAsync(child.FolderId, PathRules.ChildPath(child));
+                await VisitAsync(child);
             }
         }
 
-        await VisitAsync(folder.FolderId, PathRules.ChildPath(folder));
+        await VisitAsync(folder);
         return result;
+    }
+
+    private async Task<List<AppEntry>> LoadFolderTreeChildrenAsync(
+        AppEntry folder,
+        string folderPath,
+        bool allowOrphanThread,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await GetMappingAsync(folder.FolderId, cancellationToken);
+            return await RefreshFolderAsync(folder.FolderId, folderPath, cancellationToken);
+        }
+        catch (InvalidOperationException ex) when (
+            allowOrphanThread &&
+            TryGetFolderIndexThreadId(folder, out var threadId))
+        {
+            // A folder metadata still carries its index thread when its names mapping was lost.
+            // Use that thread only for deletion so the visible orphan can be removed safely.
+            AppLogger.Error("Registry.DeleteOrphanFolder", ex, folder.FolderId);
+            var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+            var messages = await _discord.GetMessagesInParallelAsync(threadId, workers, cancellationToken);
+            var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+            var entries = _metadata.ToFolderEntries(envelopes, folder.FolderId, folderPath, MappingSnapshot());
+            NormalizeFolderEntries(entries, folder.FolderId, folderPath);
+            RecordDescriptors(entries);
+            _store.CacheFolderEntries(folder.FolderId, entries);
+            return entries;
+        }
     }
 
     public async Task<string> AddEntryAsync(
@@ -495,11 +526,11 @@ public sealed class AppRegistry
         bool synchronizeSerials = true)
     {
         var folderMapping = entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)
-            ? await GetMappingAsync(entry.FolderId, cancellationToken)
+            ? await GetFolderMappingForDeletionAsync(entry.FolderId, entry, cancellationToken)
             : null;
 
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
-        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        var parent = await GetFolderMappingForDeletionAsync(parentFolderId, null, cancellationToken);
         await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken);
         try
         {
@@ -525,8 +556,16 @@ public sealed class AppRegistry
         if (folderMapping != null)
         {
             await _serials.DeleteFolderAsync(folderMapping, cancellationToken);
-            await _discord.DeleteMessageAsync(_settings.NamesChannelId, folderMapping.NamesMessageId, cancellationToken);
-            await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(folderMapping.NamesMessageId))
+            {
+                await _discord.DeleteMessageAsync(_settings.NamesChannelId, folderMapping.NamesMessageId, cancellationToken);
+            }
+
+            if (!string.IsNullOrWhiteSpace(folderMapping.ThreadId))
+            {
+                await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken);
+            }
+
             _mappings.TryRemove(entry.FolderId, out _);
             _descriptors.TryRemove(entry.FolderId, out _);
             _store.DeleteFolderIndexMapping(entry.FolderId);
@@ -738,6 +777,33 @@ public sealed class AppRegistry
         }
 
         throw new InvalidOperationException($"O índice da pasta {normalizedFolderId} não está registrado no canal names.");
+    }
+
+    private async Task<FolderIndexMapping> GetFolderMappingForDeletionAsync(
+        string folderId,
+        AppEntry? fallbackFolder,
+        CancellationToken cancellationToken)
+    {
+        var normalizedFolderId = NormalizeFolderId(folderId);
+        try
+        {
+            return await GetMappingAsync(normalizedFolderId, cancellationToken);
+        }
+        catch (InvalidOperationException) when (
+            TryGetFolderIndexThreadId(
+                fallbackFolder ?? _store.LoadCachedFolderEntry(normalizedFolderId),
+                out var threadId))
+        {
+            return new FolderIndexMapping(normalizedFolderId, threadId, "");
+        }
+    }
+
+    private static bool TryGetFolderIndexThreadId(AppEntry? folder, out string threadId)
+    {
+        threadId = folder?.ThreadId ?? "";
+        return folder?.Type == "folder" &&
+               !string.IsNullOrWhiteSpace(threadId) &&
+               !threadId.StartsWith("folder_", StringComparison.Ordinal);
     }
 
     private async Task<FolderIndexMapping> EnsureRootIndexAsync(CancellationToken cancellationToken)

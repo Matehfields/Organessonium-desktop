@@ -3140,7 +3140,7 @@ public sealed class AppController : IAsyncDisposable
             var folderPath = entry != null ? PathRules.ChildPath(entry) : PathRules.Normalize(_currentPath == "/" ? "/" + folderName : _currentPath + "/" + folderName);
             var toDownload = entry == null
                 ? []
-                : (await Registry().LoadFolderTreeAsync(entry))
+                : (await Registry().LoadFolderTreeAsync(entry, allowOrphanThread: false))
                     .Where(a => a.Type != "folder")
                     .ToList();
             if (toDownload.Count == 0)
@@ -3343,7 +3343,7 @@ public sealed class AppController : IAsyncDisposable
     {
         foreach (var folder in selected.Where(IsFolderEntry).ToList())
         {
-            var descendants = await registry.LoadFolderTreeAsync(folder);
+            var descendants = await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true);
             foreach (var descendant in descendants)
             {
                 if (!all.Any(existing => EntryCacheKey(existing).Equals(EntryCacheKey(descendant), StringComparison.OrdinalIgnoreCase)))
