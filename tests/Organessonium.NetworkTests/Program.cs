@@ -27,6 +27,7 @@ internal static class Program
         ("logoutDataCleanupKeepsRuntimeFolders", LogoutDataCleanupKeepsRuntimeFoldersAsync),
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
+        ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
@@ -572,6 +573,20 @@ internal static class Program
             : TestOutcome.Fail("o envelope do canal serial não correspondeu ao padrão existente"));
     }
 
+    private static async Task<TestOutcome> ActiveThreadsUseGuildRouteAsync()
+    {
+        using var handler = new ActiveThreadsHandler();
+        using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+        var threads = await discord.GetActiveThreadsAsync("folders-forum");
+        var valid = handler.UsedGuildRoute &&
+                    threads.Count == 1 &&
+                    threads[0].Id == "folder-thread" &&
+                    threads[0].ParentId == "folders-forum";
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("a listagem de threads ativas não consultou a rota do servidor ou incluiu outro fórum");
+    }
+
     private static async Task<TestOutcome> ParallelMessageIndexUsesConcurrentWindowsAsync()
     {
         const ulong channelId = 4_000_000_000_000_000_000;
@@ -671,6 +686,43 @@ internal static class Program
         public void WriteEncryptionSecret(string key, string value)
         {
             _values[key] = value;
+        }
+    }
+
+    private sealed class ActiveThreadsHandler : HttpMessageHandler
+    {
+        public bool UsedGuildRoute { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri?.AbsolutePath ?? "";
+            if (path.EndsWith("/channels/folders-forum", StringComparison.Ordinal))
+            {
+                return Task.FromResult(JsonResponse("""{"id":"folders-forum","guild_id":"guild-id","type":15}"""));
+            }
+
+            if (path.EndsWith("/guilds/guild-id/threads/active", StringComparison.Ordinal))
+            {
+                UsedGuildRoute = true;
+                return Task.FromResult(JsonResponse("""
+                    {"threads":[
+                        {"id":"folder-thread","parent_id":"folders-forum","type":11},
+                        {"id":"other-thread","parent_id":"files-forum","type":11}
+                    ]}
+                    """));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private static HttpResponseMessage JsonResponse(string json)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
         }
     }
 

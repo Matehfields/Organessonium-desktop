@@ -629,39 +629,57 @@ public sealed class AppRegistry
 
         var mapping = await GetMappingAsync(folderId, cancellationToken);
         var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
-        if (serial == null)
+        if (serial != null)
         {
-            return null;
+            long count = serial.Children.LongCount(child => !child.IsFolder);
+            foreach (var child in serial.Children.Where(child => child.IsFolder))
+            {
+                if (string.IsNullOrWhiteSpace(child.Id))
+                {
+                    return null;
+                }
+
+                FolderIndexMapping childMapping;
+                try
+                {
+                    childMapping = await GetMappingAsync(child.Id, cancellationToken);
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+
+                var nested = await CountFolderFilesAsync(childMapping.FolderId, visitedFolderIds, cancellationToken);
+                if (!nested.HasValue)
+                {
+                    return null;
+                }
+
+                count += nested.Value;
+            }
+
+            return count;
         }
 
-        long count = serial.Children.LongCount(child => !child.IsFolder);
-        foreach (var child in serial.Children.Where(child => child.IsFolder))
+        var cachedEntries = _store.LoadCachedEntriesForFolder(folderId);
+        long cachedCount = cachedEntries.LongCount(entry => entry.Type != "folder");
+        foreach (var child in cachedEntries.Where(entry => entry.Type == "folder"))
         {
-            if (string.IsNullOrWhiteSpace(child.Id))
+            if (string.IsNullOrWhiteSpace(child.FolderId))
             {
                 return null;
             }
 
-            FolderIndexMapping childMapping;
-            try
-            {
-                childMapping = await GetMappingAsync(child.Id, cancellationToken);
-            }
-            catch (InvalidOperationException)
-            {
-                return null;
-            }
-
-            var nested = await CountFolderFilesAsync(childMapping.FolderId, visitedFolderIds, cancellationToken);
+            var nested = await CountFolderFilesAsync(child.FolderId, visitedFolderIds, cancellationToken);
             if (!nested.HasValue)
             {
                 return null;
             }
 
-            count += nested.Value;
+            cachedCount += nested.Value;
         }
 
-        return count;
+        return cachedCount;
     }
 
     private async Task<bool> ArchiveFolderThreadAsync(

@@ -2253,7 +2253,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     $('btn-upload').addEventListener('click',        () => window.bridge.startUpload());
     $('btn-upload-folder').addEventListener('click', () => window.bridge.startFolderUpload());
-    $('btn-refresh').addEventListener('click',       () => { setStatus('Atualizando...', true); window.bridge.loadApps(); });
+    $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
     $('btn-grid').addEventListener('click', () => setView('grid'));
     $('btn-list').addEventListener('click', () => setView('list'));
     $('search-input').addEventListener('input', e => { searchQuery = e.target.value.toLowerCase(); render(); });
@@ -2336,7 +2336,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('ctx-new-folder').addEventListener('click', () => { hideCtx(); openFolderModal(); });
     $('ctx-upload').addEventListener('click', () => { hideCtx(); window.bridge.startUpload(); });
     $('ctx-upload-folder').addEventListener('click', () => { hideCtx(); window.bridge.startFolderUpload(); });
-    $('ctx-refresh').addEventListener('click', () => { hideCtx(); setStatus(t('loading'), true); window.bridge.loadApps(); });
+    $('ctx-refresh').addEventListener('click', () => { hideCtx(); refreshCurrentFolder(); });
     $('ctx-grid').addEventListener('click', () => { hideCtx(); setView('grid'); });
     $('ctx-list').addEventListener('click', () => { hideCtx(); setView('list'); });
     $('ctx-clear').addEventListener('click', () => { hideCtx(); clearSelection(); });
@@ -4638,11 +4638,24 @@ function navigate(path, addHistory = true) {
     if (addHistory && path !== currentPath) { historyBack.push(currentPath); historyForward = []; }
     currentPath = path; searchQuery = ''; $('search-input').value = '';
     folderLoadingPath = path;
-    const folder = path === '/'
-        ? null
-        : allApps.find(app => isFolderApp(app) && folderPathForApp(app) === path);
-    window.bridge.setCurrentPath(path, path === '/' ? 'root' : (folder && folder.folderId) || '');
+    const folderIds = path === '/'
+        ? []
+        : allApps
+            .filter(app => isFolderApp(app) && folderPathForApp(app) === path && app.folderId)
+            .map(app => app.folderId);
+    window.bridge.setCurrentPath(path, path === '/' ? 'root' : JSON.stringify(folderIds));
     updateNavButtons(); render(); requestVisibleThumbnails();
+}
+
+function refreshCurrentFolder() {
+    setStatus(t('loading'), true);
+    folderFileCounts.clear();
+    requestedFolderStatistics.clear();
+    if (window.bridge && typeof window.bridge.refreshCurrentFolder === 'function') {
+        window.bridge.refreshCurrentFolder();
+        return;
+    }
+    window.bridge.loadApps();
 }
 function goBack()    { if (!historyBack.length) return;    historyForward.push(currentPath); navigate(historyBack.pop(), false); }
 function goForward() { if (!historyForward.length) return; historyBack.push(currentPath);    navigate(historyForward.pop(), false); }
@@ -5508,11 +5521,15 @@ function makeFileCard(app) {
 
 function makeDriveFolderCard(name) {
     const fp = currentPath==='/' ? '/' + name : currentPath + '/' + name;
-    const explicit = allApps.find(a => a.type === 'folder' && (a.path||'/') === currentPath && a.name === name);
+    const explicitFolders = allApps.filter(a => a.type === 'folder' && (a.path||'/') === currentPath && a.name === name);
+    const explicit = explicitFolders[0];
     const loadedCount = allApps.filter(a => a.type !== 'folder' && ((a.path||'/') === fp || (a.path||'/').startsWith(fp + '/'))).length;
-    const count = explicit && explicit.folderId
-        ? (folderFileCounts.has(explicit.folderId) ? folderFileCounts.get(explicit.folderId) : '...')
-        : loadedCount;
+    const knownCounts = explicitFolders
+        .filter(folder => folder.folderId && folderFileCounts.has(folder.folderId))
+        .map(folder => folderFileCounts.get(folder.folderId));
+    const count = explicitFolders.length > 0 && knownCounts.length === explicitFolders.length
+        ? knownCounts.reduce((total, value) => total + value, 0)
+        : loadedCount > 0 ? loadedCount : '...';
     const folderObj = explicit || { name, threadId:'folder_implicit_' + name, type:'folder', path:currentPath, folderColor:TYPE_COLOR.folder };
     const color = folderObj.folderColor || TYPE_COLOR.folder;
     const card = document.createElement('div');

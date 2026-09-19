@@ -34,6 +34,7 @@ public sealed class AppController : IAsyncDisposable
     private const int PresentationMaxSlides = 80;
     private const long MarkdownInlineImageLimit = EncryptionService.MaximumPlaintextPayloadBytes;
     private sealed record FolderFileStatistic(string FolderId, long FileCount);
+    private sealed record FolderLoadResult(string FolderId, IReadOnlyList<AppEntry> Entries);
     private readonly Window _owner;
     private readonly SettingsStore _store;
     private WebMessageBridge _bridge;
@@ -167,6 +168,7 @@ public sealed class AppController : IAsyncDisposable
                 _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
+            case "refreshCurrentFolder": _ = RunAsync(RefreshCurrentFolderAsync); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -558,53 +560,149 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task LoadFolderAtPathAsync(string folderPath, string folderId)
+    private async Task RefreshCurrentFolderAsync()
+    {
+        var path = _currentPath;
+        var folderIds = FindLoadedFolderIdsAtPath(path);
+        await LoadFolderAtPathAsync(
+            path,
+            JsonSerializer.Serialize(folderIds, JsonOptions.Web),
+            refreshMappings: true);
+        if (path == _currentPath)
+        {
+            await PublishLibraryFileCountAsync(Registry());
+        }
+    }
+
+    private async Task LoadFolderAtPathAsync(
+        string folderPath,
+        string folderIdsJson,
+        bool refreshMappings = false)
     {
         var normalizedPath = PathRules.Normalize(folderPath);
-        var normalizedFolderId = string.IsNullOrWhiteSpace(folderId)
-            ? normalizedPath == "/"
-                ? AppRegistry.RootFolderId
-                : _loadedApps.FirstOrDefault(entry =>
-                    IsFolderEntry(entry) &&
-                    PathRules.ChildPath(entry).Equals(normalizedPath, StringComparison.OrdinalIgnoreCase))?.FolderId ?? ""
-            : folderId;
+        var folderIds = ParseFolderIds(folderIdsJson);
+        if (folderIds.Count == 0)
+        {
+            folderIds = FindLoadedFolderIdsAtPath(normalizedPath);
+        }
 
         var registry = Registry();
         try
         {
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
-            if (string.IsNullOrWhiteSpace(normalizedFolderId))
+            if (refreshMappings)
             {
-                normalizedFolderId = await registry.ResolveFolderIdByPathAsync(normalizedPath);
+                await registry.RefreshMappingsAsync();
             }
 
-            if (string.IsNullOrWhiteSpace(normalizedFolderId))
+            if (folderIds.Count == 0)
+            {
+                var resolved = await registry.ResolveFolderIdByPathAsync(normalizedPath);
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    folderIds = [resolved];
+                }
+            }
+
+            if (folderIds.Count == 0)
             {
                 return;
             }
 
-            var cached = await registry.LoadCachedFolderAsync(normalizedFolderId, normalizedPath);
-            ReplaceLoadedFolder(normalizedFolderId, cached);
-            await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-
-            try
+            var cached = await Task.WhenAll(folderIds.Select(folderId =>
+                LoadFolderResultAsync(registry, folderId, normalizedPath, refresh: false)));
+            ReplaceLoadedFolders(cached);
+            if (normalizedPath == _currentPath)
             {
-                var refreshed = await registry.RefreshFolderAsync(normalizedFolderId, normalizedPath);
-                ReplaceLoadedFolder(normalizedFolderId, refreshed);
                 await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
             }
-            catch (OperationCanceledException)
+
+            var refreshed = await Task.WhenAll(folderIds.Select(folderId =>
+                LoadFolderResultAsync(registry, folderId, normalizedPath, refresh: true)));
+            ReplaceLoadedFolders(refreshed);
+            if (normalizedPath == _currentPath)
             {
-                // A navigation request can be abandoned during app shutdown.
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Registry.FolderRefresh", ex, normalizedFolderId);
+                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
             }
         }
         finally
         {
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
+        }
+    }
+
+    private IReadOnlyList<string> FindLoadedFolderIdsAtPath(string path)
+    {
+        var normalizedPath = PathRules.Normalize(path);
+        if (normalizedPath == "/")
+        {
+            return [AppRegistry.RootFolderId];
+        }
+
+        return _loadedApps
+            .Where(entry => IsFolderEntry(entry) &&
+                            PathRules.ChildPath(entry).Equals(normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                            !string.IsNullOrWhiteSpace(entry.FolderId))
+            .Select(entry => entry.FolderId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IReadOnlyList<string> ParseFolderIds(string folderIdsJson)
+    {
+        if (string.IsNullOrWhiteSpace(folderIdsJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            var ids = JsonSerializer.Deserialize<List<string>>(folderIdsJson, JsonOptions.Web);
+            if (ids != null)
+            {
+                return ids
+                    .Where(id => !string.IsNullOrWhiteSpace(id) && id.Length <= 128)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+        }
+        catch (JsonException)
+        {
+            // Older WebView content sends one folderId rather than a JSON array.
+        }
+
+        return folderIdsJson.Length <= 128 ? [folderIdsJson] : [];
+    }
+
+    private async Task<FolderLoadResult?> LoadFolderResultAsync(
+        AppRegistry registry,
+        string folderId,
+        string folderPath,
+        bool refresh)
+    {
+        try
+        {
+            var entries = refresh
+                ? await registry.RefreshFolderAsync(folderId, folderPath)
+                : await registry.LoadCachedFolderAsync(folderId, folderPath);
+            return new FolderLoadResult(folderId, entries);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error(refresh ? "Registry.FolderRefresh" : "Registry.FolderCache", ex, folderId);
+            return null;
+        }
+    }
+
+    private void ReplaceLoadedFolders(IEnumerable<FolderLoadResult?> results)
+    {
+        foreach (var result in results.Where(result => result != null))
+        {
+            ReplaceLoadedFolder(result!.FolderId, result.Entries);
         }
     }
     private void MergeLoadedApps(IReadOnlyList<AppEntry> batch)

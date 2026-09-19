@@ -500,12 +500,20 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        var channel = await GetChannelAsync(channelId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(channel.GuildId))
+        {
+            return [];
+        }
+
         using var response = await SendAsync(
-            () => new HttpRequestMessage(HttpMethod.Get, $"channels/{channelId}/threads/active"),
+            () => new HttpRequestMessage(HttpMethod.Get, $"guilds/{channel.GuildId}/threads/active"),
             cancellationToken,
             onRateLimitWait);
         var result = await ReadJsonAsync<DiscordActiveThreadsDto>(response, cancellationToken);
-        return result.Threads;
+        return result.Threads
+            .Where(thread => string.Equals(thread.ParentId, channelId, StringComparison.Ordinal))
+            .ToList();
     }
 
     public async Task ArchiveThreadAsync(
