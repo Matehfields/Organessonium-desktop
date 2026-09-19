@@ -15,15 +15,24 @@ public sealed class SerialIndexService
     private readonly DirectoryInfo _cacheDirectory;
     private readonly FolderSerialCodec _codec = new();
     private readonly ConcurrentDictionary<string, FolderSerial> _loadedFolders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _verifiedRemoteSerialIds = new(StringComparer.OrdinalIgnoreCase);
 
     public SerialIndexService(
         DiscordApiClient discord,
         SettingsStore store,
         AppSettings settings)
+        : this(discord, settings, store.SerialCacheDirectory)
+    {
+    }
+
+    public SerialIndexService(
+        DiscordApiClient discord,
+        AppSettings settings,
+        DirectoryInfo cacheDirectory)
     {
         _discord = discord;
         _settings = settings;
-        _cacheDirectory = store.SerialCacheDirectory;
+        _cacheDirectory = cacheDirectory;
     }
 
     public Task<FolderSerial?> LoadCachedFolderAsync(string folderId, CancellationToken cancellationToken = default)
@@ -81,11 +90,19 @@ public sealed class SerialIndexService
 
             await WriteCachedAsync(mapping.FolderId, bytes, cancellationToken);
             _loadedFolders[mapping.FolderId] = serial;
+            _verifiedRemoteSerialIds[mapping.FolderId] = mapping.SerialMessageId;
             return serial;
         }
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (DiscordApiException ex) when ((int)ex.StatusCode == 404)
+        {
+            _verifiedRemoteSerialIds.TryRemove(mapping.FolderId, out _);
+            await InvalidateCachedFolderAsync(mapping.FolderId);
+            AppLogger.Error("Serial.LoadFolder", ex, mapping.FolderId);
+            return null;
         }
         catch (Exception ex)
         {
@@ -150,7 +167,10 @@ public sealed class SerialIndexService
     {
         var previous = await ReadCachedFolderAsync(serial.FolderId, cancellationToken);
         serial = PreserveFavorites(serial, previous);
-        if (previous != null && FolderSerialCodec.SameContent(previous, serial))
+        var requiresRemoteUpload = await RequiresRemoteUploadAsync(mapping, cancellationToken);
+        if (previous != null &&
+            FolderSerialCodec.SameContent(previous, serial) &&
+            !requiresRemoteUpload)
         {
             return mapping;
         }
@@ -161,6 +181,7 @@ public sealed class SerialIndexService
         _loadedFolders[serial.FolderId] = serial;
         if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
         {
+            _verifiedRemoteSerialIds.TryRemove(serial.FolderId, out _);
             return mapping with { SerialMessageId = "", SerialSha256 = "" };
         }
 
@@ -173,6 +194,7 @@ public sealed class SerialIndexService
                 SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash),
                 temporary,
                 cancellationToken);
+            _verifiedRemoteSerialIds[serial.FolderId] = message.Id;
             return mapping with { SerialMessageId = message.Id, SerialSha256 = hash };
         }
         finally
@@ -186,12 +208,10 @@ public sealed class SerialIndexService
         CancellationToken cancellationToken = default)
     {
         _loadedFolders.TryRemove(mapping.FolderId, out _);
+        _verifiedRemoteSerialIds.TryRemove(mapping.FolderId, out _);
         var file = CacheFile(mapping.FolderId);
         try { if (file.Exists) file.Delete(); } catch (Exception ex) { AppLogger.Error("Serial.DeleteCache", ex, file.FullName); }
-        if (!string.IsNullOrWhiteSpace(_settings.SerialChannelId) && !string.IsNullOrWhiteSpace(mapping.SerialMessageId))
-        {
-            await _discord.DeleteMessageAsync(_settings.SerialChannelId, mapping.SerialMessageId, cancellationToken);
-        }
+        await TryDeleteRemoteSerialAsync(mapping.SerialMessageId, cancellationToken: cancellationToken);
     }
 
     public Task InvalidateCachedFolderAsync(string folderId)
@@ -211,6 +231,49 @@ public sealed class SerialIndexService
         }
 
         return Task.CompletedTask;
+    }
+
+    private async Task<bool> RequiresRemoteUploadAsync(
+        FolderIndexMapping mapping,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(mapping.SerialMessageId))
+        {
+            return true;
+        }
+
+        if (_verifiedRemoteSerialIds.TryGetValue(mapping.FolderId, out var verifiedMessageId) &&
+            verifiedMessageId.Equals(mapping.SerialMessageId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            await _discord.GetMessageAsync(_settings.SerialChannelId, mapping.SerialMessageId, cancellationToken);
+            _verifiedRemoteSerialIds[mapping.FolderId] = mapping.SerialMessageId;
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (DiscordApiException ex) when ((int)ex.StatusCode == 404)
+        {
+            _verifiedRemoteSerialIds.TryRemove(mapping.FolderId, out _);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // A transient verification failure must not create a duplicate serial.
+            AppLogger.Error("Serial.VerifyRemote", ex, mapping.FolderId);
+            return false;
+        }
     }
 
     public async Task DeleteSupersededRemoteSerialAsync(

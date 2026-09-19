@@ -762,6 +762,18 @@ public sealed class AppController : IAsyncDisposable
             : _store.LoadCachedEntriesForFolder(AppRegistry.RootFolderId);
     }
 
+    private static void ReplaceLocalEntry(List<AppEntry> entries, AppEntry replacement)
+    {
+        var key = EntryCacheKey(replacement);
+        entries.RemoveAll(entry => EntryCacheKey(entry).Equals(key, StringComparison.OrdinalIgnoreCase));
+        entries.Add(replacement);
+    }
+
+    private static void TrackFolderSerial(ISet<string> folderIds, string? folderId)
+    {
+        folderIds.Add(string.IsNullOrWhiteSpace(folderId) ? AppRegistry.RootFolderId : folderId);
+    }
+
     private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries)
     {
         foreach (var entry in entries)
@@ -1575,10 +1587,16 @@ public sealed class AppController : IAsyncDisposable
             var all = CurrentLocalEntries();
             var folder = AppEntry.Folder(clean, _currentPath);
             folder.ParentFolderId = FolderIdForPath(all, _currentPath);
+            var requestedFolderId = folder.FolderId;
             await registry.AddEntryAsync(folder);
-            all.Add(folder);
+            ReplaceLocalEntry(all, folder);
             await PublishLocalRegistryAsync(registry, all);
-            await _bridge.CallAsync("_onStatus", "OK Pasta criada.", false);
+            await _bridge.CallAsync(
+                "_onStatus",
+                folder.FolderId.Equals(requestedFolderId, StringComparison.OrdinalIgnoreCase)
+                    ? "OK Pasta criada."
+                    : "OK A pasta já existe.",
+                false);
         }
         finally
         {
@@ -1770,15 +1788,23 @@ public sealed class AppController : IAsyncDisposable
         var skipped = 0;
         var registry = Registry();
         var all = CurrentLocalEntries();
+        var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var path in paths)
         {
             if (Directory.Exists(path))
             {
                 var dir = new DirectoryInfo(path);
-                var rootFolder = await CreateUploadFolderEntryAsync(registry, all, dir.Name, basePath);
+                var rootFolder = await CreateUploadFolderEntryAsync(registry, all, dir.Name, basePath, serialFolderIds);
                 folderCount++;
-                skipped += await CollectFolderUploadTasksAsync(registry, all, dir, PathRules.ChildPath(rootFolder), tasks, () => folderCount++);
+                skipped += await CollectFolderUploadTasksAsync(
+                    registry,
+                    all,
+                    dir,
+                    PathRules.ChildPath(rootFolder),
+                    tasks,
+                    serialFolderIds,
+                    () => folderCount++);
             }
             else if (File.Exists(path))
             {
@@ -1794,6 +1820,7 @@ public sealed class AppController : IAsyncDisposable
         {
             if (folderCount > 0)
             {
+                await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
                 await LoadAppsAsync();
                 await _bridge.CallAsync("_onStatus", "OK Pasta criada sem arquivos para enviar.", false);
             }
@@ -1810,11 +1837,12 @@ public sealed class AppController : IAsyncDisposable
         if (resolved.OverwriteEntries.Count > 0)
         {
             await _bridge.CallAsync("_onStatus", "Substituindo arquivo(s) existente(s)...", true);
-            await DeleteUploadConflictEntriesAsync(registry, resolved.OverwriteEntries);
+            await DeleteUploadConflictEntriesAsync(registry, resolved.OverwriteEntries, serialFolderIds);
         }
 
         if (tasks.Count == 0)
         {
+            await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
             await LoadAppsAsync();
             await _bridge.CallAsync("_onStatus", "OK Upload cancelado.", false);
             return;
@@ -1830,7 +1858,7 @@ public sealed class AppController : IAsyncDisposable
         var cancellationToken = BeginTransferOperation(opId);
         try
         {
-            await RunUploadQueueAsync(opId, tasks, all, cancellationToken);
+            await RunUploadQueueAsync(opId, tasks, all, serialFolderIds, cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -1839,7 +1867,15 @@ public sealed class AppController : IAsyncDisposable
         }
         finally
         {
-            EndTransferOperation(opId);
+            try
+            {
+                await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
+                await LoadAppsAsync();
+            }
+            finally
+            {
+                EndTransferOperation(opId);
+            }
         }
     }
 
@@ -1983,14 +2019,18 @@ public sealed class AppController : IAsyncDisposable
         return new UploadConflictResponse("skip", false);
     }
 
-    private async Task DeleteUploadConflictEntriesAsync(AppRegistry registry, IReadOnlyList<AppEntry> entries)
+    private async Task DeleteUploadConflictEntriesAsync(
+        AppRegistry registry,
+        IReadOnlyList<AppEntry> entries,
+        ISet<string> serialFolderIds)
     {
         foreach (var entry in entries)
         {
             try
             {
                 ClosePreview(entry.ThreadId);
-                await DeleteStoredEntryAsync(registry, entry);
+                await DeleteStoredEntryAsync(registry, entry, synchronizeSerials: false);
+                TrackFolderSerial(serialFolderIds, entry.ParentFolderId);
             }
             catch (Exception ex)
             {
@@ -2036,6 +2076,7 @@ public sealed class AppController : IAsyncDisposable
         string opId,
         List<UploadTask> tasks,
         List<AppEntry> allEntries,
+        ISet<string> serialFolderIds,
         CancellationToken cancellationToken)
     {
         var settings = _store.Load();
@@ -2089,7 +2130,8 @@ public sealed class AppController : IAsyncDisposable
                         {
                             var currentBytes = Interlocked.Add(ref uploadedBytes, Math.Max(0, bytes));
                             await OpsTransferMetricsAsync(opId, "upload", Volatile.Read(ref done), tasks.Count, currentBytes, totalBytes);
-                        });
+                        },
+                        deferSerialSynchronization: true);
                     uploadedEntries[index] = uploaded;
                     var completed = Interlocked.Increment(ref done);
                     await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
@@ -2123,10 +2165,17 @@ public sealed class AppController : IAsyncDisposable
             }
         });
 
-        await Task.WhenAll(workers);
-        foreach (var pair in uploadedEntries.OrderBy(pair => pair.Key))
+        try
         {
-            allEntries.Add(pair.Value);
+            await Task.WhenAll(workers);
+        }
+        finally
+        {
+            foreach (var pair in uploadedEntries.OrderBy(pair => pair.Key))
+            {
+                ReplaceLocalEntry(allEntries, pair.Value);
+                TrackFolderSerial(serialFolderIds, pair.Value.ParentFolderId);
+            }
         }
 
         var status = Volatile.Read(ref stoppedByApi) != 0
@@ -2138,7 +2187,6 @@ public sealed class AppController : IAsyncDisposable
                 ? $"{done}/{tasks.Count} concluídos, {failed} falharam"
                 : $"{done}/{tasks.Count} concluídos";
         await OpsUpdateAsync(opId, status, summary);
-        await LoadAppsAsync();
     }
 
     private static bool IsBlockingUploadApiError(Exception ex)
@@ -2185,7 +2233,8 @@ public sealed class AppController : IAsyncDisposable
         TransferState? existingTransferState = null,
         SemaphoreSlim? uploadGate = null,
         bool useBatchUi = false,
-        Func<long, Task>? onBytesUploaded = null)
+        Func<long, Task>? onBytesUploaded = null,
+        bool deferSerialSynchronization = false)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
         var sourceLength = file.Length;
@@ -2441,7 +2490,11 @@ public sealed class AppController : IAsyncDisposable
             entry.VideoPreviewMessageId = previewIds.VideoPreviewMessageId;
             entry.VideoPreviewChunkMessageIds = previewIds.VideoPreviewChunkMessageIds.ToList();
             entry.VideoPreviewSizeBytes = previewIds.VideoPreviewSizeBytes;
-            await registry.AddEntryAsync(entry, cancellationToken, ReportRateLimitWaitAsync);
+            await registry.AddEntryAsync(
+                entry,
+                cancellationToken,
+                ReportRateLimitWaitAsync,
+                synchronizeSerials: !deferSerialSynchronization);
             await ReportUploadItemProgressAsync(
                 opId,
                 fileIndex,
@@ -3315,13 +3368,15 @@ public sealed class AppController : IAsyncDisposable
         var deletedFiles = 0;
         var deletedFolders = 0;
         var failed = 0;
+        var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < plan.Files.Count; i++)
         {
             var file = plan.Files[i];
             await OpsProgressAsync(opId, Percent(i, progressTotal), DeleteProgressMessage("arquivo", i, fileTotal, file.Name));
             try
             {
-                await DeleteStoredEntryAsync(registry, file);
+                await DeleteStoredEntryAsync(registry, file, synchronizeSerials: false);
+                TrackFolderSerial(serialFolderIds, file.ParentFolderId);
                 deletedFiles++;
                 all.Remove(file);
             }
@@ -3355,7 +3410,8 @@ public sealed class AppController : IAsyncDisposable
 
             try
             {
-                await registry.DeleteEntryAsync(folder);
+                await DeleteStoredEntryAsync(registry, folder, synchronizeSerials: false);
+                TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
                 deletedFolders++;
                 all.Remove(folder);
             }
@@ -3375,6 +3431,7 @@ public sealed class AppController : IAsyncDisposable
         var visibleTotal = fileTotal > 0 ? fileTotal : plan.Folders.Count;
         var visibleDeleted = fileTotal > 0 ? deletedFiles : deletedFolders;
         var visibleKind = fileTotal > 0 ? "arquivo(s)" : "pasta(s)";
+        await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
         await OpsUpdateAsync(opId, status, failed == 0
             ? $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)"
             : $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s), {failed} falharam");
@@ -3387,7 +3444,10 @@ public sealed class AppController : IAsyncDisposable
         await DeleteStoredEntryAsync(registry, entry);
     }
 
-    private async Task DeleteStoredEntryAsync(AppRegistry registry, AppEntry entry)
+    private async Task DeleteStoredEntryAsync(
+        AppRegistry registry,
+        AppEntry entry,
+        bool synchronizeSerials = true)
     {
         var isFolder = entry.Type == "folder" || entry.ThreadId.StartsWith("folder_", StringComparison.Ordinal);
         if (!isFolder && !string.IsNullOrWhiteSpace(entry.ThreadId))
@@ -3396,7 +3456,7 @@ public sealed class AppController : IAsyncDisposable
             ThumbnailCache.Remove(entry.ThreadId);
         }
 
-        await registry.DeleteEntryAsync(entry);
+        await registry.DeleteEntryAsync(entry, synchronizeSerials: synchronizeSerials);
     }
 
     private static DeletePlan BuildDeletePlan(List<AppEntry> all, IReadOnlyList<AppEntry> selected)
@@ -3463,7 +3523,9 @@ public sealed class AppController : IAsyncDisposable
 
         return entries
             .Where(entry => IsFolderEntry(entry))
-            .FirstOrDefault(entry => PathRules.ChildPath(entry).Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            .Where(entry => PathRules.ChildPath(entry).Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(entry => entry.MetadataMessageId, StringComparer.Ordinal)
+            .FirstOrDefault()
             ?.FolderId;
     }
 
@@ -4343,6 +4405,7 @@ public sealed class AppController : IAsyncDisposable
         var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
         var throttle = new UiThrottle();
         var resumed = 0;
+        var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < states.Count; i++)
         {
@@ -4375,8 +4438,10 @@ public sealed class AppController : IAsyncDisposable
                         settings,
                         throttle,
                         cancellationToken,
-                        state);
-                    all.Add(uploaded);
+                        state,
+                        deferSerialSynchronization: true);
+                    ReplaceLocalEntry(all, uploaded);
+                    TrackFolderSerial(serialFolderIds, uploaded.ParentFolderId);
                     resumed++;
                     await OpsUpdateAsync(opId, "done", "Concluído");
                     continue;
@@ -4445,6 +4510,7 @@ public sealed class AppController : IAsyncDisposable
             }
         }
 
+        await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
         await LoadAppsAsync();
         await _bridge.CallAsync("_onStatus", $"{resumed}/{states.Count} transferência(s) retomada(s).", false);
     }
@@ -4659,12 +4725,15 @@ public sealed class AppController : IAsyncDisposable
         AppRegistry registry,
         List<AppEntry> all,
         string name,
-        string parentPath)
+        string parentPath,
+        ISet<string> serialFolderIds)
     {
         var folder = AppEntry.Folder(PathRules.CleanFileName(name), parentPath);
         folder.ParentFolderId = FolderIdForPath(all, parentPath);
-        await registry.AddEntryAsync(folder);
-        all.Add(folder);
+        await registry.AddEntryAsync(folder, synchronizeSerials: false);
+        ReplaceLocalEntry(all, folder);
+        TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
+        TrackFolderSerial(serialFolderIds, folder.FolderId);
         return folder;
     }
 
@@ -4674,6 +4743,7 @@ public sealed class AppController : IAsyncDisposable
         DirectoryInfo folder,
         string folderVirtualPath,
         List<UploadTask> output,
+        ISet<string> serialFolderIds,
         Action onFolderCreated)
     {
         var skipped = 0;
@@ -4711,7 +4781,12 @@ public sealed class AppController : IAsyncDisposable
 
             foreach (var child in dirs)
             {
-                var childFolder = await CreateUploadFolderEntryAsync(registry, all, child.Name, virtualPath);
+                var childFolder = await CreateUploadFolderEntryAsync(
+                    registry,
+                    all,
+                    child.Name,
+                    virtualPath,
+                    serialFolderIds);
                 onFolderCreated();
                 await WalkAsync(child, PathRules.ChildPath(childFolder));
             }

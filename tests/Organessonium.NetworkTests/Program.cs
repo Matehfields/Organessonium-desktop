@@ -27,6 +27,7 @@ internal static class Program
         ("logoutDataCleanupKeepsRuntimeFolders", LogoutDataCleanupKeepsRuntimeFoldersAsync),
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
+        ("staleSerialMappingRepublishesCachedSerial", StaleSerialMappingRepublishesCachedSerialAsync),
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
@@ -573,6 +574,47 @@ internal static class Program
             : TestOutcome.Fail("o envelope do canal serial não correspondeu ao padrão existente"));
     }
 
+    private static async Task<TestOutcome> StaleSerialMappingRepublishesCachedSerialAsync()
+    {
+        var cache = Directory.CreateTempSubdirectory("organessonium_serial_republish_test_");
+        try
+        {
+            using var handler = new SerialRepublishHandler();
+            using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+            var service = new SerialIndexService(
+                discord,
+                new AppSettings { SerialChannelId = "serial-channel" },
+                cache);
+            var serial = new FolderSerial
+            {
+                FolderId = "folder-id",
+                ParentFolderId = "root",
+                FolderName = "Documentos",
+                GeneratedAt = DateTimeOffset.Parse("2026-09-19T12:00:00Z"),
+                Aggregate = new FolderSerialAggregate(),
+                Children = []
+            };
+
+            var initial = await service.SaveFolderAsync(
+                serial,
+                new FolderIndexMapping("folder-id", "folder-thread", "names-message"));
+            var repaired = await service.SaveFolderAsync(
+                serial,
+                initial with { SerialMessageId = "missing-message" });
+            var valid = handler.Uploads == 2 &&
+                        handler.MissingMessageChecks == 1 &&
+                        repaired.SerialMessageId == "serial-message-2";
+            return valid
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail(
+                    $"o serial em cache não foi republicado: uploads={handler.Uploads}, verificações={handler.MissingMessageChecks}, id={repaired.SerialMessageId}");
+        }
+        finally
+        {
+            try { cache.Delete(true); } catch { }
+        }
+    }
+
     private static async Task<TestOutcome> ActiveThreadsUseGuildRouteAsync()
     {
         using var handler = new ActiveThreadsHandler();
@@ -712,6 +754,43 @@ internal static class Program
                         {"id":"other-thread","parent_id":"files-forum","type":11}
                     ]}
                     """));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private static HttpResponseMessage JsonResponse(string json)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class SerialRepublishHandler : HttpMessageHandler
+    {
+        public int Uploads { get; private set; }
+        public int MissingMessageChecks { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri?.AbsolutePath ?? "";
+            if (request.Method == HttpMethod.Get &&
+                path.EndsWith("/channels/serial-channel/messages/missing-message", StringComparison.Ordinal))
+            {
+                MissingMessageChecks++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            }
+
+            if (request.Method == HttpMethod.Post &&
+                path.EndsWith("/channels/serial-channel/messages", StringComparison.Ordinal))
+            {
+                Uploads++;
+                return Task.FromResult(JsonResponse(
+                    $$"""{"id":"serial-message-{{Uploads}}","attachments":[]}"""));
             }
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
