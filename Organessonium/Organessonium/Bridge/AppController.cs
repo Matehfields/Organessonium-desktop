@@ -1029,9 +1029,10 @@ public sealed class AppController : IAsyncDisposable
         {
             return;
         }
+        var visibleIdSet = visibleIds.ToHashSet(StringComparer.Ordinal);
 
         var path = _currentPath;
-        var requestKey = path + "|" + string.Join(",", visibleIds.Order(StringComparer.Ordinal));
+        var requestKey = path + "|" + string.Join(",", visibleIds);
         CancellationTokenSource request;
         CancellationTokenSource? previous;
         lock (_thumbnailRequestSync)
@@ -1053,8 +1054,13 @@ public sealed class AppController : IAsyncDisposable
         try
         {
             await Task.Delay(80, cancellationToken);
-            var apps = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
-                .Where(app => visibleIds.Contains(app.ThreadId))
+            var appsByThread = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
+                .Where(app => visibleIdSet.Contains(app.ThreadId))
+                .GroupBy(app => app.ThreadId, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+            var apps = visibleIds
+                .Where(appsByThread.ContainsKey)
+                .Select(threadId => appsByThread[threadId])
                 .ToList();
             var downloader = Downloader();
             using var http = NetworkConfig.Current.CreateClient();
@@ -1063,7 +1069,7 @@ public sealed class AppController : IAsyncDisposable
                 new ParallelOptions
                 {
                     CancellationToken = cancellationToken,
-                    MaxDegreeOfParallelism = Math.Clamp(settings.DownloadThreads, 1, 4)
+                    MaxDegreeOfParallelism = 1
                 },
                 async (app, token) =>
                 {
@@ -1096,7 +1102,7 @@ public sealed class AppController : IAsyncDisposable
                         var cached = ThumbnailCache.Get(app.ThreadId);
                         if (cached != null)
                         {
-                            await DeliverThumbnailAsync(app.ThreadId, cached, path, visibleIds, token);
+                            await DeliverThumbnailAsync(app.ThreadId, cached, path, visibleIdSet, token);
                             return;
                         }
 
@@ -1149,7 +1155,7 @@ public sealed class AppController : IAsyncDisposable
 
                         if (thumb != null)
                         {
-                            await DeliverThumbnailAsync(app.ThreadId, thumb, path, visibleIds, token);
+                            await DeliverThumbnailAsync(app.ThreadId, thumb, path, visibleIdSet, token);
                         }
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -1230,7 +1236,7 @@ public sealed class AppController : IAsyncDisposable
             _thumbnailDeliveryGate.Release();
         }
     }
-    private static HashSet<string> ParseVisibleThumbnailIds(string visibleIdsJson)
+    private static List<string> ParseVisibleThumbnailIds(string visibleIdsJson)
     {
         if (string.IsNullOrWhiteSpace(visibleIdsJson))
         {
@@ -1243,7 +1249,7 @@ public sealed class AppController : IAsyncDisposable
                 .Where(LooksLikeDiscordId)
                 .Distinct(StringComparer.Ordinal)
                 .Take(120)
-                .ToHashSet(StringComparer.Ordinal) ?? [];
+                .ToList() ?? [];
         }
         catch
         {

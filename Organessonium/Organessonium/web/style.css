@@ -1277,7 +1277,7 @@ html[data-motion="reduced"] *{
 }
 .preview-topbar{
     display:flex;align-items:center;gap:10px;
-    padding:0 14px;height:52px;flex-shrink:0;
+    padding:0 calc(14px + var(--native-titlebar-right-inset)) 0 14px;height:52px;flex-shrink:0;
     background:#050505;border-bottom:1px solid rgba(255,255,255,.07);
 }
 .preview-filename{flex:1;font-size:13px;font-weight:600;color:#F2F2F2;

@@ -1293,9 +1293,10 @@ public sealed class AppRegistry
             return count;
         }
 
-        var cachedEntries = _store.LoadCachedEntriesForFolder(folderId);
-        long cachedCount = cachedEntries.LongCount(entry => entry.Type != "folder");
-        foreach (var child in cachedEntries.Where(entry => entry.Type == "folder"))
+        var descriptor = ResolveFolderDescriptor(folderId, "/");
+        var refreshedEntries = await RefreshFolderAsync(folderId, descriptor.Path, cancellationToken);
+        long refreshedCount = refreshedEntries.LongCount(entry => entry.Type != "folder");
+        foreach (var child in refreshedEntries.Where(entry => entry.Type == "folder"))
         {
             if (string.IsNullOrWhiteSpace(child.FolderId))
             {
@@ -1308,10 +1309,10 @@ public sealed class AppRegistry
                 return null;
             }
 
-            cachedCount += nested.Value;
+            refreshedCount += nested.Value;
         }
 
-        return cachedCount;
+        return refreshedCount;
     }
 
     private async Task<LibraryStatistics?> ReadLibraryStatisticsAsync(

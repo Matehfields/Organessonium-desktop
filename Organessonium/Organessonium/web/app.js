@@ -668,7 +668,7 @@ function toggleLanguageMenu() {
 
 function formatServerCount(value) {
     const count = Number(value);
-    if (!Number.isFinite(count) || count < 0) return '—';
+    if (!Number.isFinite(count) || count < 0) return '0';
     return new Intl.NumberFormat(resolveLanguage() === 'pt-BR' ? 'pt-BR' : 'en-US').format(Math.floor(count));
 }
 
@@ -676,11 +676,11 @@ function refreshSidebarSummary() {
     const hasFiles = Number.isFinite(libraryFileCount);
     const hasFolders = Number.isFinite(libraryFolderCount);
     const hasBytes = Number.isFinite(libraryTotalBytes);
-    if (storageDisp) storageDisp.textContent = hasBytes ? fmtSize(libraryTotalBytes) : '—';
+    if (storageDisp) storageDisp.textContent = hasBytes ? fmtSize(libraryTotalBytes) : fmtSize(0);
     if (serverItemCount) {
         serverItemCount.textContent = hasFiles && hasFolders
             ? formatServerCount(libraryFileCount + libraryFolderCount)
-            : '—';
+            : '0';
     }
 }
 
@@ -1055,7 +1055,10 @@ function resetThumbnailElement(el) {
 function requestVisibleThumbnails() {
     if (!settings.previewEnabled) return;
     if (!window.bridge || typeof window.bridge.loadVisibleThumbnails !== 'function') return;
-    const ids = [...visibleThumbnailIds].filter(id => !(window._thumbs && window._thumbs[id]));
+    const ids = Array.from(document.querySelectorAll('[data-thumb]'))
+        .map(element => element.dataset.thumb || '')
+        .filter((id, index, all) => id && all.indexOf(id) === index)
+        .filter(id => visibleThumbnailIds.has(id) && !(window._thumbs && window._thumbs[id]));
     if (!ids.length) return;
     window.bridge.loadVisibleThumbnails(JSON.stringify(ids));
 }
@@ -6602,7 +6605,7 @@ function fileIcon(t) {
         archive:'folder_zip',code:'code',generic:'insert_drive_file'}[t]||'insert_drive_file';
 }
 function fmtSize(b) {
-    if(!b||b<=0) return '—'; if(b<1024) return b+' B';
+    b=Number(b); if(!Number.isFinite(b)||b<=0) return '0 B'; if(b<1024) return b+' B';
     if(b<1048576) return (b/1024).toFixed(0)+' KB';
     if(b<1073741824) return (b/1048576).toFixed(1)+' MB';
     if(b<1099511627776) return (b/1073741824).toFixed(2)+' GB';
