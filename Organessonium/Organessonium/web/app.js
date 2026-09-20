@@ -2,7 +2,7 @@
 
 // ─── Estado ───────────────────────────────────────────────────────────────────
 let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
-let currentPath = '/', searchQuery = '';
+let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
 let ctxTarget = null;
 let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
@@ -77,6 +77,8 @@ const I18N = {
         sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
         sidebarItems:'Itens no servidor', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
+        filterType:'Tipo', filterModified:'Modificado', filterAll:'Todos', filterFolders:'Pastas', filterImages:'Imagens', filterVideos:'Vídeos', filterAudio:'Áudio', filterDocuments:'Documentos', filterArchives:'Arquivos compactados', filterOther:'Outros',
+        filterAnyDate:'Qualquer data', filterToday:'Hoje', filterLast7Days:'Últimos 7 dias', filterLast30Days:'Últimos 30 dias',
         sortNameAsc:'Nome A-Z', sortNameDesc:'Nome Z-A', sortSizeDesc:'Maior tamanho',
         sortSizeAsc:'Menor tamanho', sortDateDesc:'Mais recente', sortDateAsc:'Mais antigo',
         loading:'Carregando...', validatingServer:'Verificando alterações no servidor...', backgroundInProgress:'Em andamento...', creatingFolder:'Criando pasta...', waiting:'Aguardando...', transfers:'Transferências',
@@ -207,6 +209,8 @@ const I18N = {
         sidebarNew:'New', sidebarFiles:'Files', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
         sidebarItems:'Items on server', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
         sortName:'Name', sortSize:'Size', sortDate:'Date',
+        filterType:'Type', filterModified:'Modified', filterAll:'All', filterFolders:'Folders', filterImages:'Images', filterVideos:'Videos', filterAudio:'Audio', filterDocuments:'Documents', filterArchives:'Archives', filterOther:'Other',
+        filterAnyDate:'Any time', filterToday:'Today', filterLast7Days:'Last 7 days', filterLast30Days:'Last 30 days',
         sortNameAsc:'Name A-Z', sortNameDesc:'Name Z-A', sortSizeDesc:'Largest',
         sortSizeAsc:'Smallest', sortDateDesc:'Newest', sortDateAsc:'Oldest',
         loading:'Loading...', validatingServer:'Checking for server changes...', backgroundInProgress:'In progress...', creatingFolder:'Creating folder...', waiting:'Waiting...', transfers:'Transfers',
@@ -337,13 +341,13 @@ const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
     serverItemCount = $('server-item-count'),
     opsPanel    = $('ops-panel'),    opsList        = $('ops-list'),
-    sortMenu    = $('sort-menu'),    ctxMenu        = $('ctx-menu'),
+    sortMenu    = $('sort-menu'),    typeFilterMenu = $('type-filter-menu'), dateFilterMenu = $('date-filter-menu'), ctxMenu = $('ctx-menu'),
     dragOverlay = $('drag-overlay'),
     settingsPanel=$('settings-panel'), settingsOverlay=$('settings-overlay'),
     folderOverlay=$('folder-overlay'), folderInput   =$('folder-name-input'),
     confirmOverlay=$('confirm-overlay'), uploadConflictOverlay=$('upload-conflict-overlay'),
     moveOverlay = $('move-overlay'), moveTree       = $('move-tree'),
-    pathCrumbs  = $('path-crumbs'),
+    pathCrumbs  = $('path-crumbs'), currentFolderTitle = $('current-folder-title'),
     btnBack     = $('btn-back'),     btnForward     = $('btn-forward'),
     previewOverlay=$('preview-overlay');
 
@@ -399,6 +403,29 @@ function sortLabel(mode) {
     return t(SORT_LABEL_KEYS[mode] || 'sortName');
 }
 
+const TYPE_FILTER_LABEL_KEYS = {
+    all:'filterAll', folders:'filterFolders', images:'filterImages', videos:'filterVideos', audio:'filterAudio',
+    documents:'filterDocuments', archives:'filterArchives', other:'filterOther'
+};
+const DATE_FILTER_LABEL_KEYS = { all:'filterAnyDate', today:'filterToday', '7':'filterLast7Days', '30':'filterLast30Days' };
+
+function updateFilterLabels() {
+    const typeLabel = $('type-filter-label');
+    if (typeLabel) typeLabel.textContent = t(typeFilter === 'all' ? 'filterType' : (TYPE_FILTER_LABEL_KEYS[typeFilter] || 'filterType'));
+    const dateLabel = $('date-filter-label');
+    if (dateLabel) dateLabel.textContent = t(dateFilter === 'all' ? 'filterModified' : (DATE_FILTER_LABEL_KEYS[dateFilter] || 'filterModified'));
+    document.querySelectorAll('#type-filter-menu [data-type-filter]').forEach(btn => {
+        const key = TYPE_FILTER_LABEL_KEYS[btn.dataset.typeFilter];
+        if (key) btn.textContent = t(key);
+        btn.classList.toggle('active', btn.dataset.typeFilter === typeFilter);
+    });
+    document.querySelectorAll('#date-filter-menu [data-date-filter]').forEach(btn => {
+        const key = DATE_FILTER_LABEL_KEYS[btn.dataset.dateFilter];
+        if (key) btn.textContent = t(key);
+        btn.classList.toggle('active', btn.dataset.dateFilter === dateFilter);
+    });
+}
+
 function setText(id, key) {
     const el = $(id);
     if (el) el.textContent = t(key);
@@ -430,13 +457,10 @@ function applyI18n() {
     setA11y('btn-grid', 'gridView');
     setA11y('btn-list', 'listView');
     setA11y('btn-refresh', 'refresh');
-    setA11y('btn-new-folder', 'newFolder');
-    setA11y('btn-upload-folder', 'uploadFolder');
     setA11y('btn-settings', 'settings');
     setA11y('background-activity-close', 'close');
-    $('btn-upload').lastChild.nodeValue = ' ' + t('upload');
-    setText('sidebar-new-text', 'sidebarNew');
-    setA11y('btn-sidebar-new', 'sidebarNew');
+    setText('sidebar-new-text', 'upload');
+    setA11y('btn-sidebar-new', 'upload');
     setText('sidebar-new-folder-text', 'newFolder');
     setText('sidebar-upload-text', 'upload');
     setText('sidebar-upload-folder-text', 'uploadFolder');
@@ -448,6 +472,7 @@ function applyI18n() {
     setText('server-items-label', 'sidebarItems');
     setText('sidebar-settings-text', 'settings');
     setA11y('sidebar-settings', 'settings');
+    updateFilterLabels();
     $('sort-label').textContent = sortLabel(sortMode);
     setA11y('preview-zoom-out', 'zoomOut');
     setA11y('preview-zoom-in', 'zoomIn');
@@ -2444,8 +2469,6 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sidebar-settings').addEventListener('click', openSettings);
     document.addEventListener('click', e => { if (!e.target.closest('.sidebar-create')) closeSidebarNewMenu(); });
 
-    $('btn-upload').addEventListener('click',        () => window.bridge.startUpload());
-    $('btn-upload-folder').addEventListener('click', () => window.bridge.startFolderUpload());
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
     $('btn-grid').addEventListener('click', () => setView('grid'));
     $('btn-list').addEventListener('click', () => setView('list'));
@@ -2455,7 +2478,6 @@ document.addEventListener('DOMContentLoaded', () => {
     btnForward.addEventListener('click', goForward);
 
     // Nova pasta
-    $('btn-new-folder').addEventListener('click',  openFolderModal);
     $('folder-cancel').addEventListener('click',   closeFolderModal);
     $('folder-confirm').addEventListener('click',  confirmFolder);
     folderInput.addEventListener('keydown', e => { if (e.key==='Enter') confirmFolder(); if (e.key==='Escape') closeFolderModal(); });
@@ -2514,6 +2536,36 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.add('active');
             $('sort-label').textContent = sortLabel(sortMode);
             sortMenu.classList.add('hidden'); render();
+        });
+    });
+
+    // Filtros da pasta atual
+    $('btn-type-filter').addEventListener('click', e => {
+        e.stopPropagation();
+        typeFilterMenu.classList.toggle('hidden');
+        dateFilterMenu.classList.add('hidden');
+        sortMenu.classList.add('hidden');
+    });
+    $('btn-date-filter').addEventListener('click', e => {
+        e.stopPropagation();
+        dateFilterMenu.classList.toggle('hidden');
+        typeFilterMenu.classList.add('hidden');
+        sortMenu.classList.add('hidden');
+    });
+    typeFilterMenu.querySelectorAll('[data-type-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            typeFilter = btn.dataset.typeFilter || 'all';
+            updateFilterLabels();
+            typeFilterMenu.classList.add('hidden');
+            render();
+        });
+    });
+    dateFilterMenu.querySelectorAll('[data-date-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            dateFilter = btn.dataset.dateFilter || 'all';
+            updateFilterLabels();
+            dateFilterMenu.classList.add('hidden');
+            render();
         });
     });
 
@@ -2697,6 +2749,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.addEventListener('click', e => {
         if (!$('btn-sort').contains(e.target)) sortMenu.classList.add('hidden');
+        if (!$('btn-type-filter').contains(e.target) && !typeFilterMenu.contains(e.target)) typeFilterMenu.classList.add('hidden');
+        if (!$('btn-date-filter').contains(e.target) && !dateFilterMenu.contains(e.target)) dateFilterMenu.classList.add('hidden');
         if (!$('language-select').contains(e.target)) closeLanguageMenu();
         if (!ctxMenu.contains(e.target))       hideCtx();
     });
@@ -2778,7 +2832,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key==='Escape') {
             if (!previewOverlay.classList.contains('hidden')) { closePreview(); return; }
             if (selectedKeys.size) { clearSelection(); return; }
-            sortMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
+            sortMenu.classList.add('hidden'); typeFilterMenu.classList.add('hidden'); dateFilterMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
         }
         if (!previewOverlay.classList.contains('hidden')) {
             if (e.key==='ArrowLeft')  previewPrev();
@@ -5583,6 +5637,29 @@ function childFolders(apps, path) {
     return [...s].sort((a,b)=>a.localeCompare(b));
 }
 function filesAt(apps, path) { return apps.filter(a=>a.type!=='folder'&&(a.path||'/')=== path); }
+function matchesTypeFilter(app) {
+    if (typeFilter === 'all' || typeFilter === 'folders') return true;
+    const type = fileType(app && app.name);
+    if (typeFilter === 'images') return type === 'image';
+    if (typeFilter === 'videos') return type === 'video';
+    if (typeFilter === 'audio') return type === 'audio';
+    if (typeFilter === 'documents') return ['pdf','markdown','document','spreadsheet','presentation','code'].includes(type);
+    if (typeFilter === 'archives') return type === 'archive';
+    if (typeFilter === 'other') return !['image','video','audio','pdf','markdown','document','spreadsheet','presentation','code','archive'].includes(type);
+    return true;
+}
+function matchesDateFilter(app) {
+    if (dateFilter === 'all') return true;
+    const timestamp = Date.parse(String(app && app.uploadedAt || ''));
+    if (!Number.isFinite(timestamp)) return false;
+    const date = new Date(timestamp);
+    const now = new Date();
+    if (dateFilter === 'today') {
+        return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+    }
+    const days = Number(dateFilter);
+    return Number.isFinite(days) && timestamp >= Date.now() - days * 24 * 60 * 60 * 1000;
+}
 function sorted(arr) {
     const s=[...arr];
     switch(sortMode){
@@ -5598,9 +5675,10 @@ function sorted(arr) {
 // ─── Render ───────────────────────────────────────────────────────────────────
 function render() {
     renderPathCrumbs();
-    const folders=childFolders(allApps, currentPath);
-    let files=sorted(filesAt(allApps, currentPath));
+    const folders = typeFilter === 'all' || typeFilter === 'folders' ? childFolders(allApps, currentPath) : [];
+    let files = typeFilter === 'folders' ? [] : sorted(filesAt(allApps, currentPath));
     if (searchQuery) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
+    files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
     filesGrid.innerHTML=''; filesList.innerHTML='';
     const total=folders.length+files.length;
@@ -5643,6 +5721,11 @@ function render() {
 function renderPathCrumbs() {
     pathCrumbs.innerHTML='';
     const isRoot = currentPath === '/';
+    const segs = currentPath.split('/').filter(Boolean);
+    if (currentFolderTitle) {
+        currentFolderTitle.textContent = isRoot ? t('filesTab') : segs[segs.length - 1];
+        currentFolderTitle.title = currentFolderTitle.textContent;
+    }
     pathCrumbs.classList.toggle('empty', isRoot);
     if (isRoot) return;
     const root = document.createElement('button');
@@ -5651,7 +5734,6 @@ function renderPathCrumbs() {
     root.title = 'root';
     root.addEventListener('click', () => navigate('/'));
     pathCrumbs.appendChild(root);
-    const segs=currentPath.split('/').filter(Boolean);
     segs.forEach((seg,i)=>{
         const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
         pathCrumbs.appendChild(sep);

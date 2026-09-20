@@ -22,8 +22,8 @@
 
         <div class="sidebar-create">
             <button id="btn-sidebar-new" class="sidebar-new" type="button" aria-expanded="false">
-                <span data-icon="add" data-size="19"></span>
-                <span id="sidebar-new-text" data-sidebar-label>Novo</span>
+                <span data-icon="upload" data-size="19"></span>
+                <span id="sidebar-new-text" data-sidebar-label>Enviar</span>
                 <span class="sidebar-new-chevron" data-icon="expand_more" data-size="16" data-sidebar-label></span>
             </button>
             <div id="sidebar-new-menu" class="sidebar-new-menu hidden" role="menu">
@@ -65,37 +65,73 @@
                     <span class="search-icon-wrap" data-icon="search" data-size="18"></span>
                     <input id="search-input" type="text" placeholder="Pesquisar em Organessônium..." autocomplete="off"/>
                 </div>
-                <div id="path-crumbs" class="path-crumbs"></div>
                 <div id="titlebar-drag-region" class="titlebar-drag-region" aria-hidden="true"></div>
-            </div>
-            <div class="topbar-actions">
-                <div class="view-toggle" role="group">
-                    <button id="btn-grid" class="btn-view active"><span data-icon="grid_view"></span></button>
-                    <button id="btn-list" class="btn-view"><span data-icon="view_list"></span></button>
-                </div>
-                <div class="sort-wrap">
-                    <button id="btn-sort" class="btn-secondary">
-                        <span data-icon="sort" data-size="17"></span>
-                        <span id="sort-label">Nome</span>
-                        <span data-icon="expand_more" data-size="15"></span>
-                    </button>
-                    <div id="sort-menu" class="dropdown hidden" role="menu">
-                        <button data-sort="name-asc">Nome A→Z</button>
-                        <button data-sort="name-desc">Nome Z→A</button>
-                        <button data-sort="size-desc">Maior tamanho</button>
-                        <button data-sort="size-asc">Menor tamanho</button>
-                        <button data-sort="date-desc">Mais recente</button>
-                        <button data-sort="date-asc">Mais antigo</button>
-                    </div>
-                </div>
-                <button id="btn-refresh"       class="btn-icon" title="Atualizar"><span data-icon="refresh"></span></button>
-                <button id="btn-new-folder"    class="btn-icon" title="Nova pasta"><span data-icon="create_new_folder"></span></button>
-                <button id="btn-upload-folder" class="btn-icon" title="Enviar pasta"><span data-icon="folder_open"></span></button>
-                <button id="btn-upload"        class="btn-primary"><span data-icon="upload" data-size="17"></span> Enviar</button>
             </div>
         </header>
 
         <main id="main-area" role="main" aria-label="Arquivos">
+            <div class="content-header">
+                <div class="content-title-row">
+                    <div class="content-title-block">
+                        <h1 id="current-folder-title">Arquivos</h1>
+                        <div id="path-crumbs" class="path-crumbs"></div>
+                    </div>
+                </div>
+                <div class="content-filter-row">
+                    <div class="content-filter-start">
+                        <div class="filter-wrap">
+                            <button id="btn-type-filter" class="btn-secondary filter-chip" type="button">
+                                <span id="type-filter-label">Tipo</span>
+                                <span data-icon="expand_more" data-size="15"></span>
+                            </button>
+                            <div id="type-filter-menu" class="dropdown hidden" role="menu">
+                                <button data-type-filter="all">Todos</button>
+                                <button data-type-filter="folders">Pastas</button>
+                                <button data-type-filter="images">Imagens</button>
+                                <button data-type-filter="videos">Vídeos</button>
+                                <button data-type-filter="audio">Áudio</button>
+                                <button data-type-filter="documents">Documentos</button>
+                                <button data-type-filter="archives">Arquivos compactados</button>
+                                <button data-type-filter="other">Outros</button>
+                            </div>
+                        </div>
+                        <div class="filter-wrap">
+                            <button id="btn-date-filter" class="btn-secondary filter-chip" type="button">
+                                <span id="date-filter-label">Modificado</span>
+                                <span data-icon="expand_more" data-size="15"></span>
+                            </button>
+                            <div id="date-filter-menu" class="dropdown hidden" role="menu">
+                                <button data-date-filter="all">Qualquer data</button>
+                                <button data-date-filter="today">Hoje</button>
+                                <button data-date-filter="7">Últimos 7 dias</button>
+                                <button data-date-filter="30">Últimos 30 dias</button>
+                            </div>
+                        </div>
+                        <div class="sort-wrap">
+                            <button id="btn-sort" class="btn-secondary">
+                                <span data-icon="sort" data-size="17"></span>
+                                <span id="sort-label">Nome</span>
+                                <span data-icon="expand_more" data-size="15"></span>
+                            </button>
+                            <div id="sort-menu" class="dropdown hidden" role="menu">
+                                <button data-sort="name-asc">Nome A→Z</button>
+                                <button data-sort="name-desc">Nome Z→A</button>
+                                <button data-sort="size-desc">Maior tamanho</button>
+                                <button data-sort="size-asc">Menor tamanho</button>
+                                <button data-sort="date-desc">Mais recente</button>
+                                <button data-sort="date-asc">Mais antigo</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="content-filter-end">
+                        <div class="view-toggle" role="group">
+                            <button id="btn-grid" class="btn-view active"><span data-icon="grid_view"></span></button>
+                            <button id="btn-list" class="btn-view"><span data-icon="view_list"></span></button>
+                        </div>
+                        <button id="btn-refresh" class="btn-icon" title="Atualizar"><span data-icon="refresh"></span></button>
+                    </div>
+                </div>
+            </div>
             <div id="drag-overlay" class="drag-overlay hidden">
                 <div class="drag-content">
                     <span class="drag-icon-wrap" data-icon="cloud_upload" data-size="96"></span>
