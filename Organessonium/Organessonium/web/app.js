@@ -463,8 +463,6 @@ function applyI18n() {
     setA11y('btn-sidebar-new', 'upload');
     setText('sidebar-files-text', 'sidebarFiles');
     setA11y('sidebar-files', 'sidebarFiles');
-    setText('sidebar-transfers-text', 'sidebarTransfers');
-    setA11y('sidebar-transfers', 'sidebarTransfers');
     setText('sidebar-storage-title', 'sidebarStorage');
     setText('server-items-label', 'sidebarItemSuffix');
     setText('sidebar-settings-text', 'settings');
@@ -756,12 +754,10 @@ function showTransfers() {
     opsPanel.classList.remove('hidden');
     $('sidebar-files')?.classList.remove('active');
     $('sidebar-files')?.removeAttribute('aria-current');
-    $('sidebar-transfers')?.classList.add('active');
 }
 
 function showFilesWorkspace() {
     activateWorkspaceTab('files');
-    $('sidebar-transfers')?.classList.remove('active');
     $('sidebar-files')?.classList.add('active');
     $('sidebar-files')?.setAttribute('aria-current', 'page');
 }
@@ -2444,7 +2440,6 @@ document.addEventListener('DOMContentLoaded', () => {
     $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
     $('btn-sidebar-new').addEventListener('click', () => window.bridge.startUpload());
     $('sidebar-files').addEventListener('click', showFilesWorkspace);
-    $('sidebar-transfers').addEventListener('click', showTransfers);
     $('sidebar-settings').addEventListener('click', openSettings);
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
@@ -4420,15 +4415,30 @@ function setupMomentumScroll(el, options = {}) {
     el._stopMomentumScroll = () => {};
 }
 
+function marqueeSurfaceBounds() {
+    const main = $('main-area');
+    const mainRect = main.getBoundingClientRect();
+    const headerRect = main.querySelector('.content-header')?.getBoundingClientRect();
+    return {
+        mainRect,
+        left:mainRect.left,
+        right:mainRect.right,
+        top:Math.max(mainRect.top, headerRect?.bottom || mainRect.top),
+        bottom:mainRect.bottom
+    };
+}
+
 function setupMarqueeSelection() {
     const main = $('main-area');
     main.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
         if (previewOverlay && !previewOverlay.classList.contains('hidden')) return;
         if (e.target.closest('.file-card,.file-row,button,input,select,.modal-overlay,.settings-panel,.preview-overlay,.ctx-menu')) return;
+        const surface = marqueeSurfaceBounds();
+        if (e.clientX < surface.left || e.clientX > surface.right || e.clientY < surface.top || e.clientY > surface.bottom) return;
         hideCtx();
         if (!e.ctrlKey && !e.metaKey && !e.shiftKey) clearSelection();
-        const mainRect = main.getBoundingClientRect();
+        const mainRect = surface.mainRect;
         marqueeState = {
             startClientX:e.clientX,
             startClientY:e.clientY,
@@ -4478,18 +4488,19 @@ function onMarqueeUp() {
 
 function updateMarqueePointer(clientX, clientY) {
     const main = $('main-area');
-    const mainRect = main.getBoundingClientRect();
-    marqueeState.lastClientX = clientX;
-    marqueeState.lastClientY = clientY;
-    marqueeState.lastX = clientX - mainRect.left + main.scrollLeft;
-    marqueeState.lastY = clientY - mainRect.top + main.scrollTop;
+    const surface = marqueeSurfaceBounds();
+    const boundedX = Math.max(surface.left, Math.min(surface.right, clientX));
+    const boundedY = Math.max(surface.top, Math.min(surface.bottom, clientY));
+    marqueeState.lastClientX = boundedX;
+    marqueeState.lastClientY = boundedY;
+    marqueeState.lastX = boundedX - surface.mainRect.left + main.scrollLeft;
+    marqueeState.lastY = boundedY - surface.mainRect.top + main.scrollTop;
 }
 
 function updateMarqueeAutoScroll() {
     const st = marqueeState;
     if (!st || !st.active) return;
-    const main = $('main-area');
-    const rect = main.getBoundingClientRect();
+    const rect = marqueeSurfaceBounds();
     const margin = 78;
     let speed = 0;
     if (st.lastClientY < rect.top + margin) speed = -Math.ceil((rect.top + margin - st.lastClientY) / 3);
