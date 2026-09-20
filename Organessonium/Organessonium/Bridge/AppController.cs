@@ -1064,37 +1064,31 @@ public sealed class AppController : IAsyncDisposable
                 .ToList();
             var downloader = Downloader();
             using var http = NetworkConfig.Current.CreateClient();
-            await Parallel.ForEachAsync(
-                apps,
-                new ParallelOptions
-                {
-                    CancellationToken = cancellationToken,
-                    MaxDegreeOfParallelism = 1
-                },
-                async (app, token) =>
+            using var previewSlots = new SemaphoreSlim(Math.Clamp(settings.PreviewThreads, 1, 8));
+
+            async Task<string?> LoadThumbnailAsync(AppEntry app)
+            {
+                await previewSlots.WaitAsync(cancellationToken);
+                try
                 {
                     if (path != _currentPath || !IsThumbnailCandidate(app, path))
                     {
-                        return;
+                        return null;
                     }
 
                     var ownsLoad = false;
                     for (var attempt = 0; attempt < 5 && !ownsLoad; attempt++)
                     {
-                        if (token.IsCancellationRequested)
-                        {
-                            return;
-                        }
-
+                        cancellationToken.ThrowIfCancellationRequested();
                         ownsLoad = _thumbnailLoads.TryAdd(app.ThreadId, 0);
                         if (!ownsLoad)
                         {
-                            await Task.Delay(40);
+                            await Task.Delay(40, cancellationToken);
                         }
                     }
                     if (!ownsLoad)
                     {
-                        return;
+                        return null;
                     }
 
                     try
@@ -1102,15 +1096,14 @@ public sealed class AppController : IAsyncDisposable
                         var cached = ThumbnailCache.Get(app.ThreadId);
                         if (cached != null)
                         {
-                            await DeliverThumbnailAsync(app.ThreadId, cached, path, visibleIdSet, token);
-                            return;
+                            return cached;
                         }
 
                         var previewBytes = !string.IsNullOrWhiteSpace(app.PreviewMessageId)
                             ? await downloader.DownloadMessageAttachmentBytesAsync(
                                 app.ThreadId,
                                 app.PreviewMessageId,
-                                cancellationToken: token,
+                                cancellationToken: cancellationToken,
                                 encryption: app.Encryption == null
                                     ? null
                                     : new EncryptedPayloadContext(
@@ -1121,11 +1114,11 @@ public sealed class AppController : IAsyncDisposable
                             : await downloader.DownloadMarkedPreviewBytesAsync(
                                 app.ThreadId,
                                 "PREVIEW|",
-                                cancellationToken: token) ??
+                                cancellationToken: cancellationToken) ??
                               await downloader.DownloadPreviewBytesAsync(
                                   app.ThreadId,
                                   "image-200",
-                                  cancellationToken: token);
+                                  cancellationToken: cancellationToken);
                         string? thumb;
                         if (previewBytes is { Length: > 0 })
                         {
@@ -1135,42 +1128,74 @@ public sealed class AppController : IAsyncDisposable
                         {
                             if (app.Encryption != null)
                             {
-                                return;
+                                return null;
                             }
 
                             if (!ThumbnailCache.IsImage(app.Name) || app.SizeBytes > 10L * 1024 * 1024)
                             {
-                                return;
+                                return null;
                             }
 
-                            var url = await downloader.GetFirstAttachmentUrlAsync(app.ThreadId, token);
+                            var url = await downloader.GetFirstAttachmentUrlAsync(app.ThreadId, cancellationToken);
                             if (string.IsNullOrWhiteSpace(url))
                             {
-                                return;
+                                return null;
                             }
 
-                            var data = await http.GetByteArrayAsync(url, token);
+                            var data = await http.GetByteArrayAsync(url, cancellationToken);
                             thumb = ThumbnailCache.GenerateAndStore(app.ThreadId, data);
                         }
 
-                        if (thumb != null)
-                        {
-                            await DeliverThumbnailAsync(app.ThreadId, thumb, path, visibleIdSet, token);
-                        }
+                        return thumb;
                     }
-                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
                         throw;
                     }
                     catch (Exception ex)
                     {
                         AppLogger.Error("Thumbnail.Load", ex, app.ThreadId);
+                        return null;
                     }
                     finally
                     {
                         _thumbnailLoads.TryRemove(app.ThreadId, out _);
                     }
-                });
+                }
+                finally
+                {
+                    previewSlots.Release();
+                }
+            }
+
+            var thumbnailTasks = apps.Select(LoadThumbnailAsync).ToList();
+            try
+            {
+                for (var index = 0; index < apps.Count; index++)
+                {
+                    var thumbnail = await thumbnailTasks[index];
+                    if (thumbnail != null)
+                    {
+                        await DeliverThumbnailAsync(
+                            apps[index].ThreadId,
+                            thumbnail,
+                            path,
+                            visibleIdSet,
+                            cancellationToken);
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    await Task.WhenAll(thumbnailTasks);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // All scheduled loads observe the superseding viewport request.
+                }
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -4302,6 +4327,7 @@ public sealed class AppController : IAsyncDisposable
         settings.Proxy.AuthenticationEnabled = ArgBool(args, 17, settings.Proxy.AuthenticationEnabled);
         settings.Proxy.Username = ArgString(args, 18, settings.Proxy.Username);
         settings.Proxy.Password = ArgString(args, 19, settings.Proxy.Password);
+        settings.PreviewThreads = Math.Clamp(ArgInt(args, 20, settings.PreviewThreads), 1, 8);
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var _))
         {
             settings.Proxy.Mode = ProxyMode.Automatic;

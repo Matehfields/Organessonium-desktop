@@ -12,7 +12,7 @@ let historyBack = [], historyForward = [];
 let confirmCb = null;
 let uploadConflictState = null;
 let settings = {
-    cardSize:'medium', downloadThreads:4, uploadThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
+    cardSize:'medium', downloadThreads:4, uploadThreads:4, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
     previewEnabled:true, videoPreviewQuality:'low', language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
@@ -136,7 +136,7 @@ const I18N = {
         encryptionExportWarning:'Qualquer pessoa que possuir este arquivo poderá acessar os arquivos protegidos por esta chave.',
         encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
-        enablePreviews:'Ativar prévias', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
+        enablePreviews:'Ativar prévias', simultaneousPreviews:'Prévias simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -268,7 +268,7 @@ const I18N = {
         encryptionExportWarning:'Anyone with this file can access files protected by this key.',
         encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
-        enablePreviews:'Enable previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
+        enablePreviews:'Enable previews', simultaneousPreviews:'Simultaneous previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -527,6 +527,7 @@ function applyI18n() {
     setText('card-size-large-text', 'large');
     setText('settings-preview-title', 'previews');
     setText('setting-preview-label', 'enablePreviews');
+    setText('setting-preview-threads-label', 'simultaneousPreviews');
     setText('setting-video-preview-quality-label', 'videoPreviewQuality');
     setText('video-preview-low-text', 'videoPreviewLow');
     setText('video-preview-original-text', 'videoPreviewOriginal');
@@ -701,17 +702,40 @@ function titleBarMetric(value, fallback) {
     return Number.isFinite(number) && number >= 0 ? Math.round(number) : fallback;
 }
 
-function scheduleNativeTitleBarDragRegion() {
+function scheduleNativeTitleBarDragRegion(delay = 200) {
     if (!nativeTitleBarMetrics.enabled) return;
     if (nativeTitleBarDragTimer) window.clearTimeout(nativeTitleBarDragTimer);
     nativeTitleBarDragTimer = window.setTimeout(() => {
         nativeTitleBarDragTimer = 0;
+        if (!window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
+        const rectangles = [];
+        const addHeaderGap = (header, actions) => {
+            const headerRect = header?.getBoundingClientRect();
+            const actionsRect = actions?.getBoundingClientRect();
+            if (!headerRect || !actionsRect || headerRect.height <= 0 || actionsRect.left <= headerRect.left) return;
+            rectangles.push(
+                Math.round(headerRect.left),
+                Math.round(headerRect.top),
+                Math.round(actionsRect.left - headerRect.left),
+                Math.round(headerRect.height));
+        };
+
+        if (!previewOverlay.classList.contains('hidden')) {
+            addHeaderGap(document.querySelector('.preview-topbar'), document.querySelector('.preview-topbar-actions'));
+            if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
+            return;
+        }
+        if (!settingsPanel.classList.contains('hidden')) {
+            addHeaderGap(document.querySelector('.settings-header'), $('settings-close'));
+            if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
+            return;
+        }
+
         const region = $('titlebar-drag-region');
-        if (!region || !window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
+        if (!region) return;
         const rect = region.getBoundingClientRect();
         const topbar = region.closest('.topbar');
         const topbarRect = topbar?.getBoundingClientRect();
-        const rectangles = [];
         if (rect.width > 0 && topbarRect && topbarRect.height > 0) {
             rectangles.push(
                 Math.round(rect.left),
@@ -731,7 +755,7 @@ function scheduleNativeTitleBarDragRegion() {
         }
 
         if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
-    }, 200);
+    }, delay);
 }
 
 window._onNativeTitleBarMetrics = metrics => {
@@ -2696,6 +2720,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 'logout');
     });
     $('setting-threads').addEventListener('input', e => { settings.downloadThreads=+e.target.value; $('thr-val').textContent=e.target.value; queueSettingsSave(); });
+    $('setting-preview-threads').addEventListener('input', e => { settings.previewThreads=+e.target.value; $('preview-thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-files').addEventListener('input', e => { settings.maxParallelUploads=+e.target.value; $('upload-files-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-threads').addEventListener('input', e => { settings.uploadThreads=+e.target.value; $('upload-thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('btn-encryption-standard')?.addEventListener('click', () => {
@@ -4874,6 +4899,7 @@ function openPreview(app) {
     previewIndex  = previewFiles.findIndex(a => a.threadId === app.threadId);
     if (previewIndex < 0) previewIndex = 0;
     previewOverlay.classList.remove('hidden');
+    scheduleNativeTitleBarDragRegion(0);
     loadPreviewApp(app, false);
 }
 
@@ -4887,6 +4913,7 @@ function closePreview() {
     resetPdfPreviewState();
     pendingVideoQualitySwitch = null;
     previewOverlay.classList.add('hidden');
+    scheduleNativeTitleBarDragRegion(0);
     $('preview-body').innerHTML = '<div class="preview-spinner"></div>';
     if (previewAppRef) { window.bridge.closePreview(previewAppRef.threadId); previewAppRef = null; }
 }
@@ -5432,6 +5459,7 @@ function loadSettings() {
     settings.videoPreviewQuality = settings.videoPreviewQuality === 'original' ? 'original' : 'low';
     settings.cardSize = CARD_SIZES[settings.cardSize] ? settings.cardSize : 'medium';
     settings.uploadThreads = Math.max(1, Math.min(16, Number(settings.uploadThreads) || 4));
+    settings.previewThreads = Math.max(1, Math.min(8, Number(settings.previewThreads) || 4));
     settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
     settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
     settings.customKeyAvailable = settings.customKeyAvailable === true;
@@ -5439,6 +5467,7 @@ function loadSettings() {
     $('setting-threads').value=settings.downloadThreads; $('thr-val').textContent=settings.downloadThreads;
     $('setting-upload-files').value=settings.maxParallelUploads; $('upload-files-val').textContent=settings.maxParallelUploads;
     $('setting-upload-threads').value=settings.uploadThreads; $('upload-thr-val').textContent=settings.uploadThreads;
+    $('setting-preview-threads').value=settings.previewThreads; $('preview-thr-val').textContent=settings.previewThreads;
     $('setting-dlpath').value=settings.downloadPath||''; $('setting-tmppath').value=settings.tempPath||''; $('setting-datapath').value=settings.dataPath||'';
     $('setting-preview').checked=settings.previewEnabled!==false;
     $('setting-animations').checked=settings.animationsEnabled!==false;
@@ -5529,7 +5558,8 @@ function saveSettings(showStatus = true) {
         settings.proxy.proxyProtocol || 'auto',
         settings.proxy.proxyAuthenticationEnabled === true,
         settings.proxy.proxyUsername || '',
-        settings.proxy.proxyPassword || ''
+        settings.proxy.proxyPassword || '',
+        settings.previewThreads
     );
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);
@@ -5539,7 +5569,10 @@ function openSettings()  {
     settingsOverlay.classList.remove('hidden');
     settingsPanel.setAttribute('aria-hidden', 'false');
     if (window.bridge && window.bridge.getPreviewCacheSize) window.bridge.getPreviewCacheSize();
-    requestAnimationFrame(()=>settingsPanel.classList.add('open'));
+    requestAnimationFrame(()=>{
+        settingsPanel.classList.add('open');
+        scheduleNativeTitleBarDragRegion(0);
+    });
     setTimeout(() => {
         const target = $('language-select-button') || $('settings-close');
         if (target) target.focus();
@@ -5553,7 +5586,11 @@ function closeSettings() {
     }
     settingsPanel.classList.remove('open');
     settingsPanel.setAttribute('aria-hidden', 'true');
-    setTimeout(()=>{ settingsPanel.classList.add('hidden'); settingsOverlay.classList.add('hidden'); }, motionMs(260));
+    setTimeout(()=>{
+        settingsPanel.classList.add('hidden');
+        settingsOverlay.classList.add('hidden');
+        scheduleNativeTitleBarDragRegion(0);
+    }, motionMs(260));
 }
 function applyTheme(t) {
     const theme = resolveTheme(t);

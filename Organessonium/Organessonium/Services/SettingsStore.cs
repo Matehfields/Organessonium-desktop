@@ -149,6 +149,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.Language = Get(values, "language", settings.Language);
             settings.DownloadThreads = Math.Clamp(GetInt(values, "downloadThreads", settings.DownloadThreads), 1, 16);
             settings.UploadThreads = Math.Clamp(GetInt(values, "uploadThreads", settings.UploadThreads), 1, 16);
+            settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
             settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
             settings.TempPath = Get(values, "tempPath", settings.TempPath);
             settings.DataPath = DataDirectory.FullName;
@@ -192,6 +193,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "language", settings.Language);
             Upsert(connection, "downloadThreads", Math.Clamp(settings.DownloadThreads, 1, 16).ToString());
             Upsert(connection, "uploadThreads", Math.Clamp(settings.UploadThreads, 1, 16).ToString());
+            Upsert(connection, "previewThreads", Math.Clamp(settings.PreviewThreads, 1, 8).ToString());
             Upsert(connection, "downloadPath", settings.DownloadPath);
             Upsert(connection, "tempPath", settings.TempPath);
             Upsert(connection, "dataPath", settings.DataPath);
@@ -541,6 +543,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.Language = Get(values, "language", settings.Language);
         settings.DownloadThreads = Math.Clamp(GetInt(values, "downloadThreads", settings.DownloadThreads), 1, 16);
         settings.UploadThreads = Math.Clamp(GetInt(values, "uploadThreads", settings.UploadThreads), 1, 16);
+        settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
         settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
         settings.TempPath = Get(values, "tempPath", settings.TempPath);
         settings.DataPath = DataDirectory.FullName;

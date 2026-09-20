@@ -21,6 +21,7 @@
 dataPath: args[10],
             uploadThreads: args[11],
             maxParallelUploads: args[12],
+            previewThreads: args[20],
             proxy: {
                 proxyMode: args[13],
                 proxyHost: args[14],

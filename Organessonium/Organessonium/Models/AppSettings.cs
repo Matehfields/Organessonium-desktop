@@ -34,6 +34,9 @@ public sealed class AppSettings
     [JsonPropertyName("uploadThreads")]
     public int UploadThreads { get; set; } = 4;
 
+    [JsonPropertyName("previewThreads")]
+    public int PreviewThreads { get; set; } = 4;
+
     [JsonPropertyName("downloadPath")]
     public string DownloadPath { get; set; } = "";
 
@@ -104,6 +107,7 @@ public sealed class AppSettings
             Language = Language,
             DownloadThreads = DownloadThreads,
             UploadThreads = UploadThreads,
+            PreviewThreads = PreviewThreads,
             DownloadPath = DownloadPath,
             TempPath = TempPath,
             DataPath = DataPath,
