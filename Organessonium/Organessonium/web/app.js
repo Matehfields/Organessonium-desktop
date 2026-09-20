@@ -72,7 +72,7 @@ const I18N = {
     'pt-BR': {
         appTitle:'Organessônium',
         searchPlaceholder:'Pesquisar em Organessônium...',
-        back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta',
+        back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta', newMarkdown:'Novo arquivo Markdown', newMarkdownDefault:'Novo documento.md',
         uploadFolder:'Enviar pasta', upload:'Enviar', settings:'Configurações',
         sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
         sidebarItems:'Itens no servidor', sidebarItemSuffix:'itens', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
@@ -204,7 +204,7 @@ const I18N = {
     en: {
         appTitle:'Organessônium',
         searchPlaceholder:'Search in Organessônium...',
-        back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder',
+        back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder', newMarkdown:'New Markdown file', newMarkdownDefault:'Untitled document.md',
         uploadFolder:'Upload folder', upload:'Upload', settings:'Settings',
         sidebarNew:'New', sidebarFiles:'Files', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
         sidebarItems:'Items on server', sidebarItemSuffix:'items', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
@@ -461,6 +461,10 @@ function applyI18n() {
     setA11y('background-activity-close', 'close');
     setText('sidebar-new-text', 'upload');
     setA11y('btn-sidebar-new', 'upload');
+    setText('sidebar-new-folder-text', 'newFolder');
+    setText('sidebar-new-markdown-text', 'newMarkdown');
+    setText('sidebar-upload-files-text', 'uploadFiles');
+    setText('sidebar-upload-folder-text', 'uploadFolder');
     setText('sidebar-files-text', 'sidebarFiles');
     setA11y('sidebar-files', 'sidebarFiles');
     setText('sidebar-storage-title', 'sidebarStorage');
@@ -2438,9 +2442,16 @@ document.addEventListener('DOMContentLoaded', () => {
     applyI18n();
 
     $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
-    $('btn-sidebar-new').addEventListener('click', () => window.bridge.startUpload());
-    $('sidebar-files').addEventListener('click', showFilesWorkspace);
-    $('sidebar-settings').addEventListener('click', openSettings);
+    $('btn-sidebar-new').addEventListener('click', e => {
+        e.stopPropagation();
+        toggleSidebarNewMenu();
+    });
+    $('sidebar-new-folder').addEventListener('click', () => { closeSidebarNewMenu(); openFolderModal(); });
+    $('sidebar-new-markdown').addEventListener('click', () => { closeSidebarNewMenu(); createMarkdownDocument(); });
+    $('sidebar-upload-files').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startUpload(); });
+    $('sidebar-upload-folder').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startFolderUpload(); });
+    $('sidebar-files').addEventListener('click', () => { closeSidebarNewMenu(); showFilesWorkspace(); });
+    $('sidebar-settings').addEventListener('click', () => { closeSidebarNewMenu(); openSettings(); });
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
     $('btn-grid').addEventListener('click', () => setView('grid'));
@@ -2501,7 +2512,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sel-delete').addEventListener('click', deleteSelected);
 
     // Sort
-    $('btn-sort').addEventListener('click', e => { e.stopPropagation(); sortMenu.classList.toggle('hidden'); });
+    $('btn-sort').addEventListener('click', e => { e.stopPropagation(); closeSidebarNewMenu(); sortMenu.classList.toggle('hidden'); });
     sortMenu.querySelectorAll('button').forEach(btn => {
         btn.addEventListener('click', () => {
             sortMode = btn.dataset.sort;
@@ -2515,12 +2526,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // Filtros da pasta atual
     $('btn-type-filter').addEventListener('click', e => {
         e.stopPropagation();
+        closeSidebarNewMenu();
         typeFilterMenu.classList.toggle('hidden');
         dateFilterMenu.classList.add('hidden');
         sortMenu.classList.add('hidden');
     });
     $('btn-date-filter').addEventListener('click', e => {
         e.stopPropagation();
+        closeSidebarNewMenu();
         dateFilterMenu.classList.toggle('hidden');
         typeFilterMenu.classList.add('hidden');
         sortMenu.classList.add('hidden');
@@ -2721,6 +2734,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.addEventListener('click', e => {
+        if (!$('btn-sidebar-new').contains(e.target) && !$('sidebar-new-menu').contains(e.target)) closeSidebarNewMenu();
         if (!$('btn-sort').contains(e.target)) sortMenu.classList.add('hidden');
         if (!$('btn-type-filter').contains(e.target) && !typeFilterMenu.contains(e.target)) typeFilterMenu.classList.add('hidden');
         if (!$('btn-date-filter').contains(e.target) && !dateFilterMenu.contains(e.target)) dateFilterMenu.classList.add('hidden');
@@ -2805,7 +2819,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key==='Escape') {
             if (!previewOverlay.classList.contains('hidden')) { closePreview(); return; }
             if (selectedKeys.size) { clearSelection(); return; }
-            sortMenu.classList.add('hidden'); typeFilterMenu.classList.add('hidden'); dateFilterMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
+            closeSidebarNewMenu(); sortMenu.classList.add('hidden'); typeFilterMenu.classList.add('hidden'); dateFilterMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
         }
         if (!previewOverlay.classList.contains('hidden')) {
             if (e.key==='ArrowLeft')  previewPrev();
@@ -4901,6 +4915,74 @@ function updateNavButtons() { btnBack.disabled = !historyBack.length; btnForward
 function openFolderModal()  { folderInput.value=''; folderOverlay.classList.remove('hidden'); setTimeout(()=>folderInput.focus(),50); }
 function closeFolderModal() { folderOverlay.classList.add('hidden'); }
 function confirmFolder()    { const n=folderInput.value.trim(); if(!n) return; setStatus(t('creatingFolder'), true); window.bridge.createFolder(n); closeFolderModal(); }
+
+function toggleSidebarNewMenu() {
+    const menu = $('sidebar-new-menu');
+    if (!menu.classList.contains('hidden')) {
+        closeSidebarNewMenu();
+        return;
+    }
+    const button = $('btn-sidebar-new');
+    const rect = button.getBoundingClientRect();
+    const menuWidth = 224;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8));
+    typeFilterMenu.classList.add('hidden');
+    dateFilterMenu.classList.add('hidden');
+    sortMenu.classList.add('hidden');
+    hideCtx();
+    menu.classList.remove('hidden');
+    menu.style.left = left + 'px';
+    menu.style.top = Math.min(rect.bottom + 8, window.innerHeight - menu.offsetHeight - 8) + 'px';
+    button.setAttribute('aria-expanded', 'true');
+    requestAnimationFrame(() => $('sidebar-new-folder').focus());
+}
+
+function closeSidebarNewMenu() {
+    const menu = $('sidebar-new-menu');
+    if (!menu) return;
+    menu.classList.add('hidden');
+    $('btn-sidebar-new')?.setAttribute('aria-expanded', 'false');
+}
+
+function createMarkdownDocument() {
+    closePreview();
+    setupWorkspaceTabs();
+    showWorkspaceTabs();
+
+    const baseName = t('newMarkdownDefault');
+    const dot = baseName.lastIndexOf('.');
+    const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+    const extension = dot > 0 ? baseName.slice(dot) : '.md';
+    const names = new Set(filesAt(allApps, currentPath).map(app => String(app.name || '').toLowerCase()));
+    let name = baseName;
+    for (let suffix = 2; names.has(name.toLowerCase()); suffix++) name = stem + ' (' + suffix + ')' + extension;
+
+    const id = 'md-new-' + Date.now().toString(36);
+    const app = { type:'file', name, path:currentPath, threadId:'', metadataMessageId:'' };
+    const tab = document.createElement('button');
+    tab.className = 'workspace-tab';
+    tab.dataset.tabId = id;
+    tab.innerHTML = `${icon('edit_note',16)}<span>${esc(truncate(name, 24))}</span>
+        <span class="tab-close" data-close-tab="${esc(id)}">${icon('close',14)}</span>`;
+    workspaceTabs.appendChild(tab);
+
+    const panel = document.createElement('section');
+    panel.className = 'markdown-editor-tab';
+    panel.dataset.tabId = id;
+    editorArea.appendChild(panel);
+    const entry = {
+        id, app, tab, panel,
+        editor:null, rawEditor:null, saveState:null, rawToggle:null, zoomLabel:null,
+        toolbarWrapCleanup:null,
+        rawMode:false, zoom:1,
+        lastSavedMarkdown:null, pendingMarkdown:'', saveTimer:0, saving:false, queued:false
+    };
+    markdownTabs.set(id, entry);
+    panel.appendChild(createMarkdownEditor('', entry, name));
+    activateWorkspaceTab(id);
+    saveMarkdownNow(entry);
+    requestAnimationFrame(() => entry.editor?.focus());
+}
 
 function normalizeHexColor(value) {
     const raw = String(value || '').trim().replace(/^#/, '');
