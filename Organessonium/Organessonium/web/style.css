@@ -116,18 +116,19 @@ img{
 }
 .sidebar-header{
     height:var(--native-titlebar-height);
-    display:flex;align-items:center;gap:5px;
+    display:flex;align-items:center;gap:8px;
     flex:0 0 auto;
     min-width:0;padding-left:var(--native-titlebar-left-inset);
+    position:relative;
 }
-.sidebar-brand{
-    min-width:0;flex:1 1 auto;
+.sidebar-header .sidebar-brand{
+    min-width:0;flex:1 1 auto;height:100%;
     padding-left:4px;
 }
 .sidebar-collapse{
-    width:30px;height:30px;flex:0 0 auto;
+    width:32px;height:32px;flex:0 0 auto;
     display:flex;align-items:center;justify-content:center;
-    border:0;border-radius:5px;
+    border:0;border-radius:8px;
     background:transparent;color:var(--text-secondary);
     cursor:pointer;
 }
@@ -198,9 +199,20 @@ img{
 
 body.sidebar-collapsed{--sidebar-width:72px;}
 body.sidebar-collapsed .app-sidebar{padding-inline:7px;}
-body.sidebar-collapsed .sidebar-header{justify-content:flex-start;gap:2px;padding-left:0;}
-body.sidebar-collapsed .sidebar-brand{width:22px;min-width:22px;flex:0 0 22px;padding-left:0;}
-body.sidebar-collapsed .sidebar-collapse{margin-left:auto;}
+body.sidebar-collapsed .sidebar-header{justify-content:center;gap:0;padding-left:0;}
+body.sidebar-collapsed .sidebar-header .sidebar-brand{width:58px;min-width:58px;flex:0 0 58px;justify-content:center;padding-left:0;}
+body.sidebar-collapsed .sidebar-collapse{
+    position:absolute;top:50%;left:50%;z-index:1;
+    margin:0;opacity:0;pointer-events:none;
+    transform:translate(-50%,-50%) scale(.92);
+    transition:opacity .12s ease,transform .12s ease;
+}
+body.sidebar-collapsed .sidebar-brand:hover + .sidebar-collapse,
+body.sidebar-collapsed .sidebar-collapse:hover,
+body.sidebar-collapsed .sidebar-collapse:focus-visible{
+    opacity:1;pointer-events:auto;
+    transform:translate(-50%,-50%);
+}
 body.sidebar-collapsed .brand-name,
 body.sidebar-collapsed .app-sidebar [data-sidebar-label],
 body.sidebar-collapsed .sidebar-new-chevron,
@@ -223,6 +235,7 @@ body.sidebar-collapsed .sidebar-nav-item{width:56px;}
 }
 
 .topbar-brand{display:flex;align-items:center;gap:8px;min-width:148px;flex:0 0 auto;}
+.sidebar-header .logo-omega{transform:translateY(-1px);}
 .logo-omega{font-size:22px;font-weight:900;color:var(--text-secondary);font-family:Georgia,serif;line-height:1;flex-shrink:0;}
 .brand-name{font-size:14px;font-weight:700;color:var(--text-primary);line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .path-crumbs{

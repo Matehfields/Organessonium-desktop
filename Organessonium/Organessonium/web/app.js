@@ -659,7 +659,7 @@ function syncSidebarChrome() {
     const button = $('btn-sidebar-toggle');
     if (!button) return;
     const label = t(sidebarCollapsed ? 'sidebarExpand' : 'sidebarCollapse');
-    button.innerHTML = icon(sidebarCollapsed ? 'arrow_forward' : 'arrow_back', 18);
+    button.innerHTML = icon(sidebarCollapsed ? 'left_panel_open' : 'left_panel_close', 18);
     button.title = label;
     button.setAttribute('aria-label', label);
     button.setAttribute('aria-expanded', sidebarCollapsed ? 'false' : 'true');
@@ -692,7 +692,7 @@ function scheduleNativeTitleBarDragRegion() {
 
         const sidebarBrand = $('sidebar-brand');
         const sidebarRect = sidebarBrand?.getBoundingClientRect();
-        if (sidebarRect && sidebarRect.width > 0 && topbarRect && topbarRect.height > 0) {
+        if (!sidebarCollapsed && sidebarRect && sidebarRect.width > 0 && topbarRect && topbarRect.height > 0) {
             rectangles.push(
                 Math.round(sidebarRect.left),
                 Math.round(topbarRect.top),
