@@ -24,12 +24,28 @@
                        FontSize="72"
                        FontWeight="Bold"
                        Foreground="#A6A6A6"
+                       Opacity="0.55"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"
                        TextAlignment="Center">
-                <TextBlock.RenderTransform>
-                    <TranslateTransform Y="-60"/>
-                </TextBlock.RenderTransform>
+                <TextBlock.Triggers>
+                    <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                                 From="0.45"
+                                                 To="1"
+                                                 Duration="0:0:0.9"
+                                                 AutoReverse="True"
+                                                 RepeatBehavior="Forever">
+                                    <DoubleAnimation.EasingFunction>
+                                        <SineEase EasingMode="EaseInOut"/>
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </EventTrigger>
+                </TextBlock.Triggers>
             </TextBlock>
         </Grid>
     </Grid>

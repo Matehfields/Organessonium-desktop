@@ -24,7 +24,7 @@ public partial class MainWindow : Window
 {
     private const string LocalWebHost = "organessonium.local";
     private static readonly Lazy<DirectoryInfo> WebRootDirectory = new(ResolveWebRootDirectoryCore);
-    private readonly SettingsStore _store = new();
+    private SettingsStore _store = null!;
     private WebMessageBridge? _bridge;
     private AppController? _controller;
     private string? _pendingSetupError;
@@ -57,7 +57,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        Loaded += OnLoaded;
+        ContentRendered += OnContentRendered;
         Closing += OnClosing;
         Activated += (_, _) => _ = RefreshSystemThemeAsync();
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
@@ -68,13 +68,22 @@ public partial class MainWindow : Window
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
-        ApplyWindowTheme(_store.Load().Theme);
-        ConfigureIntegratedTitleBar();
+        ApplyWindowTheme(_lastSystemTheme);
+        ConfigureIntegratedTitleBar(_lastSystemTheme);
         Dispatcher.BeginInvoke(new Action(ResetNativeTitleBarDragRegion));
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs e)
+    private async void OnContentRendered(object? sender, EventArgs e)
     {
+        ContentRendered -= OnContentRendered;
+
+        var startupState = await Task.Run(() =>
+        {
+            var store = new SettingsStore();
+            return (Store: store, Settings: store.Load());
+        });
+        _store = startupState.Store;
+
         _bridge = new WebMessageBridge(WebView);
         _controller = new AppController(
             this,
@@ -83,7 +92,7 @@ public partial class MainWindow : Window
             async _ => await Dispatcher.InvokeAsync(() => LoadLocalPage("index.html")),
             theme => Dispatcher.Invoke(() => ApplyWindowTheme(theme)));
 
-        var settings = _store.Load();
+        var settings = startupState.Settings;
         ApplyWindowTheme(settings.Theme);
         await InitializeWebViewCoreAsync(settings);
 
@@ -123,7 +132,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ConfigureIntegratedTitleBar()
+    private void ConfigureIntegratedTitleBar(string? theme)
     {
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) ||
             !AppWindowTitleBar.IsCustomizationSupported())
@@ -141,7 +150,7 @@ public partial class MainWindow : Window
 
             var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(handle));
             var titleBar = appWindow.TitleBar;
-            ConfigureNativeTitleBar(titleBar, WindowThemeService.IsDarkTheme(_store.Load().Theme));
+            ConfigureNativeTitleBar(titleBar, WindowThemeService.IsDarkTheme(theme));
 
             _nativeTitleBar = titleBar;
             _usesIntegratedTitleBar = true;
@@ -537,6 +546,12 @@ public partial class MainWindow : Window
         }
 
         _lastSystemTheme = current;
+        if (_store == null)
+        {
+            ApplyWindowTheme(current);
+            return;
+        }
+
         var settings = _store.Load();
         if (string.Equals(settings.Theme, "system", StringComparison.OrdinalIgnoreCase))
         {
