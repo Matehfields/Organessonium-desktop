@@ -230,7 +230,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt
+                       encryption_mode, encryption_salt, favorite, device_type
                 FROM app_entries
                 WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
                 ORDER BY rowid
@@ -266,7 +266,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt
+                       encryption_mode, encryption_salt, favorite, device_type
                 FROM app_entries
                 WHERE folder_id = $folderId AND type = 'folder'
                 LIMIT 1
@@ -310,6 +310,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
                     Salt = reader.GetString(21)
                 };
             }
+            entry.Favorite = reader.GetInt32(22) != 0;
+            entry.DeviceType = reader.IsDBNull(23) ? null : reader.GetString(23);
             entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
             entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
             entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
@@ -463,7 +465,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
                 parent_folder_id TEXT,
                 encryption_version INTEGER NOT NULL DEFAULT 0,
                 encryption_mode TEXT NOT NULL DEFAULT '',
-                encryption_salt TEXT NOT NULL DEFAULT ''
+                encryption_salt TEXT NOT NULL DEFAULT '',
+                favorite INTEGER NOT NULL DEFAULT 0,
+                device_type TEXT
             );
 
             CREATE TABLE IF NOT EXISTS folder_index_map (
@@ -498,6 +502,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         EnsureColumn(connection, "app_entries", "encryption_version", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "app_entries", "encryption_mode", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "encryption_salt", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "favorite", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "app_entries", "device_type", "TEXT");
     }
 
     private void MigrateIniIfNeeded()
@@ -612,11 +618,11 @@ public sealed class SettingsStore : IEncryptionSecretStore
             (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
              mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
              video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
-             encryption_version, encryption_mode, encryption_salt)
+             encryption_version, encryption_mode, encryption_salt, favorite, device_type)
             VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
              $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
              $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
-             $encryptionVersion, $encryptionMode, $encryptionSalt)
+             $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType)
             """;
         insert.Parameters.AddWithValue("$name", entry.Name);
         insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
@@ -640,6 +646,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         insert.Parameters.AddWithValue("$encryptionVersion", entry.Encryption?.Version ?? 0);
         insert.Parameters.AddWithValue("$encryptionMode", entry.Encryption?.Mode ?? "");
         insert.Parameters.AddWithValue("$encryptionSalt", entry.Encryption?.Salt ?? "");
+        insert.Parameters.AddWithValue("$favorite", entry.Favorite ? 1 : 0);
+        insert.Parameters.AddWithValue("$deviceType", (object?)entry.DeviceType ?? DBNull.Value);
         insert.ExecuteNonQuery();
     }
 

@@ -9,6 +9,8 @@ public sealed record LibraryStatistics(long FileCount, long FolderCount, long To
 public sealed class AppRegistry
 {
     public const string RootFolderId = "root";
+    public const string SynchronizedRootFolderId = "synchronized";
+    public const string SynchronizedRootPath = "/@synchronized";
 
     private readonly DiscordApiClient _discord;
     private readonly SettingsStore _store;
@@ -46,15 +48,201 @@ public sealed class AppRegistry
         CancellationToken cancellationToken = default)
     {
         var normalizedFolderId = NormalizeFolderId(folderId);
-        var mapping = await GetMappingAsync(normalizedFolderId, cancellationToken);
         var cached = _store.LoadCachedEntriesForFolder(normalizedFolderId);
-        var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        var serial = await _serials.LoadCachedFolderAsync(normalizedFolderId, cancellationToken);
+        if (serial == null && _mappings.TryGetValue(normalizedFolderId, out var mapping))
+        {
+            serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        }
         var entries = serial == null
             ? cached
             : _serials.MaterializeEntries(serial, cached, folderPath, MappingSnapshot()).ToList();
         NormalizeFolderEntries(entries, normalizedFolderId, folderPath);
         RecordDescriptors(entries);
         return entries;
+    }
+
+    public async Task<List<AppEntry>> LoadFavoritesAsync(CancellationToken cancellationToken = default)
+    {
+        var serial = await _serials.LoadStandaloneSerialAsync(
+            SerialIndexService.FavoritesSerialId,
+            FolderSerialKind.Favorites,
+            cancellationToken) ?? await RebuildFavoritesSerialAsync(cancellationToken);
+        var entries = _serials.MaterializeEntries(
+                serial,
+                [],
+                "/",
+                MappingSnapshot(),
+                preserveChildParentFolderId: true)
+            .ToList();
+        foreach (var entry in entries)
+        {
+            entry.Path = ResolveKnownFolderPath(entry.ParentFolderId);
+        }
+        return entries;
+    }
+
+    public async Task<List<AppEntry>> LoadSynchronizedDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        var serial = await _serials.LoadStandaloneSerialAsync(
+            SynchronizedRootFolderId,
+            FolderSerialKind.Folder,
+            cancellationToken);
+        if (serial == null && _mappings.TryGetValue(SynchronizedRootFolderId, out var mapping))
+        {
+            serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        }
+
+        if (serial == null)
+        {
+            return [];
+        }
+
+        return _serials.MaterializeEntries(
+                serial,
+                _store.LoadCachedEntriesForFolder(SynchronizedRootFolderId),
+                SynchronizedRootPath,
+                MappingSnapshot())
+            .Where(entry => entry.Type == "folder")
+            .ToList();
+    }
+
+    public async Task SetFavoriteAsync(
+        AppEntry entry,
+        bool favorite,
+        CancellationToken cancellationToken = default)
+    {
+        var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        if (string.IsNullOrWhiteSpace(entry.MetadataMessageId))
+        {
+            throw new InvalidOperationException("O item não possui mensagem de metadados.");
+        }
+
+        MetadataEnvelope? envelope = null;
+        try
+        {
+            var message = await _discord.GetMessageAsync(
+                _settings.NamesChannelId,
+                entry.MetadataMessageId,
+                cancellationToken);
+            envelope = await _metadata.ReadEnvelopeAsync(message, cancellationToken);
+        }
+        catch (DiscordApiException ex) when ((int)ex.StatusCode == 404)
+        {
+            // Desktop-native entries keep metadata in the parent folder index.
+        }
+
+        var authoritative = envelope == null ? null : _metadata.ToAppEntry(envelope);
+        if (authoritative != null && SameEntryIdentity(authoritative, entry))
+        {
+            authoritative.Path = entry.Path;
+            authoritative.Favorite = favorite;
+            await _metadata.UpsertEntryAsync(
+                _discord,
+                _settings.NamesChannelId,
+                authoritative,
+                cancellationToken);
+            CopyEntryState(authoritative, entry);
+            await UpdateStandaloneFavoriteAsync(entry, cancellationToken);
+            return;
+        }
+
+        if (_mappings.ContainsKey(parentFolderId))
+        {
+            entry.Favorite = favorite;
+            await UpdateEntryAsync(entry, cancellationToken);
+            return;
+        }
+
+        throw new InvalidOperationException("Os metadados do item não puderam ser carregados.");
+    }
+
+    private async Task UpdateStandaloneFavoriteAsync(AppEntry entry, CancellationToken cancellationToken)
+    {
+        var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        var parent = await _serials.LoadStandaloneSerialAsync(
+            parentFolderId,
+            FolderSerialKind.Folder,
+            cancellationToken);
+        if (parent != null)
+        {
+            var id = entry.Type == "folder" ? entry.FolderId : entry.FileId;
+            var entryFound = false;
+            var children = parent.Children
+                .Select(child =>
+                {
+                    if (!child.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return child;
+                    }
+
+                    entryFound = true;
+                    return CopySerialEntry(child, entry);
+                })
+                .ToList();
+            if (!entryFound)
+            {
+                children.Add(_serials.BuildFolderSerial(
+                    parentFolderId,
+                    parent.FolderName,
+                    parent.ParentFolderId,
+                    [entry],
+                    MappingSnapshot()).Children.Single());
+            }
+            await _serials.SaveStandaloneSerialAsync(CopySerial(parent, children), cancellationToken);
+        }
+
+        var favorites = await _serials.LoadStandaloneSerialAsync(
+            SerialIndexService.FavoritesSerialId,
+            FolderSerialKind.Favorites,
+            cancellationToken);
+        var current = favorites?.Children.ToList() ?? [];
+        var entryId = entry.Type == "folder" ? entry.FolderId : entry.FileId;
+        current.RemoveAll(child => child.Id.Equals(entryId, StringComparison.OrdinalIgnoreCase));
+        if (entry.Favorite)
+        {
+            var single = _serials.BuildFolderSerial(
+                parentFolderId,
+                parentFolderId,
+                parentFolderId,
+                [entry],
+                MappingSnapshot());
+            current.Add(single.Children.Single());
+        }
+
+        var materialized = current.Select(child => new AppEntry
+        {
+            Name = child.Name,
+            ThreadId = child.ThreadId,
+            UploadedAt = child.UploadedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            MetadataMessageId = child.NamesMessageId,
+            FileId = child.IsFolder ? "" : child.Id,
+            FolderId = child.IsFolder ? child.Id : "",
+            ParentFolderId = child.ParentFolderId,
+            FolderColor = child.FolderColor,
+            DeviceType = child.DeviceType,
+            Favorite = true,
+            Type = child.IsFolder ? "folder" : "file",
+            MimeType = child.MimeType,
+            PreviewMessageId = child.PreviewMessageId,
+            Encryption = child.Encryption?.Clone()
+        }).ToList();
+        var built = _serials.BuildFolderSerial(
+            SerialIndexService.FavoritesSerialId,
+            RootFolderId,
+            SerialIndexService.FavoritesSerialId,
+            materialized,
+            MappingSnapshot());
+        await _serials.SaveStandaloneSerialAsync(new FolderSerial
+        {
+            FolderId = built.FolderId,
+            ParentFolderId = built.ParentFolderId,
+            FolderName = built.FolderName,
+            GeneratedAt = built.GeneratedAt,
+            Aggregate = built.Aggregate,
+            Children = built.Children,
+            Kind = FolderSerialKind.Favorites
+        }, cancellationToken);
     }
 
     public Task<List<AppEntry>> RefreshFolderAsync(
@@ -480,6 +668,8 @@ public sealed class AppRegistry
         {
             await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
+
+        await RebuildFavoritesSerialAsync(cancellationToken);
     }
 
     public async Task MoveEntryAsync(
@@ -545,6 +735,11 @@ public sealed class AppRegistry
             var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
             await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
         }
+
+        if (synchronizeSerials)
+        {
+            await RebuildFavoritesSerialAsync(cancellationToken);
+        }
     }
 
     public async Task DeleteEntryAsync(
@@ -577,6 +772,10 @@ public sealed class AppRegistry
 
         if (entry.Type != "folder" || string.IsNullOrWhiteSpace(entry.FolderId))
         {
+            if (synchronizeSerials)
+            {
+                await RebuildFavoritesSerialAsync(cancellationToken);
+            }
             return;
         }
 
@@ -598,6 +797,56 @@ public sealed class AppRegistry
             _store.DeleteFolderIndexMapping(entry.FolderId);
             _store.CacheFolderEntries(entry.FolderId, []);
         }
+
+        if (synchronizeSerials)
+        {
+            await RebuildFavoritesSerialAsync(cancellationToken);
+        }
+    }
+
+    private async Task<FolderSerial> RebuildFavoritesSerialAsync(CancellationToken cancellationToken)
+    {
+        var favorites = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
+        var mappings = MappingSnapshot();
+        foreach (var mapping in mappings.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+            if (serial == null)
+            {
+                continue;
+            }
+
+            var descriptor = ResolveFolderDescriptor(mapping.FolderId, "/");
+            var entries = _serials.MaterializeEntries(
+                serial,
+                _store.LoadCachedEntriesForFolder(mapping.FolderId),
+                descriptor.Path,
+                mappings);
+            foreach (var favorite in entries.Where(entry => entry.Favorite))
+            {
+                favorites[EntryIdentity(favorite)] = favorite;
+            }
+        }
+
+        var built = _serials.BuildFolderSerial(
+            SerialIndexService.FavoritesSerialId,
+            RootFolderId,
+            SerialIndexService.FavoritesSerialId,
+            favorites.Values,
+            mappings);
+        var result = new FolderSerial
+        {
+            FolderId = built.FolderId,
+            ParentFolderId = built.ParentFolderId,
+            FolderName = built.FolderName,
+            GeneratedAt = built.GeneratedAt,
+            Aggregate = built.Aggregate,
+            Children = built.Children,
+            Kind = FolderSerialKind.Favorites
+        };
+        await _serials.SaveStandaloneSerialAsync(result, cancellationToken);
+        return result;
     }
 
     private async Task<List<AppEntry>> RefreshFolderCoreAsync(
@@ -607,6 +856,27 @@ public sealed class AppRegistry
     {
         try
         {
+            if (!_mappings.ContainsKey(folderId))
+            {
+                var directSerial = await _serials.LoadStandaloneSerialAsync(
+                    folderId,
+                    FolderSerialKind.Folder,
+                    cancellationToken);
+                if (directSerial != null)
+                {
+                    var directEntries = _serials.MaterializeEntries(
+                            directSerial,
+                            _store.LoadCachedEntriesForFolder(folderId),
+                            folderPath,
+                            MappingSnapshot())
+                        .ToList();
+                    NormalizeFolderEntries(directEntries, folderId, folderPath);
+                    RecordDescriptors(directEntries);
+                    _store.CacheFolderEntries(folderId, directEntries);
+                    return directEntries;
+                }
+            }
+
             var mapping = await GetMappingAsync(folderId, cancellationToken);
             var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
             var messages = await _discord.GetMessagesInParallelAsync(mapping.ThreadId, workers, cancellationToken);
@@ -1205,6 +1475,26 @@ public sealed class AppRegistry
         return fallback;
     }
 
+    private string ResolveKnownFolderPath(string? folderId)
+    {
+        var normalized = NormalizeFolderId(folderId);
+        if (normalized.Equals(RootFolderId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "/";
+        }
+        if (normalized.Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase))
+        {
+            return SynchronizedRootPath;
+        }
+        if (_descriptors.TryGetValue(normalized, out var descriptor))
+        {
+            return descriptor.Path;
+        }
+
+        var cached = _store.LoadCachedFolderEntry(normalized);
+        return cached == null ? "/" : PathRules.ChildPath(cached);
+    }
+
     private IReadOnlyDictionary<string, FolderIndexMapping> MappingSnapshot()
     {
         return new Dictionary<string, FolderIndexMapping>(_mappings, StringComparer.OrdinalIgnoreCase);
@@ -1244,6 +1534,65 @@ public sealed class AppRegistry
                 left.FileId.Equals(right.FileId, StringComparison.OrdinalIgnoreCase)) ||
                (!string.IsNullOrWhiteSpace(left.FolderId) &&
                 left.FolderId.Equals(right.FolderId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string EntryIdentity(AppEntry entry)
+    {
+        return entry.Type == "folder" ? "folder:" + entry.FolderId : "file:" + entry.FileId;
+    }
+
+    private static void CopyEntryState(AppEntry source, AppEntry target)
+    {
+        target.Name = source.Name;
+        target.ThreadId = source.ThreadId;
+        target.UploadedAt = source.UploadedAt;
+        target.SizeBytes = source.SizeBytes;
+        target.MetadataMessageId = source.MetadataMessageId;
+        target.FileId = source.FileId;
+        target.FolderId = source.FolderId;
+        target.ParentFolderId = source.ParentFolderId;
+        target.FolderColor = source.FolderColor;
+        target.DeviceType = source.DeviceType;
+        target.Favorite = source.Favorite;
+        target.Type = source.Type;
+        target.MimeType = source.MimeType;
+        target.ChunkMessageIds = source.ChunkMessageIds.ToList();
+        target.PreviewMessageId = source.PreviewMessageId;
+        target.Encryption = source.Encryption?.Clone();
+    }
+
+    private static FolderSerial CopySerial(FolderSerial source, IReadOnlyList<FolderSerialEntry> children)
+    {
+        return new FolderSerial
+        {
+            FolderId = source.FolderId,
+            ParentFolderId = source.ParentFolderId,
+            FolderName = source.FolderName,
+            GeneratedAt = DateTimeOffset.UtcNow,
+            Aggregate = source.Aggregate,
+            Children = children,
+            Kind = source.Kind
+        };
+    }
+
+    private static FolderSerialEntry CopySerialEntry(FolderSerialEntry source, AppEntry entry)
+    {
+        return new FolderSerialEntry
+        {
+            Id = source.Id,
+            NamesMessageId = entry.MetadataMessageId,
+            ParentFolderId = NormalizeFolderId(entry.ParentFolderId),
+            Name = entry.Name,
+            ThreadId = entry.ThreadId,
+            IsFolder = source.IsFolder,
+            MimeType = source.MimeType,
+            UploadedAt = source.UploadedAt,
+            PreviewMessageId = source.PreviewMessageId,
+            Encryption = source.Encryption?.Clone(),
+            FolderColor = source.FolderColor,
+            DeviceType = source.DeviceType,
+            Favorite = entry.Favorite
+        };
     }
 
     private static bool IsSameFolderIdentity(AppEntry candidate, AppEntry folder)

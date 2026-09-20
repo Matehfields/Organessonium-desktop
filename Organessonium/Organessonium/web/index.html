@@ -38,13 +38,22 @@
             <button id="sidebar-files" class="sidebar-nav-item active" type="button" aria-current="page">
                 <span data-icon="folder" data-size="19"></span><span id="sidebar-files-text" data-sidebar-label>Arquivos</span>
             </button>
+            <button id="sidebar-favorites" class="sidebar-nav-item" type="button">
+                <span data-icon="star" data-size="19"></span><span id="sidebar-favorites-text" data-sidebar-label>Favoritos</span>
+            </button>
+            <button id="sidebar-devices" class="sidebar-nav-item" type="button">
+                <span data-icon="devices" data-size="19"></span><span id="sidebar-devices-text" data-sidebar-label>Dispositivos</span>
+            </button>
         </nav>
 
         <section class="sidebar-server-summary" aria-labelledby="sidebar-storage-title">
             <div class="sidebar-summary-heading" id="sidebar-storage-title">Armazenamento no servidor</div>
             <div class="sidebar-storage-line">
                 <strong id="storage-display" class="sidebar-storage-value">0 B</strong>
-                <span class="sidebar-item-count"><strong id="server-item-count">—</strong> <span id="server-items-label" data-sidebar-label>itens</span></span>
+                <span class="sidebar-item-count">
+                    <span id="server-read-status" class="server-read-status hidden" title="Lendo arquivos no servidor" aria-label="Lendo arquivos no servidor"><span data-icon="sync" data-size="15"></span></span>
+                    <strong id="server-item-count">—</strong> <span id="server-items-label" data-sidebar-label>itens</span>
+                </span>
             </div>
         </section>
 
@@ -221,6 +230,7 @@
     <button id="ctx-download" class="ctx-item"><span data-icon="download"        data-size="17"></span> <span id="ctx-dl-label">Baixar</span></button>
     <button id="ctx-move"     class="ctx-item"><span data-icon="drive_file_move" data-size="17"></span> <span id="ctx-move-text">Mover</span></button>
     <button id="ctx-rename"   class="ctx-item"><span data-icon="description"     data-size="17"></span> <span id="ctx-rename-text">Renomear</span></button>
+    <button id="ctx-favorite" class="ctx-item"><span id="ctx-favorite-icon" data-icon="star_border" data-size="17"></span> <span id="ctx-favorite-text">Adicionar aos favoritos</span></button>
     <div id="ctx-folder-colors" class="ctx-colors hidden" aria-label="Cor da pasta">
         <button data-folder-color="#C4C7C5" style="--swatch:#C4C7C5" title="Cinza"></button>
         <button data-folder-color="#F28B82" style="--swatch:#F28B82" title="Vermelho"></button>

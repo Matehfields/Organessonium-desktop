@@ -34,6 +34,12 @@ public sealed class AppEntry
     [JsonPropertyName("folderColor")]
     public string FolderColor { get; set; } = "";
 
+    [JsonPropertyName("deviceType")]
+    public string? DeviceType { get; set; }
+
+    [JsonPropertyName("favorite")]
+    public bool Favorite { get; set; }
+
     [JsonPropertyName("type")]
     public string Type { get; set; } = "file";
 
@@ -87,7 +93,7 @@ public sealed class AppEntry
             UploadedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm"),
             SizeBytes = 0,
             Path = PathRules.Normalize(parentPath),
-            FolderColor = "#C4C7C5",
+        FolderColor = "#C4C7C5",
             Type = "folder",
             FolderId = Guid.NewGuid().ToString("N")
         };
@@ -101,6 +107,12 @@ public sealed class AppEntry
         FileId ??= "";
         FolderId ??= "";
         ParentFolderId = string.IsNullOrWhiteSpace(ParentFolderId) ? null : ParentFolderId;
+        DeviceType = DeviceType?.Trim().ToLowerInvariant() switch
+        {
+            "phone" => "phone",
+            "pc" => "pc",
+            _ => null
+        };
         MimeType ??= "";
         ChunkMessageIds ??= [];
         VideoPreviewChunkMessageIds ??= [];

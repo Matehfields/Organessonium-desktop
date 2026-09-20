@@ -49,6 +49,10 @@ public sealed class FileMetadata : MetadataEntry
 
     [JsonPropertyName("encryption")]
     public EncryptionMetadata? Encryption { get; set; }
+
+    [JsonPropertyName("fav")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Favorite { get; set; }
 }
 
 public sealed class FolderMetadata : MetadataEntry
@@ -75,6 +79,14 @@ public sealed class FolderMetadata : MetadataEntry
 
     [JsonPropertyName("folderColor")]
     public string FolderColor { get; set; } = "#C4C7C5";
+
+    [JsonPropertyName("deviceType")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeviceType { get; set; }
+
+    [JsonPropertyName("fav")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Favorite { get; set; }
 }
 
 // Stored in the names text channel. It is intentionally limited to locating a

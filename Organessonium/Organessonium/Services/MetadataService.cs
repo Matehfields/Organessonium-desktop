@@ -381,6 +381,7 @@ public sealed class MetadataService
                 entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
                 entry.VideoPreviewSizeBytes = Math.Max(0, file.Preview?.Video480p?.SizeBytes ?? 0);
                 entry.Encryption = file.Encryption?.Clone();
+                entry.Favorite = file.Favorite;
                 break;
             case FolderMetadata folder:
                 entry = AppEntry.Folder(folder.Name, "/");
@@ -391,6 +392,8 @@ public sealed class MetadataService
                 entry.UploadedAt = folder.CreatedAt;
                 entry.ParentFolderId = NormalizeParentId(folder.ParentFolderId);
                 entry.FolderColor = string.IsNullOrWhiteSpace(folder.FolderColor) ? "#C4C7C5" : folder.FolderColor;
+                entry.DeviceType = folder.DeviceType;
+                entry.Favorite = folder.Favorite;
                 break;
             default:
                 return null;
@@ -416,7 +419,8 @@ public sealed class MetadataService
             ParentFolderId = NormalizeParentId(entry.ParentFolderId),
             Chunks = entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList(),
             Preview = CreatePreviewMetadata(entry),
-            Encryption = entry.Encryption?.Clone()
+            Encryption = entry.Encryption?.Clone(),
+            Favorite = entry.Favorite
         };
     }
 
@@ -500,7 +504,9 @@ public sealed class MetadataService
             Name = entry.Name,
             CreatedAt = NormalizeIsoTimestamp(entry.UploadedAt),
             ParentFolderId = NormalizeFolderParentId(entry.ParentFolderId),
-            FolderColor = string.IsNullOrWhiteSpace(entry.FolderColor) ? "#C4C7C5" : entry.FolderColor
+            FolderColor = string.IsNullOrWhiteSpace(entry.FolderColor) ? "#C4C7C5" : entry.FolderColor,
+            DeviceType = entry.DeviceType,
+            Favorite = entry.Favorite
         };
     }
 

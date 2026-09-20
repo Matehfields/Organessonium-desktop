@@ -229,6 +229,9 @@ public sealed class AppController : IAsyncDisposable
                 _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
+            case "loadFavorites": _ = RunAsync(LoadFavoritesAsync); return Task.CompletedTask;
+            case "loadSynchronizedDevices": _ = RunAsync(LoadSynchronizedDevicesAsync); return Task.CompletedTask;
+            case "setFavorite": _ = RunAsync(() => SetFavoriteAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
             case "refreshCurrentFolder": _ = RunAsync(RefreshCurrentFolderAsync); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
@@ -564,8 +567,10 @@ public sealed class AppController : IAsyncDisposable
     private async Task LoadAppsAsync()
     {
         await _registryLoadGate.WaitAsync();
+        var readStateHandedToRefresh = false;
         try
         {
+            await _bridge.CallAsync("_onServerReadState", true);
             var registry = Registry();
             var cached = await registry.LoadCachedFolderAsync(AppRegistry.RootFolderId, "/");
             _loadedApps = cached;
@@ -597,11 +602,73 @@ public sealed class AppController : IAsyncDisposable
                 {
                     AppLogger.Error("Registry.RootRefresh", ex);
                 }
+                finally
+                {
+                    await _bridge.CallAsync("_onServerReadState", false);
+                }
             });
+            readStateHandedToRefresh = true;
         }
         finally
         {
+            if (!readStateHandedToRefresh)
+            {
+                await _bridge.CallAsync("_onServerReadState", false);
+            }
             _registryLoadGate.Release();
+        }
+    }
+
+    private async Task LoadFavoritesAsync()
+    {
+        await _bridge.CallAsync("_onServerReadState", true);
+        try
+        {
+            var entries = await Registry().LoadFavoritesAsync();
+            MergeLoadedApps(entries);
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", entries);
+        }
+        finally
+        {
+            await _bridge.CallAsync("_onServerReadState", false);
+        }
+    }
+
+    private async Task LoadSynchronizedDevicesAsync()
+    {
+        await _bridge.CallAsync("_onServerReadState", true);
+        try
+        {
+            var entries = await Registry().LoadSynchronizedDevicesAsync();
+            MergeLoadedApps(entries);
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", entries);
+        }
+        finally
+        {
+            await _bridge.CallAsync("_onServerReadState", false);
+        }
+    }
+
+    private async Task SetFavoriteAsync(string metadataMessageId, bool favorite)
+    {
+        var entry = _loadedApps.FirstOrDefault(candidate =>
+            candidate.MetadataMessageId.Equals(metadataMessageId, StringComparison.Ordinal));
+        if (entry == null)
+        {
+            await ErrorAsync("Item não encontrado.");
+            return;
+        }
+
+        await _bridge.CallAsync("_onServerReadState", true);
+        try
+        {
+            await Registry().SetFavoriteAsync(entry, favorite);
+            entry.Favorite = favorite;
+            await _bridge.CallAsync("_onFavoriteChanged", entry);
+        }
+        finally
+        {
+            await _bridge.CallAsync("_onServerReadState", false);
         }
     }
 
@@ -650,6 +717,7 @@ public sealed class AppController : IAsyncDisposable
         var registry = Registry();
         try
         {
+            await _bridge.CallAsync("_onServerReadState", true);
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
             if (refreshMappings)
             {
@@ -689,6 +757,7 @@ public sealed class AppController : IAsyncDisposable
         finally
         {
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
+            await _bridge.CallAsync("_onServerReadState", false);
         }
     }
 

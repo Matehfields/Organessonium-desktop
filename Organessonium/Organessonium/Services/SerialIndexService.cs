@@ -10,6 +10,7 @@ namespace Organessonium.Services;
 public sealed class SerialIndexService
 {
     private const string RootFolderId = "root";
+    public const string FavoritesSerialId = "favorites";
     private readonly DiscordApiClient _discord;
     private readonly AppSettings _settings;
     private readonly DirectoryInfo _cacheDirectory;
@@ -111,6 +112,125 @@ public sealed class SerialIndexService
         }
     }
 
+    public async Task<FolderSerial?> LoadStandaloneSerialAsync(
+        string serialId,
+        FolderSerialKind expectedKind,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedId = serialId.Trim();
+        if (normalizedId.Length == 0 || string.IsNullOrWhiteSpace(_settings.SerialChannelId))
+        {
+            return null;
+        }
+
+        var messages = await _discord.GetMessagesInParallelAsync(
+            _settings.SerialChannelId,
+            Math.Clamp(_settings.SearchWorkers, 1, 8),
+            cancellationToken);
+        var candidates = messages
+            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
+                              envelope.FolderId.Equals(normalizedId, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(message => ulong.TryParse(message.Id, out var id) ? id : 0)
+            .ToList();
+
+        foreach (var message in candidates)
+        {
+            var attachment = message.Attachments.FirstOrDefault(candidate =>
+                candidate.FileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase));
+            if (attachment == null || !SerialMessageEnvelope.TryParse(message.Content, out var envelope))
+            {
+                continue;
+            }
+
+            try
+            {
+                var bytes = await _discord.DownloadAttachmentBytesAsync(attachment, cancellationToken);
+                var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                if (!hash.Equals(envelope.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var serial = _codec.DecodeFolder(bytes);
+                if (!serial.FolderId.Equals(normalizedId, StringComparison.OrdinalIgnoreCase) || serial.Kind != expectedKind)
+                {
+                    continue;
+                }
+
+                await WriteCachedAsync(normalizedId, bytes, cancellationToken);
+                _loadedFolders[normalizedId] = serial;
+                return serial;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Serial.LoadStandalone", ex, normalizedId);
+            }
+        }
+
+        return await ReadCachedFolderAsync(normalizedId, cancellationToken) is { } cached && cached.Kind == expectedKind
+            ? cached
+            : null;
+    }
+
+    public async Task SaveStandaloneSerialAsync(
+        FolderSerial serial,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
+        {
+            return;
+        }
+
+        var bytes = _codec.EncodeFolder(serial);
+        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var messages = await _discord.GetMessagesInParallelAsync(
+            _settings.SerialChannelId,
+            Math.Clamp(_settings.SearchWorkers, 1, 8),
+            cancellationToken);
+        var existing = messages
+            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
+                              envelope.FolderId.Equals(serial.FolderId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var unchanged = existing.FirstOrDefault(message =>
+            SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
+            envelope.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase));
+
+        string preservedMessageId;
+        if (unchanged != null)
+        {
+            preservedMessageId = unchanged.Id;
+        }
+        else
+        {
+            var temporary = await WriteTemporarySerialAsync(serial.FolderId, bytes, cancellationToken);
+            try
+            {
+                var folderName = SerialMessageEnvelope.FolderNameForMessage(serial.FolderId, serial.FolderName, hash);
+                var sent = await _discord.SendFileMessageAsync(
+                    _settings.SerialChannelId,
+                    SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash),
+                    temporary,
+                    cancellationToken);
+                preservedMessageId = sent.Id;
+            }
+            finally
+            {
+                try { temporary.Delete(); } catch { }
+            }
+        }
+
+        await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
+        _loadedFolders[serial.FolderId] = serial;
+        foreach (var duplicate in existing.Where(message => message.Id != preservedMessageId))
+        {
+            await TryDeleteRemoteSerialAsync(duplicate.Id, preservedMessageId, cancellationToken);
+        }
+    }
+
     public FolderSerial BuildFolderSerial(
         string folderId,
         string parentFolderId,
@@ -166,7 +286,6 @@ public sealed class SerialIndexService
         CancellationToken cancellationToken = default)
     {
         var previous = await ReadCachedFolderAsync(serial.FolderId, cancellationToken);
-        serial = PreserveFavorites(serial, previous);
         var requiresRemoteUpload = await RequiresRemoteUploadAsync(mapping, cancellationToken);
         if (previous != null &&
             FolderSerialCodec.SameContent(previous, serial) &&
@@ -385,7 +504,8 @@ public sealed class SerialIndexService
         FolderSerial serial,
         IReadOnlyList<AppEntry> cachedEntries,
         string folderPath,
-        IReadOnlyDictionary<string, FolderIndexMapping> mappings)
+        IReadOnlyDictionary<string, FolderIndexMapping> mappings,
+        bool preserveChildParentFolderId = false)
     {
         var cachedByKey = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var entry in cachedEntries)
@@ -411,7 +531,7 @@ public sealed class SerialIndexService
             // A serial contains only direct children of its own folder. Use
             // that relationship even when an older serial stored a stale
             // parentFolderId.
-            entry.ParentFolderId = serial.FolderId;
+            entry.ParentFolderId = preserveChildParentFolderId ? child.ParentFolderId : serial.FolderId;
             entry.Path = PathRules.Normalize(folderPath);
             entry.Type = child.IsFolder ? "folder" : "file";
             entry.FileId = child.IsFolder ? "" : child.Id;
@@ -424,6 +544,8 @@ public sealed class SerialIndexService
             entry.PreviewMessageId = child.PreviewMessageId;
             entry.Encryption = child.Encryption?.Clone();
             entry.FolderColor = child.IsFolder ? child.FolderColor : "";
+            entry.DeviceType = child.DeviceType;
+            entry.Favorite = child.Favorite;
             entry.Normalize();
             result.Add(entry);
         }
@@ -519,7 +641,9 @@ public sealed class SerialIndexService
             UploadedAt = ParseTimestamp(entry.UploadedAt),
             PreviewMessageId = entry.PreviewMessageId,
             Encryption = isFolder ? null : entry.Encryption?.Clone(),
-            FolderColor = isFolder && !string.IsNullOrWhiteSpace(entry.FolderColor) ? entry.FolderColor : "#C4C7C5"
+            FolderColor = isFolder && !string.IsNullOrWhiteSpace(entry.FolderColor) ? entry.FolderColor : "#C4C7C5",
+            DeviceType = isFolder ? entry.DeviceType : null,
+            Favorite = entry.Favorite
         };
     }
 
@@ -542,6 +666,8 @@ public sealed class SerialIndexService
             ParentFolderId = source.ParentFolderId,
             Path = source.Path,
             FolderColor = source.FolderColor,
+            DeviceType = source.DeviceType,
+            Favorite = source.Favorite,
             Type = source.Type,
             MimeType = source.MimeType,
             ChunkMessageIds = source.ChunkMessageIds.ToList(),
@@ -552,47 +678,6 @@ public sealed class SerialIndexService
             VideoPreviewMessageId = source.VideoPreviewMessageId,
             VideoPreviewSizeBytes = source.VideoPreviewSizeBytes,
             Encryption = source.Encryption?.Clone()
-        };
-    }
-
-    private static FolderSerial PreserveFavorites(FolderSerial serial, FolderSerial? previous)
-    {
-        if (previous == null || previous.Children.Count == 0)
-        {
-            return serial;
-        }
-
-        var previousFavorites = previous.Children
-            .Where(child => child.Favorite)
-            .ToDictionary(child => (child.IsFolder, child.Id));
-        if (previousFavorites.Count == 0)
-        {
-            return serial;
-        }
-
-        return new FolderSerial
-        {
-            FolderId = serial.FolderId,
-            ParentFolderId = serial.ParentFolderId,
-            FolderName = serial.FolderName,
-            GeneratedAt = serial.GeneratedAt,
-            Aggregate = serial.Aggregate,
-            Kind = serial.Kind,
-            Children = serial.Children.Select(child => new FolderSerialEntry
-            {
-                Id = child.Id,
-                NamesMessageId = child.NamesMessageId,
-                ParentFolderId = child.ParentFolderId,
-                Name = child.Name,
-                ThreadId = child.ThreadId,
-                IsFolder = child.IsFolder,
-                MimeType = child.MimeType,
-                UploadedAt = child.UploadedAt,
-                PreviewMessageId = child.PreviewMessageId,
-                Encryption = child.Encryption?.Clone(),
-                FolderColor = child.FolderColor,
-                Favorite = previousFavorites.ContainsKey((child.IsFolder, child.Id)) || child.Favorite
-            }).ToList()
         };
     }
 

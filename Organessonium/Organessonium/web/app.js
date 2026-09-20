@@ -3,6 +3,8 @@
 // ─── Estado ───────────────────────────────────────────────────────────────────
 let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
 let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
+let activeLibraryView = 'files', specialItems = [];
+let serverReadDepth = 0;
 let ctxTarget = null;
 let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
@@ -74,7 +76,7 @@ const I18N = {
         searchPlaceholder:'Pesquisar em Organessônium...',
         back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta', newMarkdown:'Novo arquivo Markdown', newMarkdownDefault:'Novo documento.md',
         uploadFolder:'Enviar pasta', upload:'Enviar', settings:'Configurações',
-        sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
+        sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarFavorites:'Favoritos', sidebarDevices:'Dispositivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
         sidebarItems:'Itens no servidor', sidebarItemSuffix:'itens', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
         filterType:'Tipo', filterModified:'Modificado', filterAll:'Todos', filterFolders:'Pastas', filterImages:'Imagens', filterVideos:'Vídeos', filterAudio:'Áudio', filterDocuments:'Documentos', filterArchives:'Arquivos compactados', filterOther:'Outros',
@@ -110,7 +112,7 @@ const I18N = {
         uploadConflictKeepBoth:'Manter os dois',
         uploadConflictSkip:'Pular',
         uploadConflictApplyAll:'Fazer isso para todos os conflitos deste upload',
-        rename:'Renomear',
+        rename:'Renomear', addFavorite:'Adicionar aos favoritos', removeFavorite:'Remover dos favoritos',
         deleteFilesTitle:'Apagar arquivos?', deleteFilesMessage:v => v.count + ' item(ns) serão removidos permanentemente.',
         deleteFolderTitle:'Apagar pasta?', deleteFolderMessage:v => '"' + v.name + '" e todos os arquivos dentro dela serão removidos permanentemente.',
         deleting:'Apagando...', options:'Opções', openFolder:v => 'Abrir pasta ' + v.name,
@@ -206,7 +208,7 @@ const I18N = {
         searchPlaceholder:'Search in Organessônium...',
         back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder', newMarkdown:'New Markdown file', newMarkdownDefault:'Untitled document.md',
         uploadFolder:'Upload folder', upload:'Upload', settings:'Settings',
-        sidebarNew:'New', sidebarFiles:'Files', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
+        sidebarNew:'New', sidebarFiles:'Files', sidebarFavorites:'Favorites', sidebarDevices:'Devices', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
         sidebarItems:'Items on server', sidebarItemSuffix:'items', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
         sortName:'Name', sortSize:'Size', sortDate:'Date',
         filterType:'Type', filterModified:'Modified', filterAll:'All', filterFolders:'Folders', filterImages:'Images', filterVideos:'Videos', filterAudio:'Audio', filterDocuments:'Documents', filterArchives:'Archives', filterOther:'Other',
@@ -242,7 +244,7 @@ const I18N = {
         uploadConflictKeepBoth:'Keep both',
         uploadConflictSkip:'Skip',
         uploadConflictApplyAll:'Do this for every conflict in this upload',
-        rename:'Rename',
+        rename:'Rename', addFavorite:'Add to favorites', removeFavorite:'Remove from favorites',
         deleteFilesTitle:'Delete files?', deleteFilesMessage:v => v.count + ' item(s) will be permanently removed.',
         deleteFolderTitle:'Delete folder?', deleteFolderMessage:v => '"' + v.name + '" and every file inside it will be permanently removed.',
         deleting:'Deleting...', options:'Options', openFolder:v => 'Open folder ' + v.name,
@@ -467,6 +469,10 @@ function applyI18n() {
     setText('sidebar-upload-folder-text', 'uploadFolder');
     setText('sidebar-files-text', 'sidebarFiles');
     setA11y('sidebar-files', 'sidebarFiles');
+    setText('sidebar-favorites-text', 'sidebarFavorites');
+    setA11y('sidebar-favorites', 'sidebarFavorites');
+    setText('sidebar-devices-text', 'sidebarDevices');
+    setA11y('sidebar-devices', 'sidebarDevices');
     setText('sidebar-storage-title', 'sidebarStorage');
     setText('server-items-label', 'sidebarItemSuffix');
     setText('sidebar-settings-text', 'settings');
@@ -762,8 +768,40 @@ function showTransfers() {
 
 function showFilesWorkspace() {
     activateWorkspaceTab('files');
-    $('sidebar-files')?.classList.add('active');
-    $('sidebar-files')?.setAttribute('aria-current', 'page');
+    setActiveLibraryView('files');
+    if (currentPath !== '/') navigate('/');
+    else render();
+}
+
+function setActiveLibraryView(view) {
+    activeLibraryView = view;
+    document.querySelector('.sidebar-create')?.classList.toggle('hidden', view !== 'files');
+    ['files','favorites','devices'].forEach(name => {
+        const item = $('sidebar-' + name);
+        item?.classList.toggle('active', name === view);
+        if (name === view) item?.setAttribute('aria-current', 'page');
+        else item?.removeAttribute('aria-current');
+    });
+}
+
+function showFavoritesWorkspace() {
+    activateWorkspaceTab('files');
+    setActiveLibraryView('favorites');
+    specialItems = [];
+    folderLoadingPath = '/@favorites';
+    render();
+    window.bridge.loadFavorites();
+}
+
+function showDevicesWorkspace() {
+    activateWorkspaceTab('files');
+    setActiveLibraryView('devices');
+    currentPath = '/@synchronized';
+    folderLoadingPath = currentPath;
+    historyBack = [];
+    historyForward = [];
+    render();
+    window.bridge.loadSynchronizedDevices();
 }
 
 // ─── Java → JS ────────────────────────────────────────────────────────────────
@@ -857,6 +895,31 @@ window._onLocalAppsChanged = apps => {
 window._onFolderLoadState = (path, loading) => {
     if (path !== currentPath) return;
     folderLoadingPath = loading ? path : '';
+    render();
+};
+window._onServerReadState = active => {
+    serverReadDepth = Math.max(0, serverReadDepth + (active ? 1 : -1));
+    $('server-read-status')?.classList.toggle('hidden', serverReadDepth === 0);
+};
+window._onSpecialItemsLoaded = (view, items) => {
+    if (!Array.isArray(items)) return;
+    const byId = new Map(allApps.map(app => [appIdentityKey(app), app]));
+    items.forEach(app => byId.set(appIdentityKey(app), app));
+    allApps = [...byId.values()];
+    if (view === 'favorites') {
+        specialItems = items;
+    }
+    folderLoadingPath = '';
+    if (activeLibraryView === view) render();
+    scheduleVisibleThumbnails();
+};
+window._onFavoriteChanged = entry => {
+    if (!entry) return;
+    const key = appIdentityKey(entry);
+    allApps = allApps.map(app => appIdentityKey(app) === key ? Object.assign(app, entry) : app);
+    specialItems = entry.favorite
+        ? [...specialItems.filter(app => appIdentityKey(app) !== key), entry]
+        : specialItems.filter(app => appIdentityKey(app) !== key);
     render();
 };
 window._onFolderStatistics = (path, statistics) => {
@@ -2451,6 +2514,8 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sidebar-upload-files').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startUpload(); });
     $('sidebar-upload-folder').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startFolderUpload(); });
     $('sidebar-files').addEventListener('click', () => { closeSidebarNewMenu(); showFilesWorkspace(); });
+    $('sidebar-favorites').addEventListener('click', () => { closeSidebarNewMenu(); showFavoritesWorkspace(); });
+    $('sidebar-devices').addEventListener('click', () => { closeSidebarNewMenu(); showDevicesWorkspace(); });
     $('sidebar-settings').addEventListener('click', () => { closeSidebarNewMenu(); openSettings(); });
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
@@ -2564,6 +2629,11 @@ document.addEventListener('DOMContentLoaded', () => {
     $('ctx-open').addEventListener('click', () => { openContextTarget(); hideCtx(); });
     $('ctx-download').addEventListener('click', () => { if (ctxTarget) window.bridge.startDownload(ctxTarget.threadId, ctxTarget.name); hideCtx(); });
     $('ctx-rename').addEventListener('click', () => { const app = ctxTarget; hideCtx(); openRenameModal(app); });
+    $('ctx-favorite').addEventListener('click', () => {
+        const app = ctxTarget;
+        hideCtx();
+        if (app && app.metadataMessageId) window.bridge.setFavorite(app.metadataMessageId, !app.favorite);
+    });
     $('ctx-new-folder').addEventListener('click', () => { hideCtx(); openFolderModal(); });
     $('ctx-upload').addEventListener('click', () => { hideCtx(); window.bridge.startUpload(); });
     $('ctx-upload-folder').addEventListener('click', () => { hideCtx(); window.bridge.startFolderUpload(); });
@@ -4790,7 +4860,9 @@ function loadPreviewApp(app, showLoading) {
 function openPreview(app) {
     if (!settings.previewEnabled) return;
     if (isMarkdownFile(app.name)) { openMarkdownEditor(app); return; }
-    previewFiles  = sorted(filesAt(allApps, currentPath)).filter(a => canPreview(a.name));
+    previewFiles  = sorted(activeLibraryView === 'favorites'
+        ? specialItems.filter(item => item.type !== 'folder')
+        : filesAt(allApps, currentPath)).filter(a => canPreview(a.name));
     previewIndex  = previewFiles.findIndex(a => a.threadId === app.threadId);
     if (previewIndex < 0) previewIndex = 0;
     previewOverlay.classList.remove('hidden');
@@ -5594,6 +5666,7 @@ function configureContextMenu(mode, app = null) {
     showCtxPart('ctx-download', isItem && !!app.threadId);
     showCtxPart('ctx-move', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-rename', isItem && !!app.metadataMessageId);
+    showCtxPart('ctx-favorite', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-folder-colors', isItem && isFolder && !!app.metadataMessageId);
     showCtxPart('ctx-delete', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-item-sep', isItem);
@@ -5614,6 +5687,8 @@ function configureContextMenu(mode, app = null) {
     if (isItem) {
         $('ctx-open-text').textContent = isFolder ? t('open') : (canPreview(app.name) ? t('preview') : t('open'));
         $('ctx-dl-label').textContent = isFolder ? t('downloadFolderAction') : t('download');
+        $('ctx-favorite-text').textContent = app.favorite ? t('removeFavorite') : t('addFavorite');
+        $('ctx-favorite-icon').innerHTML = icon(app.favorite ? 'star' : 'star_border', 17);
     }
 }
 
@@ -5746,15 +5821,21 @@ function sorted(arr) {
 // ─── Render ───────────────────────────────────────────────────────────────────
 function render() {
     renderPathCrumbs();
-    const folders = typeFilter === 'all' || typeFilter === 'folders' ? childFolders(allApps, currentPath) : [];
-    let files = typeFilter === 'folders' ? [] : sorted(filesAt(allApps, currentPath));
-    if (searchQuery) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
+    const favoritesView = activeLibraryView === 'favorites';
+    const favoriteSource = favoritesView
+        ? specialItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
+        : [];
+    const folders = favoritesView
+        ? (typeFilter === 'all' || typeFilter === 'folders' ? sorted(favoriteSource.filter(app => app.type === 'folder')) : [])
+        : (typeFilter === 'all' || typeFilter === 'folders' ? childFolders(allApps, currentPath) : []);
+    let files = typeFilter === 'folders' ? [] : sorted(favoritesView ? favoriteSource.filter(app => app.type !== 'folder') : filesAt(allApps, currentPath));
+    if (searchQuery && !favoritesView) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
     files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
     filesGrid.innerHTML=''; filesList.innerHTML='';
     const total=folders.length+files.length;
     if (!total) {
-        const loadingFolder = !searchQuery && folderLoadingPath === currentPath;
+        const loadingFolder = !searchQuery && (folderLoadingPath === currentPath || (favoritesView && folderLoadingPath === '/@favorites'));
         emptyState.classList.remove('hidden');
         emptyState.classList.toggle('folder-loading', loadingFolder);
         $('empty-title').textContent = loadingFolder ? t('loading') : t('emptyTitle');
@@ -5769,7 +5850,7 @@ function render() {
         if (folders.length) {
             const folderWrap = document.createElement('div');
             folderWrap.className = 'folders-grid';
-            folders.forEach(f=>folderWrap.appendChild(makeDriveFolderCard(f)));
+            folders.forEach(f=>folderWrap.appendChild(favoritesView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
             filesGrid.appendChild(folderWrap);
         }
         if (files.length) {
@@ -5781,7 +5862,7 @@ function render() {
     } else {
         filesGrid.classList.add('hidden'); filesList.classList.remove('hidden');
         filesList.appendChild(makeListHeader());
-        folders.forEach(f=>filesList.appendChild(makeFolderRow(f)));
+        folders.forEach(f=>filesList.appendChild(favoritesView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
         files.forEach(a=>filesList.appendChild(makeFileRow(a)));
     }
     updateSelectionUI();
@@ -5791,20 +5872,27 @@ function render() {
 
 function renderPathCrumbs() {
     pathCrumbs.innerHTML='';
+    if (activeLibraryView === 'favorites') {
+        if (currentFolderName) currentFolderName.textContent = t('sidebarFavorites');
+        if (currentFolderTitle) currentFolderTitle.title = t('sidebarFavorites');
+        pathCrumbs.classList.add('empty');
+        return;
+    }
     const isRoot = currentPath === '/';
-    const segs = currentPath.split('/').filter(Boolean);
-    const currentName = isRoot ? t('filesTab') : segs[segs.length - 1];
+    const devicesPath = currentPath === '/@synchronized' || currentPath.startsWith('/@synchronized/');
+    const segs = currentPath.split('/').filter(Boolean).filter(segment => segment !== '@synchronized');
+    const currentName = devicesPath && segs.length === 0 ? t('sidebarDevices') : isRoot ? t('filesTab') : segs[segs.length - 1];
     if (currentFolderName) currentFolderName.textContent = currentName;
     if (currentFolderTitle) {
         currentFolderTitle.title = [t('filesTab'), ...segs].join(' / ');
     }
-    pathCrumbs.classList.toggle('empty', isRoot);
-    if (isRoot) return;
+    pathCrumbs.classList.toggle('empty', isRoot || (devicesPath && segs.length === 0));
+    if (isRoot || (devicesPath && segs.length === 0)) return;
     const root = document.createElement('button');
     root.className = 'p-crumb p-crumb-root';
-    root.textContent = 'root';
-    root.title = 'root';
-    root.addEventListener('click', () => navigate('/'));
+    root.textContent = devicesPath ? t('sidebarDevices') : 'root';
+    root.title = root.textContent;
+    root.addEventListener('click', () => devicesPath ? showDevicesWorkspace() : navigate('/'));
     pathCrumbs.appendChild(root);
     segs.slice(0, -1).forEach((seg,i)=>{
         const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
@@ -5812,7 +5900,7 @@ function renderPathCrumbs() {
         const btn=document.createElement('button');
         btn.className='p-crumb';
         btn.textContent=seg; btn.title=seg;
-        btn.addEventListener('click',()=>navigate('/'+segs.slice(0,i+1).join('/')));
+        btn.addEventListener('click',()=>navigate((devicesPath ? '/@synchronized/' : '/')+segs.slice(0,i+1).join('/')));
         pathCrumbs.appendChild(btn);
     });
     const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
@@ -5868,6 +5956,44 @@ function makeFileCard(app) {
     return card;
 }
 
+function openSpecialFolder(app) {
+    setActiveLibraryView(app.path && app.path.startsWith('/@synchronized') ? 'devices' : 'files');
+    navigate(folderPathForApp(app));
+}
+
+function makeSpecialFolderCard(app) {
+    const color = app.folderColor || TYPE_COLOR.folder;
+    const card = document.createElement('div');
+    card.className = 'file-card folder-card';
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.dataset.key = itemKey(app);
+    const deviceIcon = app.deviceType === 'phone' ? 'smartphone' : app.deviceType === 'pc' ? 'computer' : 'folder';
+    card.innerHTML = `<div class="folder-icon">${icon(deviceIcon,25,color)}</div>
+        <span class="folder-name" title="${esc(app.name)}">${esc(truncate(app.name,34))}</span>
+        ${app.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
+        <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>`;
+    card.addEventListener('click', event => { if (!event.target.closest('.btn-more')) openSpecialFolder(app); });
+    card.addEventListener('keydown', event => { if (event.key === 'Enter') openSpecialFolder(app); });
+    card.querySelector('.btn-more').addEventListener('click', event => { event.stopPropagation(); showCtx(event, app); });
+    card.addEventListener('contextmenu', event => showCtx(event, app));
+    return card;
+}
+
+function makeSpecialFolderRow(app) {
+    const row = document.createElement('div');
+    row.className = 'file-row folder-row';
+    row.dataset.key = itemKey(app);
+    const deviceIcon = app.deviceType === 'phone' ? 'smartphone' : app.deviceType === 'pc' ? 'computer' : 'folder';
+    row.innerHTML = `<div class="row-icon">${icon(deviceIcon,21,app.folderColor || TYPE_COLOR.folder)}</div>
+        <div class="row-name">${esc(app.name)}</div><div class="row-date">${esc(app.uploadedAt || '')}</div><div class="row-size">${app.favorite ? icon('star',16) : ''}</div>
+        <div class="row-actions"><button class="btn-row-action btn-more" title="${esc(t('options'))}">${icon('more_vert',17)}</button></div>`;
+    row.addEventListener('dblclick', () => openSpecialFolder(app));
+    row.querySelector('.btn-more').addEventListener('click', event => { event.stopPropagation(); showCtx(event, app); });
+    row.addEventListener('contextmenu', event => showCtx(event, app));
+    return row;
+}
+
 function makeDriveFolderCard(name) {
     const fp = currentPath==='/' ? '/' + name : currentPath + '/' + name;
     const explicitFolders = allApps.filter(a => a.type === 'folder' && (a.path||'/') === currentPath && a.name === name);
@@ -5895,9 +6021,11 @@ function makeDriveFolderCard(name) {
         card.classList.toggle('selected', selectedKeys.has(itemKey(folderObj)));
     }
     card.style.setProperty('--folder-color', color);
-    card.innerHTML = `<div class="folder-icon">${icon('folder',25,color)}</div>
+    const folderIcon = folderObj.deviceType === 'phone' ? 'smartphone' : folderObj.deviceType === 'pc' ? 'computer' : 'folder';
+    card.innerHTML = `<div class="folder-icon">${icon(folderIcon,25,color)}</div>
         <span class="folder-name" title="${esc(name)}">${esc(truncate(name,34))}</span>
         <span class="folder-count">${count}</span>
+        ${folderObj.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
         <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>`;
     card.addEventListener('click', e => {
         if (shouldSuppressItemClick(e)) return;
@@ -5945,6 +6073,7 @@ function makeDriveFileCard(app) {
             : `<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`)
         + `<div class="card-footer">
             <span class="card-name" title="${esc(app.name)}">${esc(truncate(app.name,22))}</span>
+            ${app.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
             <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>
         </div>`;
 

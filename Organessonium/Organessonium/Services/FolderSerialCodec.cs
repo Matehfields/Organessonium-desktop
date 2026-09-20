@@ -47,6 +47,11 @@ public sealed class FolderSerialCodec
             {
                 IsFolder = (flags & 1) != 0,
                 Favorite = (flags & (1 << 1)) != 0,
+                DeviceType = version >= 2
+                    ? (flags & (1 << 2)) != 0
+                        ? "phone"
+                        : (flags & (1 << 3)) != 0 ? "pc" : null
+                    : null,
                 Id = reader.String(),
                 NamesMessageId = reader.String(),
                 ParentFolderId = reader.String(),
@@ -90,6 +95,8 @@ public sealed class FolderSerialCodec
         {
             var flags = child.IsFolder ? 1 : 0;
             if (child.Favorite) flags |= 1 << 1;
+            if (child.DeviceType == "phone") flags |= 1 << 2;
+            if (child.DeviceType == "pc") flags |= 1 << 3;
             stream.WriteByte((byte)flags);
             WriteString(stream, child.Id);
             WriteString(stream, child.NamesMessageId);
@@ -128,7 +135,7 @@ public sealed class FolderSerialCodec
                 a.MimeType != b.MimeType || a.UploadedAt != b.UploadedAt ||
                 a.PreviewMessageId != b.PreviewMessageId ||
                 !SameEncryption(a.Encryption, b.Encryption) ||
-                a.FolderColor != b.FolderColor || a.Favorite != b.Favorite)
+                a.FolderColor != b.FolderColor || a.DeviceType != b.DeviceType || a.Favorite != b.Favorite)
             {
                 return false;
             }

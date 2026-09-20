@@ -31,6 +31,7 @@ public sealed class FolderSerialEntry
     public string PreviewMessageId { get; init; } = "";
     public EncryptionMetadata? Encryption { get; init; }
     public string FolderColor { get; init; } = "#C4C7C5";
+    public string? DeviceType { get; init; }
     public bool Favorite { get; init; }
 }
 

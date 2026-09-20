@@ -24,6 +24,7 @@ internal static class Program
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
+        ("favoriteAndDeviceMetadataCompatibility", FavoriteAndDeviceMetadataCompatibilityAsync),
         ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
         ("fourChannelSettingsRequireFoldersForum", FourChannelSettingsRequireFoldersForumAsync),
         ("logoutDataCleanupKeepsRuntimeFolders", LogoutDataCleanupKeepsRuntimeFoldersAsync),
@@ -590,6 +591,7 @@ internal static class Program
                         Mode = EncryptionModes.Standard,
                         Salt = "NyasiAVslEKTO__DCbEeKg"
                     },
+                    DeviceType = "phone",
                     Favorite = true
                 }
             ]
@@ -603,10 +605,35 @@ internal static class Program
                     child?.Id == "file-id" &&
                     child.Encryption?.Salt == "NyasiAVslEKTO__DCbEeKg" &&
                     child.MimeType == "image/jpeg" &&
-                    child.Favorite;
+                    child.Favorite &&
+                    child.DeviceType == "phone";
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("o serial OSER não voltou com a estrutura esperada"));
+    }
+
+    private static async Task<TestOutcome> FavoriteAndDeviceMetadataCompatibilityAsync()
+    {
+        var service = new MetadataService();
+        var folder = AppEntry.Folder("Telefone", "/@synchronized");
+        folder.ParentFolderId = "synchronized";
+        folder.ThreadId = "device-thread";
+        folder.DeviceType = "phone";
+        folder.Favorite = true;
+        var payload = await service.CreateWritePayloadAsync(folder);
+        var envelope = await service.ReadEnvelopeAsync(new DiscordMessageDto
+        {
+            Id = "metadata-message",
+            Content = payload.Content
+        });
+        var restored = envelope == null ? null : service.ToAppEntry(envelope);
+        var valid = payload.Content.Contains("\"deviceType\":\"phone\"", StringComparison.Ordinal) &&
+                    payload.Content.Contains("\"fav\":true", StringComparison.Ordinal) &&
+                    restored?.DeviceType == "phone" &&
+                    restored.Favorite;
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("fav/deviceType não preservaram o contrato de metadata do Flutter");
     }
 
     private static async Task<TestOutcome> FolderIndexMappingProtocolAsync()
