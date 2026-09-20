@@ -117,6 +117,10 @@ public partial class MainWindow : Window
         WebView.DefaultBackgroundColor = dark
             ? System.Drawing.Color.FromArgb(16, 16, 16)
             : System.Drawing.Color.FromArgb(248, 248, 248);
+        if (_nativeTitleBar != null)
+        {
+            ApplyNativeTitleBarColors(_nativeTitleBar, dark);
+        }
     }
 
     private void ConfigureIntegratedTitleBar()
@@ -137,7 +141,7 @@ public partial class MainWindow : Window
 
             var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(handle));
             var titleBar = appWindow.TitleBar;
-            ConfigureNativeTitleBar(titleBar);
+            ConfigureNativeTitleBar(titleBar, WindowThemeService.IsDarkTheme(_store.Load().Theme));
 
             _nativeTitleBar = titleBar;
             _usesIntegratedTitleBar = true;
@@ -150,15 +154,26 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void ConfigureNativeTitleBar(AppWindowTitleBar titleBar)
+    private static void ConfigureNativeTitleBar(AppWindowTitleBar titleBar, bool dark)
     {
         titleBar.ExtendsContentIntoTitleBar = true;
         titleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         titleBar.IconShowOptions = IconShowOptions.HideIconAndSystemMenu;
 
+        ApplyNativeTitleBarColors(titleBar, dark);
+    }
+
+    private static void ApplyNativeTitleBarColors(AppWindowTitleBar titleBar, bool dark)
+    {
         var transparent = Windows.UI.Color.FromArgb(0, 0, 0, 0);
         titleBar.ButtonBackgroundColor = transparent;
         titleBar.ButtonInactiveBackgroundColor = transparent;
+        titleBar.ButtonForegroundColor = dark
+            ? Windows.UI.Color.FromArgb(255, 242, 242, 242)
+            : Windows.UI.Color.FromArgb(255, 32, 33, 36);
+        titleBar.ButtonInactiveForegroundColor = dark
+            ? Windows.UI.Color.FromArgb(255, 166, 166, 166)
+            : Windows.UI.Color.FromArgb(255, 95, 99, 104);
     }
 
     private async Task PublishNativeTitleBarMetricsAsync(bool force = false)

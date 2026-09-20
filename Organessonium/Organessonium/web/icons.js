@@ -61,10 +61,10 @@ const _IC = {
 };
 
 function icon(name, size, color) {
-    const p = _IC[name] || _IC.insert_drive_file;
+    const symbol = Object.prototype.hasOwnProperty.call(_IC, name) ? name : 'insert_drive_file';
     const s = size || 20;
-    const c = color ? ` style="color:${color}"` : '';
-    return `<svg class="svg-icon" width="${s}" height="${s}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"${c}>${p}</svg>`;
+    const colorStyle = color ? `;color:${color}` : '';
+    return `<span class="svg-icon" style="--icon-size:${s}px${colorStyle}" aria-hidden="true">${symbol}</span>`;
 }
 
 function initIcons() {

@@ -335,8 +335,7 @@ const $ = id => document.getElementById(id);
 const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     emptyState  = $('empty-state'),  statusText     = $('status-text'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
-    serverItemCount = $('server-item-count'), serverFileCount = $('server-file-count'),
-    serverFolderCount = $('server-folder-count'),
+    serverItemCount = $('server-item-count'),
     opsPanel    = $('ops-panel'),    opsList        = $('ops-list'),
     sortMenu    = $('sort-menu'),    ctxMenu        = $('ctx-menu'),
     dragOverlay = $('drag-overlay'),
@@ -447,8 +446,6 @@ function applyI18n() {
     setA11y('sidebar-transfers', 'sidebarTransfers');
     setText('sidebar-storage-title', 'sidebarStorage');
     setText('server-items-label', 'sidebarItems');
-    setText('server-files-label', 'sidebarFiles');
-    setText('server-folders-label', 'sidebarFolders');
     setText('sidebar-settings-text', 'settings');
     setA11y('sidebar-settings', 'settings');
     $('sort-label').textContent = sortLabel(sortMode);
@@ -650,8 +647,6 @@ function refreshSidebarSummary() {
     const hasFolders = Number.isFinite(libraryFolderCount);
     const hasBytes = Number.isFinite(libraryTotalBytes);
     if (storageDisp) storageDisp.textContent = hasBytes ? fmtSize(libraryTotalBytes) : '—';
-    if (serverFileCount) serverFileCount.textContent = hasFiles ? formatServerCount(libraryFileCount) : '—';
-    if (serverFolderCount) serverFolderCount.textContent = hasFolders ? formatServerCount(libraryFolderCount) : '—';
     if (serverItemCount) {
         serverItemCount.textContent = hasFiles && hasFolders
             ? formatServerCount(libraryFileCount + libraryFolderCount)
