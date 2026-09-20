@@ -42,7 +42,6 @@ let libraryFileCount = null;
 let libraryFolderCount = null;
 let libraryTotalBytes = null;
 let sidebarCollapsed = false;
-let sidebarAnimationTimer = 0;
 let nativeTitleBarMetrics = { enabled:false, leftInset:0, rightInset:0, height:48 };
 let nativeTitleBarDragTimer = 0;
 let requestedFolderStatistics = new Map();
@@ -678,19 +677,7 @@ function refreshSidebarSummary() {
 }
 
 function syncSidebarChrome() {
-    const wasCollapsed = document.body.classList.contains('sidebar-collapsed');
-    if (sidebarAnimationTimer) window.clearTimeout(sidebarAnimationTimer);
     document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
-    const expanding = wasCollapsed && !sidebarCollapsed;
-    document.body.classList.toggle('sidebar-expanding', expanding);
-    if (expanding) {
-        sidebarAnimationTimer = window.setTimeout(() => {
-            sidebarAnimationTimer = 0;
-            if (!sidebarCollapsed) document.body.classList.remove('sidebar-expanding');
-        }, 210);
-    } else {
-        sidebarAnimationTimer = 0;
-    }
     const button = $('btn-sidebar-toggle');
     if (!button) return;
     const label = t(sidebarCollapsed ? 'sidebarExpand' : 'sidebarCollapse');
