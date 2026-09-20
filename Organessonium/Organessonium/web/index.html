@@ -21,16 +21,10 @@
         </div>
 
         <div class="sidebar-create">
-            <button id="btn-sidebar-new" class="sidebar-new" type="button" aria-expanded="false">
+            <button id="btn-sidebar-new" class="sidebar-new" type="button">
                 <span data-icon="upload" data-size="19"></span>
                 <span id="sidebar-new-text" data-sidebar-label>Enviar</span>
-                <span class="sidebar-new-chevron" data-icon="expand_more" data-size="16" data-sidebar-label></span>
             </button>
-            <div id="sidebar-new-menu" class="sidebar-new-menu hidden" role="menu">
-                <button id="sidebar-new-folder" type="button" role="menuitem"><span data-icon="create_new_folder" data-size="17"></span><span id="sidebar-new-folder-text">Nova pasta</span></button>
-                <button id="sidebar-upload" type="button" role="menuitem"><span data-icon="upload" data-size="17"></span><span id="sidebar-upload-text">Enviar arquivos</span></button>
-                <button id="sidebar-upload-folder" type="button" role="menuitem"><span data-icon="folder_open" data-size="17"></span><span id="sidebar-upload-folder-text">Enviar pasta</span></button>
-            </div>
         </div>
 
         <nav class="sidebar-nav" aria-label="Áreas do aplicativo">
@@ -73,8 +67,10 @@
             <div class="content-header">
                 <div class="content-title-row">
                     <div class="content-title-block">
-                        <h1 id="current-folder-title">Arquivos</h1>
-                        <div id="path-crumbs" class="path-crumbs"></div>
+                        <h1 id="current-folder-title" class="current-folder-title">
+                            <span id="path-crumbs" class="path-crumbs"></span>
+                            <span id="current-folder-name">Arquivos</span>
+                        </h1>
                     </div>
                 </div>
                 <div class="content-filter-row">

@@ -42,6 +42,7 @@ let libraryFileCount = null;
 let libraryFolderCount = null;
 let libraryTotalBytes = null;
 let sidebarCollapsed = false;
+let sidebarAnimationTimer = 0;
 let nativeTitleBarMetrics = { enabled:false, leftInset:0, rightInset:0, height:48 };
 let nativeTitleBarDragTimer = 0;
 let requestedFolderStatistics = new Map();
@@ -347,7 +348,7 @@ const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     folderOverlay=$('folder-overlay'), folderInput   =$('folder-name-input'),
     confirmOverlay=$('confirm-overlay'), uploadConflictOverlay=$('upload-conflict-overlay'),
     moveOverlay = $('move-overlay'), moveTree       = $('move-tree'),
-    pathCrumbs  = $('path-crumbs'), currentFolderTitle = $('current-folder-title'),
+    pathCrumbs  = $('path-crumbs'), currentFolderTitle = $('current-folder-title'), currentFolderName = $('current-folder-name'),
     btnBack     = $('btn-back'),     btnForward     = $('btn-forward'),
     previewOverlay=$('preview-overlay');
 
@@ -461,9 +462,6 @@ function applyI18n() {
     setA11y('background-activity-close', 'close');
     setText('sidebar-new-text', 'upload');
     setA11y('btn-sidebar-new', 'upload');
-    setText('sidebar-new-folder-text', 'newFolder');
-    setText('sidebar-upload-text', 'upload');
-    setText('sidebar-upload-folder-text', 'uploadFolder');
     setText('sidebar-files-text', 'sidebarFiles');
     setA11y('sidebar-files', 'sidebarFiles');
     setText('sidebar-transfers-text', 'sidebarTransfers');
@@ -680,7 +678,19 @@ function refreshSidebarSummary() {
 }
 
 function syncSidebarChrome() {
+    const wasCollapsed = document.body.classList.contains('sidebar-collapsed');
+    if (sidebarAnimationTimer) window.clearTimeout(sidebarAnimationTimer);
     document.body.classList.toggle('sidebar-collapsed', sidebarCollapsed);
+    const expanding = wasCollapsed && !sidebarCollapsed;
+    document.body.classList.toggle('sidebar-expanding', expanding);
+    if (expanding) {
+        sidebarAnimationTimer = window.setTimeout(() => {
+            sidebarAnimationTimer = 0;
+            if (!sidebarCollapsed) document.body.classList.remove('sidebar-expanding');
+        }, 210);
+    } else {
+        sidebarAnimationTimer = 0;
+    }
     const button = $('btn-sidebar-toggle');
     if (!button) return;
     const label = t(sidebarCollapsed ? 'sidebarExpand' : 'sidebarCollapse');
@@ -753,21 +763,6 @@ function toggleSidebar() {
 function restoreSidebarState() {
     try { sidebarCollapsed = localStorage.getItem('organessonium.sidebarCollapsed') === 'true'; } catch (_) {}
     syncSidebarChrome();
-}
-
-function closeSidebarNewMenu() {
-    const menu = $('sidebar-new-menu');
-    const button = $('btn-sidebar-new');
-    if (menu) menu.classList.add('hidden');
-    if (button) button.setAttribute('aria-expanded', 'false');
-}
-
-function toggleSidebarNewMenu() {
-    const menu = $('sidebar-new-menu');
-    const button = $('btn-sidebar-new');
-    if (!menu || !button) return;
-    const open = menu.classList.toggle('hidden') === false;
-    button.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 function showTransfers() {
@@ -2460,14 +2455,10 @@ document.addEventListener('DOMContentLoaded', () => {
     applyI18n();
 
     $('btn-sidebar-toggle').addEventListener('click', toggleSidebar);
-    $('btn-sidebar-new').addEventListener('click', e => { e.stopPropagation(); toggleSidebarNewMenu(); });
-    $('sidebar-new-folder').addEventListener('click', () => { closeSidebarNewMenu(); openFolderModal(); });
-    $('sidebar-upload').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startUpload(); });
-    $('sidebar-upload-folder').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startFolderUpload(); });
+    $('btn-sidebar-new').addEventListener('click', () => window.bridge.startUpload());
     $('sidebar-files').addEventListener('click', showFilesWorkspace);
     $('sidebar-transfers').addEventListener('click', showTransfers);
     $('sidebar-settings').addEventListener('click', openSettings);
-    document.addEventListener('click', e => { if (!e.target.closest('.sidebar-create')) closeSidebarNewMenu(); });
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
     $('btn-grid').addEventListener('click', () => setView('grid'));
@@ -5722,9 +5713,10 @@ function renderPathCrumbs() {
     pathCrumbs.innerHTML='';
     const isRoot = currentPath === '/';
     const segs = currentPath.split('/').filter(Boolean);
+    const currentName = isRoot ? t('filesTab') : segs[segs.length - 1];
+    if (currentFolderName) currentFolderName.textContent = currentName;
     if (currentFolderTitle) {
-        currentFolderTitle.textContent = isRoot ? t('filesTab') : segs[segs.length - 1];
-        currentFolderTitle.title = currentFolderTitle.textContent;
+        currentFolderTitle.title = [t('filesTab'), ...segs].join(' / ');
     }
     pathCrumbs.classList.toggle('empty', isRoot);
     if (isRoot) return;
@@ -5734,15 +5726,17 @@ function renderPathCrumbs() {
     root.title = 'root';
     root.addEventListener('click', () => navigate('/'));
     pathCrumbs.appendChild(root);
-    segs.forEach((seg,i)=>{
+    segs.slice(0, -1).forEach((seg,i)=>{
         const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
         pathCrumbs.appendChild(sep);
         const btn=document.createElement('button');
-        btn.className='p-crumb'+(i===segs.length-1?' active':'');
+        btn.className='p-crumb';
         btn.textContent=seg; btn.title=seg;
-        if (i<segs.length-1) btn.addEventListener('click',()=>navigate('/'+segs.slice(0,i+1).join('/')));
+        btn.addEventListener('click',()=>navigate('/'+segs.slice(0,i+1).join('/')));
         pathCrumbs.appendChild(btn);
     });
+    const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
+    pathCrumbs.appendChild(sep);
 }
 
 // ─── Cards ────────────────────────────────────────────────────────────────────
