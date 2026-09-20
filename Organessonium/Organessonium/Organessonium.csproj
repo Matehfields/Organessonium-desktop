@@ -13,8 +13,7 @@
 	  <SelfContained>true</SelfContained>
 	  <PublishSingleFile>true</PublishSingleFile>
 	  <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-	  <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-	  <PublishReadyToRun>true</PublishReadyToRun>
+	  <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
 	  <PublishTrimmed>false</PublishTrimmed>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <AssemblyTitle>Organessônium</AssemblyTitle>
