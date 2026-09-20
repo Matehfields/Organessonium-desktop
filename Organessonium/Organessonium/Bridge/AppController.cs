@@ -84,6 +84,17 @@ public sealed class AppController : IAsyncDisposable
                 }
             }
         }
+
+        public bool HasActiveRequests
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _activeRequests > 0;
+                }
+            }
+        }
     }
     private readonly Window _owner;
     private readonly SettingsStore _store;
@@ -2441,6 +2452,16 @@ public sealed class AppController : IAsyncDisposable
                     progressTracker);
             }
 
+            async Task ReportChunkRateLimitWaitAsync(TimeSpan remaining)
+            {
+                if (totalChunks > 1 && transferActivity?.HasActiveRequests == true)
+                {
+                    return;
+                }
+
+                await ReportRateLimitWaitAsync(remaining);
+            }
+
             var uploadedMap = transferState.UploadedChunks
                 .Where(chunk => !string.IsNullOrWhiteSpace(chunk.MessageId))
                 .ToDictionary(chunk => chunk.Index, chunk => chunk.MessageId);
@@ -2545,7 +2566,7 @@ public sealed class AppController : IAsyncDisposable
                     ReportUploadedParts,
                     HandleUploadedChunkAsync,
                     cancellationToken,
-                    ReportRateLimitWaitAsync,
+                    ReportChunkRateLimitWaitAsync,
                     maxParallelParts: settings.UploadThreads,
                     encryptedPayload: encryptionContext,
                     cleanupPart: TryDeleteFile,
@@ -2563,7 +2584,7 @@ public sealed class AppController : IAsyncDisposable
                     ReportUploadedParts,
                     HandleUploadedChunkAsync,
                     cancellationToken,
-                    ReportRateLimitWaitAsync,
+                    ReportChunkRateLimitWaitAsync,
                     maxParallelParts: settings.UploadThreads,
                     adaptiveUploadGate: adaptiveUploadGate,
                     onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Organessonium.Models;
@@ -33,6 +34,7 @@ internal static class Program
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
         ("memoryAttachmentRetryKeepsCiphertext", MemoryAttachmentRetryKeepsCiphertextAsync),
+        ("uploadBufferReclaimerReleasesLargeArrays", UploadBufferReclaimerReleasesLargeArraysAsync),
         ("uploadMemoryPlannerKeepsLargeFilesBounded", UploadMemoryPlannerKeepsLargeFilesBoundedAsync),
         ("uploadMemoryPlannerFallsBackUnderPressure", UploadMemoryPlannerFallsBackUnderPressureAsync),
         ("adaptiveUploadGateReducesSlowWorkers", AdaptiveUploadGateReducesSlowWorkersAsync),
@@ -840,6 +842,28 @@ internal static class Program
         {
             CryptographicOperations.ZeroMemory(payload);
         }
+    }
+
+    private static Task<TestOutcome> UploadBufferReclaimerReleasesLargeArraysAsync()
+    {
+        var references = CreateReturnedUploadBufferReferences();
+        UploadBufferMemoryReclaimer.Reclaim();
+        var released = !references.Plaintext.IsAlive && !references.Ciphertext.IsAlive;
+        return Task.FromResult(released
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("os arrays grandes continuaram retidos após descartar o pool de upload"));
+    }
+
+    private static (WeakReference Plaintext, WeakReference Ciphertext) CreateReturnedUploadBufferReferences()
+    {
+        using var pool = new UploadChunkBufferPool();
+        using var lease = pool.Rent(10 * 1024 * 1024, 10 * 1024 * 1024 + 128, () => { });
+        MemoryMarshal.TryGetArray((ReadOnlyMemory<byte>)lease.Plaintext, out var plaintext);
+        MemoryMarshal.TryGetArray((ReadOnlyMemory<byte>)lease.Ciphertext, out var ciphertext);
+        var references = (new WeakReference(plaintext.Array!), new WeakReference(ciphertext.Array!));
+        lease.Dispose();
+        pool.Dispose();
+        return references;
     }
 
     private static EncryptionService CreateEncryptionService(out InMemoryEncryptionSecretStore store)

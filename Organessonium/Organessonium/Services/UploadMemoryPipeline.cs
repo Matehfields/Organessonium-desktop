@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime;
 using System.Security.Cryptography;
 
 namespace Organessonium.Services;
@@ -73,6 +74,20 @@ internal sealed record UploadMemoryPlan(
     int MemorySafeWorkers,
     long EstimatedBufferBudgetBytes,
     UploadMemorySnapshot Snapshot);
+
+internal static class UploadBufferMemoryReclaimer
+{
+    private static readonly object Sync = new();
+
+    public static void Reclaim()
+    {
+        lock (Sync)
+        {
+            GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        }
+    }
+}
 
 internal static class UploadMemoryPlanner
 {
@@ -172,6 +187,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
     private int _allowedWorkers;
     private int _healthySamples;
     private long _lastSampleTimestamp;
+    private int _rentedMemoryBuffers;
     private bool _disposed;
 
     public UploadMemoryCoordinator(int requestedWorkers, UploadBufferStrategy strategy = UploadBufferStrategy.Auto)
@@ -243,6 +259,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
                 plaintextLength,
                 checked(plaintextLength + EncryptionService.EnvelopeOverheadBytes),
                 ReleaseWorker);
+            Volatile.Write(ref _rentedMemoryBuffers, 1);
             return true;
         }
         catch (OutOfMemoryException)
@@ -353,6 +370,11 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             _disposed = true;
         }
         _pool.Dispose();
+        if (Volatile.Read(ref _rentedMemoryBuffers) != 0)
+        {
+            UploadBufferMemoryReclaimer.Reclaim();
+            AppLogger.Debug("Upload.MemoryPipeline", "Released upload buffers and compacted the large object heap.");
+        }
     }
 }
 
