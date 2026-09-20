@@ -628,6 +628,11 @@ public sealed class AppController : IAsyncDisposable
             MergeLoadedApps(entries);
             await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", entries);
         }
+        catch
+        {
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", Array.Empty<AppEntry>());
+            throw;
+        }
         finally
         {
             await _bridge.CallAsync("_onServerReadState", false);
@@ -642,6 +647,11 @@ public sealed class AppController : IAsyncDisposable
             var entries = await Registry().LoadSynchronizedDevicesAsync();
             MergeLoadedApps(entries);
             await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", entries);
+        }
+        catch
+        {
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", Array.Empty<AppEntry>());
+            throw;
         }
         finally
         {

@@ -67,7 +67,12 @@ public sealed class AppRegistry
         var serial = await _serials.LoadStandaloneSerialAsync(
             SerialIndexService.FavoritesSerialId,
             FolderSerialKind.Favorites,
-            cancellationToken) ?? await RebuildFavoritesSerialAsync(cancellationToken);
+            cancellationToken);
+        if (serial == null)
+        {
+            return [];
+        }
+
         var entries = _serials.MaterializeEntries(
                 serial,
                 [],

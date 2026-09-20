@@ -132,6 +132,11 @@ public sealed class SerialIndexService
                               envelope.FolderId.Equals(normalizedId, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(message => ulong.TryParse(message.Id, out var id) ? id : 0)
             .ToList();
+        if (candidates.Count == 0)
+        {
+            await InvalidateCachedFolderAsync(normalizedId);
+            return null;
+        }
 
         foreach (var message in candidates)
         {
@@ -195,6 +200,16 @@ public sealed class SerialIndexService
             .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
                               envelope.FolderId.Equals(serial.FolderId, StringComparison.OrdinalIgnoreCase))
             .ToList();
+        if (serial.Children.Count == 0)
+        {
+            foreach (var message in existing)
+            {
+                await TryDeleteRemoteSerialAsync(message.Id, cancellationToken: cancellationToken);
+            }
+            await InvalidateCachedFolderAsync(serial.FolderId);
+            return;
+        }
+
         var unchanged = existing.FirstOrDefault(message =>
             SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
             envelope.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase));

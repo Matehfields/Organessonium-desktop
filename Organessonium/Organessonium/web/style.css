@@ -162,7 +162,8 @@ img{
     width:20px;height:20px;
     display:inline-flex;align-items:center;justify-content:center;
 }
-.sidebar-new:hover{background:var(--surface2);border-color:var(--text-secondary);}
+.sidebar-new:hover:not(:disabled){background:var(--surface2);border-color:var(--text-secondary);}
+.sidebar-new:disabled{opacity:.45;cursor:default;box-shadow:none;}
 .sidebar-new-menu{
     position:fixed;z-index:420;width:224px;padding:6px;
     background:var(--modal-bg);border:1px solid var(--border);border-radius:8px;

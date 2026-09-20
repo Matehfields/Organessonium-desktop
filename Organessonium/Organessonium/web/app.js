@@ -775,7 +775,12 @@ function showFilesWorkspace() {
 
 function setActiveLibraryView(view) {
     activeLibraryView = view;
-    document.querySelector('.sidebar-create')?.classList.toggle('hidden', view !== 'files');
+    const createButton = $('btn-sidebar-new');
+    if (createButton) {
+        createButton.disabled = view !== 'files';
+        createButton.setAttribute('aria-disabled', createButton.disabled ? 'true' : 'false');
+    }
+    if (view !== 'files') closeSidebarNewMenu();
     ['files','favorites','devices'].forEach(name => {
         const item = $('sidebar-' + name);
         item?.classList.toggle('active', name === view);

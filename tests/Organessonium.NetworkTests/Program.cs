@@ -31,6 +31,7 @@ internal static class Program
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("staleSerialMappingRepublishesCachedSerial", StaleSerialMappingRepublishesCachedSerialAsync),
+        ("emptyStandaloneSerialIsDeleted", EmptyStandaloneSerialIsDeletedAsync),
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
@@ -761,6 +762,38 @@ internal static class Program
         }
     }
 
+    private static async Task<TestOutcome> EmptyStandaloneSerialIsDeletedAsync()
+    {
+        var cache = Directory.CreateTempSubdirectory("organessonium_empty_serial_test_");
+        try
+        {
+            using var handler = new EmptyStandaloneSerialHandler();
+            using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+            var service = new SerialIndexService(
+                discord,
+                new AppSettings { SerialChannelId = EmptyStandaloneSerialHandler.ChannelId, SearchWorkers = 1 },
+                cache);
+            await service.SaveStandaloneSerialAsync(new FolderSerial
+            {
+                FolderId = SerialIndexService.FavoritesSerialId,
+                ParentFolderId = "root",
+                FolderName = SerialIndexService.FavoritesSerialId,
+                GeneratedAt = DateTimeOffset.Parse("2026-09-20T12:00:00Z"),
+                Aggregate = new FolderSerialAggregate(),
+                Children = [],
+                Kind = FolderSerialKind.Favorites
+            });
+
+            return handler.Deletes == 1 && handler.Uploads == 0
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail($"serial vazio não foi removido: deletes={handler.Deletes}, uploads={handler.Uploads}");
+        }
+        finally
+        {
+            try { cache.Delete(true); } catch { }
+        }
+    }
+
     private static async Task<TestOutcome> ActiveThreadsUseGuildRouteAsync()
     {
         using var handler = new ActiveThreadsHandler();
@@ -990,6 +1023,73 @@ internal static class Program
             }
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private static HttpResponseMessage JsonResponse(string json)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class EmptyStandaloneSerialHandler : HttpMessageHandler
+    {
+        public const string ChannelId = "4000000000000000000";
+        private const string MessageId = "4000000000000000100";
+        private readonly string _envelope = SerialMessageEnvelope.Encode(
+            SerialIndexService.FavoritesSerialId,
+            SerialIndexService.FavoritesSerialId,
+            new string('a', 64));
+
+        public int Deletes { get; private set; }
+        public int Uploads { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri ?? throw new InvalidOperationException("URI ausente no teste de serial vazio.");
+            var path = uri.AbsolutePath;
+            if (request.Method == HttpMethod.Get &&
+                path.EndsWith($"/channels/{ChannelId}/messages", StringComparison.Ordinal))
+            {
+                var before = QueryValue(uri, "before");
+                var include = string.IsNullOrWhiteSpace(before) ||
+                              !ulong.TryParse(before, out var beforeId) ||
+                              beforeId > ulong.Parse(MessageId);
+                var json = include
+                    ? $"[{{\"id\":\"{MessageId}\",\"content\":{System.Text.Json.JsonSerializer.Serialize(_envelope)},\"attachments\":[]}}]"
+                    : "[]";
+                return Task.FromResult(JsonResponse(json));
+            }
+
+            if (request.Method == HttpMethod.Delete &&
+                path.EndsWith($"/channels/{ChannelId}/messages/{MessageId}", StringComparison.Ordinal))
+            {
+                Deletes++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
+            }
+
+            if (request.Method == HttpMethod.Post)
+            {
+                Uploads++;
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private static string? QueryValue(Uri uri, string key)
+        {
+            foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = pair.Split('=', 2);
+                if (parts.Length == 2 && parts[0].Equals(key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Uri.UnescapeDataString(parts[1]);
+                }
+            }
+            return null;
         }
 
         private static HttpResponseMessage JsonResponse(string json)
