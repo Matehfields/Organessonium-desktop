@@ -76,7 +76,7 @@ const I18N = {
         back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta',
         uploadFolder:'Enviar pasta', upload:'Enviar', settings:'Configurações',
         sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
-        sidebarItems:'Itens no servidor', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
+        sidebarItems:'Itens no servidor', sidebarItemSuffix:'itens', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
         filterType:'Tipo', filterModified:'Modificado', filterAll:'Todos', filterFolders:'Pastas', filterImages:'Imagens', filterVideos:'Vídeos', filterAudio:'Áudio', filterDocuments:'Documentos', filterArchives:'Arquivos compactados', filterOther:'Outros',
         filterAnyDate:'Qualquer data', filterToday:'Hoje', filterLast7Days:'Últimos 7 dias', filterLast30Days:'Últimos 30 dias',
@@ -208,7 +208,7 @@ const I18N = {
         back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder',
         uploadFolder:'Upload folder', upload:'Upload', settings:'Settings',
         sidebarNew:'New', sidebarFiles:'Files', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
-        sidebarItems:'Items on server', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
+        sidebarItems:'Items on server', sidebarItemSuffix:'items', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
         sortName:'Name', sortSize:'Size', sortDate:'Date',
         filterType:'Type', filterModified:'Modified', filterAll:'All', filterFolders:'Folders', filterImages:'Images', filterVideos:'Videos', filterAudio:'Audio', filterDocuments:'Documents', filterArchives:'Archives', filterOther:'Other',
         filterAnyDate:'Any time', filterToday:'Today', filterLast7Days:'Last 7 days', filterLast30Days:'Last 30 days',
@@ -467,7 +467,7 @@ function applyI18n() {
     setText('sidebar-transfers-text', 'sidebarTransfers');
     setA11y('sidebar-transfers', 'sidebarTransfers');
     setText('sidebar-storage-title', 'sidebarStorage');
-    setText('server-items-label', 'sidebarItems');
+    setText('server-items-label', 'sidebarItemSuffix');
     setText('sidebar-settings-text', 'settings');
     setA11y('sidebar-settings', 'settings');
     updateFilterLabels();
