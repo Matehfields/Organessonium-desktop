@@ -8,11 +8,7 @@ if not exist "%SCRIPT%" (
   exit /b 1
 )
 
-if "%~1"=="" (
-  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
-) else (
-  powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Version "%~1"
-)
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
 
 if errorlevel 1 (
   echo.

@@ -79,15 +79,15 @@ Não há migração nem fallback automático. Para migrar um servidor antigo, cr
   "schemaVersion": 2,
   "entryType": "file",
   "fileId": "f2ebaea53f1146bbaf967132e7d031f3",
-  "threadId": "1521609754625970269",
+  "threadId": "123456789012345678",
   "name": "1745186438334.jpg",
   "mimeType": "image/jpeg",
   "sizeBytes": 317584,
   "uploadedAt": "2026-06-30T20:13:00Z",
   "batchId": "ca433d8f1b",
-  "chunks": ["1521609754625970269"],
+  "chunks": ["123456789012345678"],
   "preview": {
-    "thumbnailMessageId": "1521609757788602448"
+    "thumbnailMessageId": "123456789012345679"
   }
 }
 ```
@@ -212,11 +212,16 @@ Para detalhes de arquitetura e compatibilidade entre versoes, veja `Information.
 
 ## Geração de releases para Windows
 
-`build-releases.bat` gera os artefatos separadamente em `artifacts/releases/<versão>` sem alterar o pacote portátil existente. A versão pode vir de `release/release-settings.json` ou ser informada no comando, por exemplo `build-releases.bat 1.2.0.0`. Use sempre `A.B.C.0`: o MSIX exige quatro campos, enquanto o Windows Installer usa os três primeiros para controlar upgrades do MSI.
+`build-releases.bat` gera os artefatos separadamente em `artifacts/releases/<versão>` sem alterar o pacote portátil existente. A versão pode vir de `release/release-settings.json` ou ser informada no comando, por exemplo `build-releases.bat 1.2.0.0`. Use sempre `A.B.C.0`: os três MSIX e o MSIXBundle recebem exatamente essa versão, enquanto o Windows Installer usa os três primeiros campos para controlar upgrades do MSI.
 
-- `Organessonium-windows-source.zip` contém somente a solução, o projeto WPF e a documentação necessários para abrir `Organessonium.slnx`, restaurar os pacotes NuGet e compilar o aplicativo.
-- `Organessonium-installer.msi` é produzido pelas APIs nativas do Microsoft Windows Installer e pelo `MakeCab` do Windows. O MSI é x64, autocontido, instala em `Program Files\Organessonium`, cria um atalho no menu Iniciar e suporta atualização por `UpgradeCode` estável.
-- `Organessonium_<versão>_x64.msixbundle` é produzido pelo `MakeAppx` do Windows SDK. Para envio à Microsoft Store, copie `release/release-settings.local.example.json` para `release/release-settings.local.json` e substitua `storeIdentityName`, `storePublisher` e `storePublisherDisplayName` pelos valores exatos de identidade exibidos no Partner Center. O arquivo local é ignorado pelo Git. A Store assina novamente o MSIX durante a submissão; o bundle pode permanecer sem assinatura local.
-- `SHA256SUMS.txt` registra os hashes dos três artefatos finais.
+- `Organessonium-windows-source.zip` contém somente a solução, o projeto WPF, código C#/XAML/web, assets e documentação necessários para abrir `Organessonium.slnx`, restaurar os pacotes NuGet e compilar o aplicativo. As entradas usam `/`; `bin`, `obj`, artefatos, caches, logs, bancos locais, certificados e configurações locais são excluídos. Antes de criar o ZIP, o script também bloqueia tokens, webhooks, chaves privadas e caminhos de usuário detectados no conteúdo público.
+- `Organessonium-installer.msi` é produzido pelas APIs nativas do Microsoft Windows Installer e pelo `MakeCab` do Windows. O MSI permanece somente x64, autocontido, instala em `Program Files\Organessonium`, cria um atalho no menu Iniciar, impede downgrade e usa permanentemente o mesmo `UpgradeCode`.
+- `msix/Organessonium_<versão>_x86.msix`, `msix/Organessonium_<versão>_x64.msix` e `msix/Organessonium_<versão>_arm64.msix` contêm, cada um, o executável self-contained e single-file da própria arquitetura.
+- `Organessonium_<versão>.msixbundle` reúne exatamente os três MSIX. O `MakeAppx` recebe a versão explicitamente por `/bv`, permitindo que o Windows selecione x86, x64 ou ARM64 conforme a máquina.
+- `SHA256SUMS.txt` registra os hashes do MSI, dos três MSIX, do MSIXBundle e do ZIP de código-fonte.
 
-O script exige o .NET SDK e o Windows 10/11 SDK instalados pelo Visual Studio Installer. Se `ORGANESSONIUM_PFX_PATH` estiver definido, ele usa o `SignTool` oficial para assinar o MSI e o MSIXBundle; a senha pode ser passada apenas no ambiente por `ORGANESSONIUM_PFX_PASSWORD`, sem ser gravada no repositório. `ORGANESSONIUM_TIMESTAMP_URL` é opcional. O instalador MSI destinado a distribuição pública deve ser assinado com um certificado de assinatura de código confiável; para a Store, a Microsoft assina o MSIX após a certificação.
+Para envio à Microsoft Store, copie `release/release-settings.local.example.json` para `release/release-settings.local.json` e substitua `storeIdentityName`, `storePublisher` e `storePublisherDisplayName` pelos valores exatos exibidos no Partner Center. O arquivo local é ignorado pelo Git, não entra no ZIP e não deve ser publicado. O fluxo normal da Store não exige PFX: o bundle pode permanecer sem assinatura local e será processado pela Microsoft. A capability `runFullTrust` permanece no manifesto porque o Organessonium é WPF/Win32 full-trust.
+
+O script exige o .NET SDK e o Windows 10/11 SDK instalados pelo Visual Studio Installer. Se `ORGANESSONIUM_PFX_PATH` estiver definido, ele usa o `SignTool` oficial para assinar os pacotes; a senha pode ser passada apenas no ambiente por `ORGANESSONIUM_PFX_PASSWORD`, sem ser gravada no repositório. `ORGANESSONIUM_TIMESTAMP_URL` é opcional. O MSI destinado a distribuição pública deve ser assinado com um certificado confiável.
+
+Ao final, o script valida conteúdo, arquitetura, versão, identidade e encoding de cada artefato, descompacta administrativamente o MSI e recompila uma extração limpa do ZIP. Para solicitar o Windows App Certification Kit, execute `build-releases.bat 1.2.0.0 -RunWack` em um terminal elevado. A ausência ou falha do WACK é reportada sem apagar os demais artefatos; a certificação final e a associação da identidade ainda dependem do Partner Center.

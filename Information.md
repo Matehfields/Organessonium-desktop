@@ -179,17 +179,17 @@ Formato logico de imagem com thumbnail:
   "schemaVersion": 2,
   "entryType": "file",
   "fileId": "f2ebaea53f1146bbaf967132e7d031f3",
-  "threadId": "1521609754625970269",
+  "threadId": "123456789012345678",
   "name": "1745186438334.jpg",
   "mimeType": "image/jpeg",
   "sizeBytes": 317584,
   "uploadedAt": "2026-06-30T20:13:00Z",
   "batchId": "ca433d8f1b",
   "chunks": [
-    "1521609754625970269"
+    "123456789012345678"
   ],
   "preview": {
-    "thumbnailMessageId": "1521609757788602448"
+    "thumbnailMessageId": "123456789012345679"
   }
 }
 ```
