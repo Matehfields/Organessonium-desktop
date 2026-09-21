@@ -1104,8 +1104,6 @@ window._onPreviewLoading = () => {
     $('preview-body').innerHTML = `<div class="preview-load-state">
         <div class="preview-spinner"></div>
         <div class="preview-load-label">${esc(t('previewDownloading'))}</div>
-        <div class="preview-load-track"><span style="width:0%"></span></div>
-        <div class="preview-load-percent">0%</div>
     </div>`;
 };
 
@@ -1127,8 +1125,6 @@ window._onPreviewProgress = (percent, phase, downloadedBytes, totalBytes) => {
     }
     const state = $('preview-body').querySelector('.preview-load-state');
     if (!state) return;
-    state.querySelector('.preview-load-track span').style.width = value + '%';
-    state.querySelector('.preview-load-percent').textContent = value + '%';
     state.querySelector('.preview-load-label').textContent = message || t('previewDownloading');
 };
 

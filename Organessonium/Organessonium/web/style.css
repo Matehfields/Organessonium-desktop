@@ -1859,13 +1859,13 @@ html[data-motion="reduced"] *{
     display:grid;
     gap:6px;
 }
-.preview-media-quality-progress>div,.preview-load-track{
+.preview-media-quality-progress>div{
     height:4px;
     overflow:hidden;
     border-radius:2px;
     background:var(--surface3);
 }
-.preview-media-quality-progress span,.preview-load-track span{
+.preview-media-quality-progress span{
     display:block;
     width:0;
     height:100%;
@@ -1890,8 +1890,6 @@ html[data-motion="reduced"] *{
     text-overflow:ellipsis;
     white-space:nowrap;
 }
-.preview-load-track{width:100%;}
-.preview-load-percent{color:var(--text-muted);font-size:12px;}
 .preview-media-player-shell{
     width:min(1200px,calc(100% - 56px));
     max-height:calc(100vh - 132px);
