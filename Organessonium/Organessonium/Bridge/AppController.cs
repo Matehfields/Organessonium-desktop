@@ -2267,11 +2267,13 @@ public sealed class AppController : IAsyncDisposable
         var nextIndex = -1;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
-        using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
-        using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
+        var uploadWorkers = Math.Clamp(settings.UploadThreads, 1, 16);
+        var partsPerFile = UploadConcurrencyPlanner.PartsPerFile(uploadWorkers, fileParallelism);
+        using var uploadGate = new AdaptiveUploadGate(uploadWorkers);
+        using var memoryCoordinator = new UploadMemoryCoordinator(uploadWorkers);
         AppLogger.Debug(
             "Upload.Concurrency",
-            $"Upload batch configured with {settings.UploadThreads} network workers and {fileParallelism} parallel files.");
+            $"Upload batch configured with {uploadWorkers} network workers, {fileParallelism} parallel files and {partsPerFile} parts per file.");
         var transferActivity = new TransferActivityClock();
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
@@ -2308,6 +2310,7 @@ public sealed class AppController : IAsyncDisposable
                         cancellationToken,
                         adaptiveUploadGate: uploadGate,
                         memoryCoordinator: memoryCoordinator,
+                        maxParallelPartsPerFile: partsPerFile,
                         useBatchUi: true,
                         onBytesUploaded: async bytes =>
                         {
@@ -2431,12 +2434,14 @@ public sealed class AppController : IAsyncDisposable
         TransferState? existingTransferState = null,
         AdaptiveUploadGate? adaptiveUploadGate = null,
         UploadMemoryCoordinator? memoryCoordinator = null,
+        int? maxParallelPartsPerFile = null,
         bool useBatchUi = false,
         Func<long, Task>? onBytesUploaded = null,
         TransferActivityClock? transferActivity = null,
         bool deferSerialSynchronization = false)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
+        var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.UploadThreads, 1, 16);
         var sourceLength = file.Length;
         var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
                                      existingTransferState?.UploadedChunks.Count > 0;
@@ -2679,7 +2684,7 @@ public sealed class AppController : IAsyncDisposable
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportChunkRateLimitWaitAsync,
-                    maxParallelParts: settings.UploadThreads,
+                    maxParallelParts: partParallelism,
                     encryptedPayload: encryptionContext,
                     cleanupPart: TryDeleteFile,
                     adaptiveUploadGate: adaptiveUploadGate,
@@ -2697,7 +2702,7 @@ public sealed class AppController : IAsyncDisposable
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportChunkRateLimitWaitAsync,
-                    maxParallelParts: settings.UploadThreads,
+                    maxParallelParts: partParallelism,
                     adaptiveUploadGate: adaptiveUploadGate,
                     onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);
             }

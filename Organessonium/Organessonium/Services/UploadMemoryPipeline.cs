@@ -94,7 +94,7 @@ internal static class UploadMemoryPlanner
     internal const long LargeFileThresholdBytes = 256L * 1024 * 1024;
     internal const long ProcessTargetBytes = 800L * 1024 * 1024;
     internal const long ProcessHardLimitBytes = 1024L * 1024 * 1024;
-    internal const long EstimatedWorkerBytes = 32L * 1024 * 1024;
+    internal const long EstimatedWorkerBytes = 64L * 1024 * 1024;
     private const long MinimumSystemReserveBytes = 2L * 1024 * 1024 * 1024;
 
     public static UploadMemoryPlan CreatePlan(
@@ -173,6 +173,16 @@ internal static class UploadMemoryPlanner
         }
 
         return left > long.MaxValue / right ? long.MaxValue : left * right;
+    }
+}
+
+internal static class UploadConcurrencyPlanner
+{
+    public static int PartsPerFile(int globalWorkers, int activeFiles)
+    {
+        globalWorkers = Math.Clamp(globalWorkers, 1, 16);
+        activeFiles = Math.Max(1, activeFiles);
+        return Math.Max(1, globalWorkers / activeFiles);
     }
 }
 

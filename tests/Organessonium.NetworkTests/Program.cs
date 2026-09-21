@@ -39,6 +39,7 @@ internal static class Program
         ("uploadBufferReclaimerReleasesLargeArrays", UploadBufferReclaimerReleasesLargeArraysAsync),
         ("uploadMemoryPlannerKeepsLargeFilesBounded", UploadMemoryPlannerKeepsLargeFilesBoundedAsync),
         ("uploadMemoryPlannerFallsBackUnderPressure", UploadMemoryPlannerFallsBackUnderPressureAsync),
+        ("uploadConcurrencyDistributesPartsPerFile", UploadConcurrencyDistributesPartsPerFileAsync),
         ("adaptiveUploadGateUsesAggregateThroughput", AdaptiveUploadGateUsesAggregateThroughputAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
@@ -344,7 +345,7 @@ internal static class Program
         var veryLarge = UploadMemoryPlanner.CreatePlan(50 * gib, 16, UploadBufferStrategy.Auto, snapshot);
         var valid = medium.UseMemory &&
                     veryLarge.UseMemory &&
-                    medium.MemorySafeWorkers == 16 &&
+                    medium.MemorySafeWorkers == 8 &&
                     veryLarge.MemorySafeWorkers == medium.MemorySafeWorkers &&
                     medium.EstimatedBufferBudgetBytes <= UploadMemoryPlanner.ProcessTargetBytes - snapshot.ProcessWorkingSetBytes;
         return Task.FromResult(valid
@@ -370,6 +371,17 @@ internal static class Program
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("o plano de RAM não voltou ao fallback em disco sob baixa memória"));
+    }
+
+    private static Task<TestOutcome> UploadConcurrencyDistributesPartsPerFileAsync()
+    {
+        var valid = UploadConcurrencyPlanner.PartsPerFile(16, 8) == 2 &&
+                    UploadConcurrencyPlanner.PartsPerFile(16, 3) == 5 &&
+                    UploadConcurrencyPlanner.PartsPerFile(8, 8) == 1 &&
+                    UploadConcurrencyPlanner.PartsPerFile(16, 1) == 16;
+        return Task.FromResult(valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail("a concorrência global não foi distribuída entre os arquivos ativos"));
     }
 
     private static async Task<TestOutcome> AdaptiveUploadGateUsesAggregateThroughputAsync()
