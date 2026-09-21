@@ -202,7 +202,9 @@
     <div class="preview-stage">
         <button id="preview-prev" class="preview-nav-btn" disabled><span data-icon="arrow_back"    data-size="28"></span></button>
         <div id="preview-body" class="preview-body">
-            <div id="preview-spinner" class="preview-spinner"></div>
+            <div class="preview-load-state">
+                <div class="preview-progress-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+            </div>
         </div>
         <button id="preview-next" class="preview-nav-btn" disabled><span data-icon="arrow_forward" data-size="28"></span></button>
     </div>

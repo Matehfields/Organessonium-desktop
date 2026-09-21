@@ -1102,8 +1102,7 @@ window._onPreviewLoading = () => {
     $('preview-zoom-controls').classList.add('hidden');
     pendingVideoQualitySwitch = null;
     $('preview-body').innerHTML = `<div class="preview-load-state">
-        <div class="preview-spinner"></div>
-        <div class="preview-load-label">${esc(t('previewDownloading'))}</div>
+        <div class="preview-progress-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
     </div>`;
 };
 
@@ -1125,7 +1124,9 @@ window._onPreviewProgress = (percent, phase, downloadedBytes, totalBytes) => {
     }
     const state = $('preview-body').querySelector('.preview-load-state');
     if (!state) return;
-    state.querySelector('.preview-load-label').textContent = message || t('previewDownloading');
+    const ring = state.querySelector('.preview-progress-ring');
+    ring.style.setProperty('--preview-progress', value + '%');
+    ring.setAttribute('aria-valuenow', String(Math.round(value)));
 };
 
 window._onPreviewReady = (type, name, data) => {
@@ -4910,7 +4911,9 @@ function closePreview() {
     pendingVideoQualitySwitch = null;
     previewOverlay.classList.add('hidden');
     scheduleNativeTitleBarDragRegion(0);
-    $('preview-body').innerHTML = '<div class="preview-spinner"></div>';
+    $('preview-body').innerHTML = `<div class="preview-load-state">
+        <div class="preview-progress-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+    </div>`;
     if (previewAppRef) { window.bridge.closePreview(previewAppRef.threadId); previewAppRef = null; }
 }
 
