@@ -2,6 +2,7 @@
 **/bin/
 **/obj/
 artifacts/
+release/release-settings.local.json
 
 # IDE and local tooling state
 .vs/
