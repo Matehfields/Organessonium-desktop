@@ -2269,6 +2269,9 @@ public sealed class AppController : IAsyncDisposable
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
         using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
         using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
+        AppLogger.Debug(
+            "Upload.Concurrency",
+            $"Upload batch configured with {settings.UploadThreads} network workers and {fileParallelism} parallel files.");
         var transferActivity = new TransferActivityClock();
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
@@ -2529,7 +2532,6 @@ public sealed class AppController : IAsyncDisposable
             var useMemoryPipeline = memoryPlan?.UseMemory == true;
             if (useMemoryPipeline)
             {
-                adaptiveUploadGate?.LimitForMemory(memoryPlan!.MemorySafeWorkers);
                 if (IsUploadPartDirectoryForSource(file, transferState.TempPath))
                 {
                     CleanDir(new DirectoryInfo(transferState.TempPath));

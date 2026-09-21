@@ -517,14 +517,15 @@ internal sealed class UploadChunkBufferPool : IDisposable
 public sealed class AdaptiveUploadGate : IDisposable
 {
     private const int MinimumNetworkWorkers = 2;
-    private const long SlowWorkerRateBytesPerSecond = 384L * 1024;
-    private const long HealthyWorkerRateBytesPerSecond = 1024L * 1024;
+    private const long SlowAggregateRateBytesPerSecond = 384L * 1024;
+    private const long HealthyAggregateRateBytesPerSecond = 1024L * 1024;
+    private const int SlowSamplesRequired = 4;
+    private const int HealthySamplesRequired = 2;
     private readonly object _sync = new();
     private readonly Queue<Waiter> _waiters = new();
     private readonly int _maximumWorkers;
     private int _activeWorkers;
     private int _currentLimit;
-    private int _memoryLimit;
     private int _slowSamples;
     private int _healthySamples;
     private bool _disposed;
@@ -533,7 +534,6 @@ public sealed class AdaptiveUploadGate : IDisposable
     {
         _maximumWorkers = Math.Clamp(requestedWorkers, 1, 16);
         _currentLimit = _maximumWorkers;
-        _memoryLimit = _maximumWorkers;
     }
 
     internal int CurrentLimit
@@ -572,7 +572,8 @@ public sealed class AdaptiveUploadGate : IDisposable
             return;
         }
 
-        var rate = (long)(bytes / elapsed.TotalSeconds);
+        var workerRate = (long)(bytes / elapsed.TotalSeconds);
+        long aggregateRate;
         int previous = 0;
         int next = 0;
         lock (_sync)
@@ -583,11 +584,15 @@ public sealed class AdaptiveUploadGate : IDisposable
             }
 
             previous = _currentLimit;
-            if (rate <= SlowWorkerRateBytesPerSecond && _currentLimit > Math.Min(MinimumNetworkWorkers, _maximumWorkers))
+            var activeWorkers = Math.Max(1, _activeWorkers);
+            aggregateRate = workerRate > long.MaxValue / activeWorkers
+                ? long.MaxValue
+                : workerRate * activeWorkers;
+            if (aggregateRate <= SlowAggregateRateBytesPerSecond && _currentLimit > Math.Min(MinimumNetworkWorkers, _maximumWorkers))
             {
                 _slowSamples++;
                 _healthySamples = 0;
-                if (_slowSamples >= 2)
+                if (_slowSamples >= SlowSamplesRequired)
                 {
                     _currentLimit = Math.Max(
                         Math.Min(MinimumNetworkWorkers, _maximumWorkers),
@@ -595,11 +600,11 @@ public sealed class AdaptiveUploadGate : IDisposable
                     _slowSamples = 0;
                 }
             }
-            else if (rate >= HealthyWorkerRateBytesPerSecond && _currentLimit < Math.Min(_maximumWorkers, _memoryLimit))
+            else if (aggregateRate >= HealthyAggregateRateBytesPerSecond && _currentLimit < _maximumWorkers)
             {
                 _healthySamples++;
                 _slowSamples = 0;
-                if (_healthySamples >= 4)
+                if (_healthySamples >= HealthySamplesRequired)
                 {
                     _currentLimit++;
                     _healthySamples = 0;
@@ -619,34 +624,9 @@ public sealed class AdaptiveUploadGate : IDisposable
         {
             AppLogger.Debug(
                 "Upload.Concurrency",
-                $"Upload workers dynamically adjusted: {previous} -> {next}; observed worker rate: {FormatRate(rate)}.");
-        }
-    }
-
-    public void LimitForMemory(int memorySafeWorkers)
-    {
-        memorySafeWorkers = Math.Clamp(memorySafeWorkers, 1, _maximumWorkers);
-        int previous;
-        int next;
-        lock (_sync)
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            previous = _currentLimit;
-            _memoryLimit = Math.Min(_memoryLimit, memorySafeWorkers);
-            _currentLimit = Math.Min(_currentLimit, _memoryLimit);
-            next = _currentLimit;
-            ReleaseWaitingWorkers();
-        }
-
-        if (previous != next)
-        {
-            AppLogger.Debug(
-                "Upload.Concurrency",
-                $"Upload workers capped by memory plan: {previous} -> {next}.");
+                $"Upload workers dynamically adjusted: {previous} -> {next}; " +
+                $"estimated aggregate rate: {FormatRate(aggregateRate)}; " +
+                $"completed worker rate: {FormatRate(workerRate)}.");
         }
     }
 

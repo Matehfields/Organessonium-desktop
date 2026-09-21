@@ -39,7 +39,7 @@ internal static class Program
         ("uploadBufferReclaimerReleasesLargeArrays", UploadBufferReclaimerReleasesLargeArraysAsync),
         ("uploadMemoryPlannerKeepsLargeFilesBounded", UploadMemoryPlannerKeepsLargeFilesBoundedAsync),
         ("uploadMemoryPlannerFallsBackUnderPressure", UploadMemoryPlannerFallsBackUnderPressureAsync),
-        ("adaptiveUploadGateReducesSlowWorkers", AdaptiveUploadGateReducesSlowWorkersAsync),
+        ("adaptiveUploadGateUsesAggregateThroughput", AdaptiveUploadGateUsesAggregateThroughputAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),
@@ -372,18 +372,40 @@ internal static class Program
             : TestOutcome.Fail("o plano de RAM não voltou ao fallback em disco sob baixa memória"));
     }
 
-    private static Task<TestOutcome> AdaptiveUploadGateReducesSlowWorkersAsync()
+    private static async Task<TestOutcome> AdaptiveUploadGateUsesAggregateThroughputAsync()
     {
-        using var gate = new AdaptiveUploadGate(16);
-        for (var sample = 0; sample < 4; sample++)
+        using var healthyGate = new AdaptiveUploadGate(16);
+        var healthyLeases = new List<AdaptiveUploadGate.Lease>();
+        for (var worker = 0; worker < 16; worker++)
         {
-            gate.ReportCompleted(10 * 1024 * 1024, TimeSpan.FromSeconds(80));
+            healthyLeases.Add(await healthyGate.EnterAsync(CancellationToken.None));
         }
 
-        var valid = gate.CurrentLimit is >= 2 and < 16;
-        return Task.FromResult(valid
+        for (var sample = 0; sample < 4; sample++)
+        {
+            healthyGate.ReportCompleted(10 * 1024 * 1024, TimeSpan.FromSeconds(50));
+        }
+
+        healthyLeases.ForEach(lease => lease.Dispose());
+
+        using var slowGate = new AdaptiveUploadGate(16);
+        var slowLeases = new List<AdaptiveUploadGate.Lease>();
+        for (var worker = 0; worker < 16; worker++)
+        {
+            slowLeases.Add(await slowGate.EnterAsync(CancellationToken.None));
+        }
+        for (var sample = 0; sample < 4; sample++)
+        {
+            slowGate.ReportCompleted(10 * 1024 * 1024, TimeSpan.FromSeconds(1024));
+        }
+
+        slowLeases.ForEach(lease => lease.Dispose());
+
+        var valid = healthyGate.CurrentLimit == 16 && slowGate.CurrentLimit is >= 2 and < 16;
+        return valid
             ? TestOutcome.Pass()
-            : TestOutcome.Fail($"o limite de upload não reduziu para internet lenta: {gate.CurrentLimit}"));
+            : TestOutcome.Fail(
+                $"limites incorretos para vazão agregada: saudável={healthyGate.CurrentLimit}, lenta={slowGate.CurrentLimit}");
     }
 
     private static Task<TestOutcome> EncryptedPayloadMessageProtocolAsync()
