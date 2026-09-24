@@ -203,6 +203,8 @@ function Test-MsiArtifact {
     $productName = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductName'"
     $allUsers = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ALLUSERS'"
     $installFolderParent = Get-MsiScalar -Path $Path -Query "SELECT ``Directory_Parent`` FROM ``Directory`` WHERE ``Directory``='INSTALLFOLDER'"
+    $startMenuShortcut = Get-MsiScalar -Path $Path -Query "SELECT ``Directory_`` FROM ``Shortcut`` WHERE ``Shortcut``='StartMenuShortcut'"
+    $desktopShortcut = Get-MsiScalar -Path $Path -Query "SELECT ``Directory_`` FROM ``Shortcut`` WHERE ``Shortcut``='DesktopShortcut'"
     $upgradeCode = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='UpgradeCode'"
     $componentAttributes = Get-MsiScalar -Path $Path -Query "SELECT ``Attributes`` FROM ``Component`` WHERE ``Component``='ApplicationFiles'"
     $fileName = Get-MsiScalar -Path $Path -Query "SELECT ``FileName`` FROM ``File`` WHERE ``File``='AppExe'"
@@ -237,6 +239,9 @@ function Test-MsiArtifact {
     }
     if ($null -ne $allUsers -or $installFolderParent -ne 'AppDataFolder' -or ($summaryWords -band 8) -eq 0) {
         throw "O MSI $Architecture não está configurado como instalação por usuário no AppData."
+    }
+    if ($startMenuShortcut -ne 'ProgramMenuFolder' -or $desktopShortcut -ne 'DesktopFolder') {
+        throw "O MSI $Architecture não contém os atalhos esperados no Menu Iniciar e na Área de Trabalho."
     }
     if ($upgradeCode -ne $ExpectedUpgradeCode) {
         throw "UpgradeCode incorreto no MSI. Esperado: $ExpectedUpgradeCode. Encontrado: $upgradeCode"

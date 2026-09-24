@@ -4,18 +4,18 @@ const _IC = {
     search:`<path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>`,
     arrow_back:`<path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>`,
     arrow_forward:`<path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/>`,
-    left_panel_close:``,
-    left_panel_open:``,
+    left_panel_close:`<path d="M3 3h18v18H3V3zm2 2v14h4V5H5zm11.59 3.59L13.17 12l3.42 3.41L18 14l-2-2 2-2-1.41-1.41z"/>`,
+    left_panel_open:`<path d="M3 3h18v18H3V3zm2 2v14h4V5H5zm9.41 3.59L13 10l2 2-2 2 1.41 1.41L17.83 12l-3.42-3.41z"/>`,
     grid_view:`<path d="M3 3v8h8V3H3zm6 6H5V5h4v4zm-6 4v8h8v-8H3zm6 6H5v-4h4v4zm4-16v8h8V3h-8zm6 6h-4V5h4v4zm-6 4v8h8v-8h-8zm6 6h-4v-4h4v4z"/>`,
     view_list:`<path d="M4 14h4v-4H4v4zm0 5h4v-4H4v4zM4 9h4V5H4v4zm5 5h12v-4H9v4zm0 5h12v-4H9v4zM9 5v4h12V5H9z"/>`,
     sort:`<path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/>`,
     refresh:`<path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>`,
-    sync:``,
-    star:``,
-    star_border:``,
-    devices:``,
-    computer:``,
-    smartphone:``,
+    sync:`<path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.69 2.8l1.46 1.46A7.96 7.96 0 0020 12c0-4.42-3.58-8-8-8zm-6 8c0-1.01.25-1.97.69-2.8L5.23 7.74A7.96 7.96 0 004 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3c-3.31 0-6-2.69-6-6z"/>`,
+    star:`<path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>`,
+    star_border:`<path d="M22 9.24l-7.19-.62L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21 12 17.27 18.18 21l-1.63-7.03L22 9.24zM12 15.4l-3.76 2.27 1-4.28-3.32-2.88 4.38-.38L12 6.1l1.71 4.04 4.38.38-3.32 2.88 1 4.28L12 15.4z"/>`,
+    devices:`<path d="M4 6h18V4H4c-1.1 0-2 .9-2 2v11H0v3h14v-3H4V6zm19 2h-6c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h6c.55 0 1-.45 1-1V9c0-.55-.45-1-1-1zm-1 9h-4v-7h4v7z"/>`,
+    computer:`<path d="M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/>`,
+    smartphone:`<path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z"/>`,
     create_new_folder:`<path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z"/>`,
     folder_open:`<path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>`,
     upload:`<path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/>`,
@@ -72,7 +72,7 @@ function icon(name, size, color) {
     const symbol = Object.prototype.hasOwnProperty.call(_IC, name) ? name : 'insert_drive_file';
     const s = size || 20;
     const colorStyle = color ? `;color:${color}` : '';
-    return `<span class="svg-icon" style="--icon-size:${s}px${colorStyle}" aria-hidden="true">${symbol}</span>`;
+    return `<span class="svg-icon" style="--icon-size:${s}px${colorStyle}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${_IC[symbol]}</svg></span>`;
 }
 
 function initIcons() {

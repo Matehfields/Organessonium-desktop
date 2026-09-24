@@ -174,6 +174,7 @@ $directoryRows.Add(@('TARGETDIR', '', 'SourceDir'))
 $directoryRows.Add(@('AppDataFolder', 'TARGETDIR', '.'))
 $directoryRows.Add(@('INSTALLFOLDER', 'AppDataFolder', 'ORGNSNM|Organessonium'))
 $directoryRows.Add(@('ProgramMenuFolder', 'TARGETDIR', '.'))
+$directoryRows.Add(@('DesktopFolder', 'TARGETDIR', '.'))
 $directoryIds = @{ '' = 'INSTALLFOLDER' }
 $relativeDirectories = @($files | ForEach-Object {
     (Get-RelativePathCompat -BasePath $applicationDirectory -Path $_.DirectoryName).Replace('\', '/')
@@ -276,7 +277,8 @@ Write-Idt -Name 'Media' -Columns @('DiskId', 'LastSequence', 'DiskPrompt', 'Cabi
 )
 
 Write-Idt -Name 'Shortcut' -Columns @('Shortcut', 'Directory_', 'Name', 'Component_', 'Target', 'Arguments', 'Description', 'Hotkey', 'Icon_', 'IconIndex', 'ShowCmd', 'WkDir', 'DisplayResourceDLL', 'DisplayResourceId', 'DescriptionResourceDLL', 'DescriptionResourceId') -Types @('s72', 's72', 'l128', 's72', 's72', 'S255', 'L255', 'I2', 'S72', 'I2', 'I2', 'S72', 'S255', 'I2', 'S255', 'I2') -PrimaryKeys @('Shortcut') -Directory $idtDirectory -Rows @(
-    @('StartMenuShortcut', 'ProgramMenuFolder', ('ORGNSNM|' + $productDisplayName), $mainComponentId, ('[#' + $mainFileId + ']'), '', ('Abrir ' + $productDisplayName), '', 'OrganessoniumIcon', '0', '1', 'INSTALLFOLDER', '', '', '', '')
+    @('StartMenuShortcut', 'ProgramMenuFolder', ('ORGNSNM|' + $productDisplayName), $mainComponentId, ('[#' + $mainFileId + ']'), '', ('Abrir ' + $productDisplayName), '', 'OrganessoniumIcon', '0', '1', 'INSTALLFOLDER', '', '', '', ''),
+    @('DesktopShortcut', 'DesktopFolder', ('ORGNSNM|' + $productDisplayName), $mainComponentId, ('[#' + $mainFileId + ']'), '', ('Abrir ' + $productDisplayName), '', 'OrganessoniumIcon', '0', '1', 'INSTALLFOLDER', '', '', '', '')
 )
 
 Write-Idt -Name 'Icon' -Columns @('Name', 'Data') -Types @('s72', 'v0') -PrimaryKeys @('Name') -Directory $idtDirectory -Rows @()
