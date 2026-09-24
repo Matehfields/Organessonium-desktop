@@ -1781,6 +1781,7 @@ public sealed class AppRegistry
             IsFolder = source.IsFolder,
             MimeType = source.MimeType,
             UploadedAt = source.UploadedAt,
+            SizeBytes = source.SizeBytes,
             PreviewMessageId = source.PreviewMessageId,
             Encryption = source.Encryption?.Clone(),
             FolderColor = source.FolderColor,

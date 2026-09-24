@@ -8,7 +8,7 @@ namespace Organessonium.Services;
 public sealed class FolderSerialCodec
 {
     private static readonly byte[] FolderMagic = "OSER"u8.ToArray();
-    private const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
     private const int MaxStringBytes = 16 * 1024 * 1024;
     private const int MaxChildren = 10_000_000;
 
@@ -61,7 +61,8 @@ public sealed class FolderSerialCodec
                 UploadedAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.Int64()),
                 PreviewMessageId = reader.String(),
                 Encryption = version >= 3 ? ReadEncryption(ref reader) : null,
-                FolderColor = reader.String()
+                FolderColor = reader.String(),
+                SizeBytes = version >= 4 ? reader.Int64() : 0
             });
         }
 
@@ -78,11 +79,16 @@ public sealed class FolderSerialCodec
         };
     }
 
-    public byte[] EncodeFolder(FolderSerial serial)
+    public byte[] EncodeFolder(FolderSerial serial, int schemaVersion = CurrentVersion)
     {
+        if (schemaVersion is < 1 or > CurrentVersion)
+        {
+            throw new ArgumentOutOfRangeException(nameof(schemaVersion));
+        }
+
         using var stream = new MemoryStream();
         stream.Write(FolderMagic);
-        WriteUInt16(stream, CurrentVersion);
+        WriteUInt16(stream, checked((ushort)schemaVersion));
         stream.WriteByte((byte)serial.Kind);
         WriteInt64(stream, serial.GeneratedAt.ToUniversalTime().ToUnixTimeMilliseconds());
         WriteString(stream, serial.FolderId);
@@ -95,8 +101,11 @@ public sealed class FolderSerialCodec
         {
             var flags = child.IsFolder ? 1 : 0;
             if (child.Favorite) flags |= 1 << 1;
-            if (child.DeviceType == "phone") flags |= 1 << 2;
-            if (child.DeviceType == "pc") flags |= 1 << 3;
+            if (schemaVersion >= 2)
+            {
+                if (child.DeviceType == "phone") flags |= 1 << 2;
+                if (child.DeviceType == "pc") flags |= 1 << 3;
+            }
             stream.WriteByte((byte)flags);
             WriteString(stream, child.Id);
             WriteString(stream, child.NamesMessageId);
@@ -106,8 +115,15 @@ public sealed class FolderSerialCodec
             WriteString(stream, child.MimeType);
             WriteInt64(stream, child.UploadedAt.ToUniversalTime().ToUnixTimeMilliseconds());
             WriteString(stream, child.PreviewMessageId);
-            WriteEncryption(stream, child.Encryption);
+            if (schemaVersion >= 3)
+            {
+                WriteEncryption(stream, child.Encryption);
+            }
             WriteString(stream, string.IsNullOrWhiteSpace(child.FolderColor) ? "#C4C7C5" : child.FolderColor);
+            if (schemaVersion >= 4)
+            {
+                WriteInt64(stream, Math.Max(0, child.SizeBytes));
+            }
         }
 
         return stream.ToArray();
@@ -132,7 +148,7 @@ public sealed class FolderSerialCodec
             if (a.Id != b.Id || a.NamesMessageId != b.NamesMessageId ||
                 a.ParentFolderId != b.ParentFolderId || a.Name != b.Name ||
                 a.ThreadId != b.ThreadId || a.IsFolder != b.IsFolder ||
-                a.MimeType != b.MimeType || a.UploadedAt != b.UploadedAt ||
+                a.MimeType != b.MimeType || a.UploadedAt != b.UploadedAt || a.SizeBytes != b.SizeBytes ||
                 a.PreviewMessageId != b.PreviewMessageId ||
                 !SameEncryption(a.Encryption, b.Encryption) ||
                 a.FolderColor != b.FolderColor || a.DeviceType != b.DeviceType || a.Favorite != b.Favorite)

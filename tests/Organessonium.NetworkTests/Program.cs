@@ -621,6 +621,7 @@ internal static class Program
                     ThreadId = "thread-id",
                     MimeType = "image/jpeg",
                     UploadedAt = generatedAt,
+                    SizeBytes = 42,
                     PreviewMessageId = "preview-id",
                     Encryption = new EncryptionMetadata
                     {
@@ -635,15 +636,18 @@ internal static class Program
         };
 
         var restored = codec.DecodeFolder(codec.EncodeFolder(serial));
+        var restoredV3 = codec.DecodeFolder(codec.EncodeFolder(serial, schemaVersion: 3));
         var child = restored.Children.SingleOrDefault();
         var valid = restored.FolderId == serial.FolderId &&
                     restored.GeneratedAt == generatedAt &&
                     restored.Aggregate.TotalBytes == 42 &&
                     child?.Id == "file-id" &&
+                    child.SizeBytes == 42 &&
                     child.Encryption?.Salt == "NyasiAVslEKTO__DCbEeKg" &&
                     child.MimeType == "image/jpeg" &&
                     child.Favorite &&
-                    child.DeviceType == "phone";
+                    child.DeviceType == "phone" &&
+                    restoredV3.Children.Single().SizeBytes == 0;
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("o serial OSER não voltou com a estrutura esperada"));

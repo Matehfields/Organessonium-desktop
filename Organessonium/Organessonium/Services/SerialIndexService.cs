@@ -592,6 +592,7 @@ public sealed class SerialIndexService
                 ? mapping.ThreadId
                 : child.ThreadId;
             entry.UploadedAt = child.UploadedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+            entry.SizeBytes = Math.Max(0, child.SizeBytes);
             entry.MimeType = child.MimeType;
             entry.PreviewMessageId = child.PreviewMessageId;
             entry.Encryption = child.Encryption?.Clone();
@@ -691,6 +692,7 @@ public sealed class SerialIndexService
             IsFolder = isFolder,
             MimeType = entry.MimeType,
             UploadedAt = ParseTimestamp(entry.UploadedAt),
+            SizeBytes = Math.Max(0, entry.SizeBytes),
             PreviewMessageId = entry.PreviewMessageId,
             Encryption = isFolder ? null : entry.Encryption?.Clone(),
             FolderColor = isFolder && !string.IsNullOrWhiteSpace(entry.FolderColor) ? entry.FolderColor : "#C4C7C5",

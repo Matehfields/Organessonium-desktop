@@ -28,6 +28,7 @@ public sealed class FolderSerialEntry
     public bool IsFolder { get; init; }
     public string MimeType { get; init; } = "";
     public DateTimeOffset UploadedAt { get; init; }
+    public long SizeBytes { get; init; }
     public string PreviewMessageId { get; init; } = "";
     public EncryptionMetadata? Encryption { get; init; }
     public string FolderColor { get; init; } = "#C4C7C5";
