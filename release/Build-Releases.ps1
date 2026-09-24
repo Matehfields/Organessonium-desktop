@@ -135,6 +135,24 @@ function Release-ComObject {
     }
 }
 
+function Get-RelativePathCompat {
+    param(
+        [Parameter(Mandatory = $true)][string]$BasePath,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $baseFullPath = [System.IO.Path]::GetFullPath($BasePath).TrimEnd('\', '/')
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ($fullPath.Equals($baseFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return '.'
+    }
+    $prefix = $baseFullPath + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "O caminho $fullPath não pertence ao diretório $baseFullPath."
+    }
+    return $fullPath.Substring($prefix.Length)
+}
+
 function Get-MsiScalar {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -171,7 +189,8 @@ function Test-MsiArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ExpectedVersion,
-        [Parameter(Mandatory = $true)][string]$ExpectedUpgradeCode
+        [Parameter(Mandatory = $true)][string]$ExpectedUpgradeCode,
+        [Parameter(Mandatory = $true)][ValidateSet('x86', 'x64', 'arm64')][string]$Architecture
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or (Get-Item -LiteralPath $Path).Length -le 0) {
@@ -182,7 +201,12 @@ function Test-MsiArtifact {
     $upgradeCode = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='UpgradeCode'"
     $componentAttributes = Get-MsiScalar -Path $Path -Query "SELECT ``Attributes`` FROM ``Component`` WHERE ``Component``='ApplicationFiles'"
     $fileName = Get-MsiScalar -Path $Path -Query "SELECT ``FileName`` FROM ``File`` WHERE ``File``='AppExe'"
+    $cabinetStream = Get-MsiScalar -Path $Path -Query "SELECT ``Name`` FROM ``_Streams`` WHERE ``Name``='app.cab'"
+    $launchCondition = Get-MsiScalar -Path $Path -Query "SELECT ``Condition`` FROM ``LaunchCondition`` WHERE ``Description``='O Organessonium requer Windows 10 ou posterior.'"
     $expectedMsiVersion = ($ExpectedVersion.Split('.')[0..2] -join '.')
+    $expectedTemplate = @{ x86 = 'Intel;1046'; x64 = 'x64;1046'; arm64 = 'Arm64;1046' }[$Architecture]
+    $expectedSchema = @{ x86 = 200; x64 = 200; arm64 = 500 }[$Architecture]
+    $expected64BitComponent = $Architecture -ne 'x86'
     $installer = $null
     $database = $null
     $summary = $null
@@ -191,6 +215,7 @@ function Test-MsiArtifact {
         $database = $installer.OpenDatabase($Path, 0)
         $summary = $database.SummaryInformation(0)
         $summaryTemplate = $summary.Property(7)
+        $summarySchema = [int]$summary.Property(14)
     }
     finally {
         Release-ComObject $summary
@@ -204,14 +229,21 @@ function Test-MsiArtifact {
     if ($upgradeCode -ne $ExpectedUpgradeCode) {
         throw "UpgradeCode incorreto no MSI. Esperado: $ExpectedUpgradeCode. Encontrado: $upgradeCode"
     }
-    if (([int]$componentAttributes -band 256) -eq 0) {
-        throw 'O componente principal do MSI não está marcado como x64.'
+    $is64BitComponent = (([int]$componentAttributes -band 256) -ne 0)
+    if ($is64BitComponent -ne $expected64BitComponent) {
+        throw "O componente principal do MSI $Architecture tem atributos de arquitetura incorretos."
     }
-    if ($summaryTemplate -notmatch '^x64;') {
-        throw "O resumo do MSI não declara a arquitetura x64: $summaryTemplate"
+    if ($summaryTemplate -ne $expectedTemplate -or $summarySchema -ne $expectedSchema) {
+        throw "O resumo do MSI $Architecture está incorreto: template $summaryTemplate, schema $summarySchema."
     }
     if ($fileName -notmatch 'Organessonium\.exe$') {
         throw 'O MSI não referencia o executável Organessonium.exe.'
+    }
+    if ($cabinetStream -ne 'app.cab') {
+        throw "O MSI $Architecture não contém o cabinet interno esperado."
+    }
+    if ($launchCondition -ne 'VersionNT >= 603 AND WindowsBuild >= 10240') {
+        throw "O MSI $Architecture não contém a condição correta para Windows 10 ou posterior."
     }
 }
 
@@ -525,17 +557,19 @@ $null = New-Item -ItemType Directory -Force -Path $outputDirectory
 $null = New-Item -ItemType Directory -Force -Path $workRoot
 
 $publishRoot = Join-Path $workRoot 'publish'
-$msiWorkDirectory = Join-Path $workRoot 'msi'
+$msiPublishRoot = Join-Path $workRoot 'msi-publish'
+$msiWorkRoot = Join-Path $workRoot 'msi'
 $msixStageRoot = Join-Path $workRoot 'msix-stage'
 $verifyDirectory = Join-Path $workRoot 'verify'
 $msixOutputDirectory = Join-Path $outputDirectory 'msix'
 $null = New-Item -ItemType Directory -Force -Path $publishRoot
+$null = New-Item -ItemType Directory -Force -Path $msiPublishRoot
 $null = New-Item -ItemType Directory -Force -Path $msixOutputDirectory
 
 $architectures = @(
-    [pscustomobject]@{ Rid = 'win-x86'; Name = 'x86'; ProcessorArchitecture = 'x86' },
-    [pscustomobject]@{ Rid = 'win-x64'; Name = 'x64'; ProcessorArchitecture = 'x64' },
-    [pscustomobject]@{ Rid = 'win-arm64'; Name = 'arm64'; ProcessorArchitecture = 'arm64' }
+    [pscustomobject]@{ Rid = 'win-x86'; Name = 'x86'; ProcessorArchitecture = 'x86'; PeMachine = 0x014C; UpgradeCode = '{86D2DF89-568A-4720-B3BE-C0DFC4F1C658}' },
+    [pscustomobject]@{ Rid = 'win-x64'; Name = 'x64'; ProcessorArchitecture = 'x64'; PeMachine = 0x8664; UpgradeCode = '{6CA5E42D-31EF-49FC-9C65-C784DB28C1D5}' },
+    [pscustomobject]@{ Rid = 'win-arm64'; Name = 'arm64'; ProcessorArchitecture = 'arm64'; PeMachine = 0xAA64; UpgradeCode = '{51F35ACC-553A-4F2B-A54F-18C7F0898D8B}' }
 )
 $publishedExecutables = @{}
 foreach ($architecture in $architectures) {
@@ -561,6 +595,44 @@ foreach ($architecture in $architectures) {
     $publishedExecutables[$architecture.Name] = $publishedExe
 }
 
+$msiPublishedDirectories = @{}
+$msiPublishedExecutables = @{}
+foreach ($architecture in $architectures) {
+    $publishDirectory = Join-Path $msiPublishRoot $architecture.Name
+    Write-Step "Compilando o aplicativo MSI framework-dependent para $($architecture.Rid)"
+    Invoke-Native -FilePath 'dotnet.exe' -Arguments @(
+        'publish', $projectPath,
+        '-c', 'Release',
+        '-r', $architecture.Rid,
+        '--self-contained', 'false',
+        '-o', $publishDirectory,
+        '-p:PublishSingleFile=false',
+        '-p:IncludeNativeLibrariesForSelfExtract=false',
+        '-p:EnableCompressionInSingleFile=false',
+        '-p:WindowsAppSDKSelfContained=false',
+        '-p:WebView2EnableCsWinRTProjection=false',
+        "-p:Version=$($versionNumbers[0]).$($versionNumbers[1]).$($versionNumbers[2])",
+        "-p:FileVersion=$Version",
+        "-p:AssemblyVersion=$Version"
+    )
+    $publishedExe = Join-Path $publishDirectory 'Organessonium.exe'
+    foreach ($requiredFile in @($publishedExe, (Join-Path $publishDirectory 'Organessonium.dll'), (Join-Path $publishDirectory 'Organessonium.runtimeconfig.json'))) {
+        if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf) -or (Get-Item -LiteralPath $requiredFile).Length -le 0) {
+            throw "A publicação MSI $($architecture.Rid) não produziu o arquivo framework-dependent esperado: $requiredFile"
+        }
+    }
+    foreach ($selfContainedFile in @('coreclr.dll', 'hostfxr.dll', 'System.Private.CoreLib.dll')) {
+        if (Test-Path -LiteralPath (Join-Path $publishDirectory $selfContainedFile)) {
+            throw "A publicação MSI $($architecture.Rid) incluiu $selfContainedFile e não é framework-dependent."
+        }
+    }
+    if ((Get-PeMachine -Path $publishedExe) -ne $architecture.PeMachine) {
+        throw "A publicação MSI $($architecture.Rid) produziu um executável de arquitetura incorreta."
+    }
+    $msiPublishedDirectories[$architecture.Name] = $publishDirectory
+    $msiPublishedExecutables[$architecture.Name] = $publishedExe
+}
+
 Write-Step 'Verificando e gerando o código-fonte público'
 $trackedFiles = @(& git -C $repoRoot ls-files -- 'Organessonium/Organessonium.slnx' 'Organessonium/Organessonium/**' 'README.md' 'Information.md')
 if ($LASTEXITCODE -ne 0 -or $trackedFiles.Count -eq 0) {
@@ -580,36 +652,52 @@ Invoke-Native -FilePath 'dotnet.exe' -Arguments @(
     '-c', 'Release'
 )
 
-Write-Step 'Gerando Organessonium-installer.msi com Windows Installer e MakeCab'
-$msiPath = Join-Path $outputDirectory 'Organessonium-installer.msi'
-& (Join-Path $PSScriptRoot 'Create-Msi.ps1') `
-    -ApplicationExe $publishedExecutables['x64'] `
-    -ApplicationIcon $iconPath `
-    -OutputPath $msiPath `
-    -Version $Version `
-    -WorkingDirectory $msiWorkDirectory
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $msiPath)) {
-    throw 'A geração do MSI falhou.'
-}
-$msiUpgradeCode = '{6CA5E42D-31EF-49FC-9C65-C784DB28C1D5}'
-Test-MsiArtifact -Path $msiPath -ExpectedVersion $Version -ExpectedUpgradeCode $msiUpgradeCode
+Write-Step 'Gerando os instaladores MSI x86, x64 e ARM64 sem compressão'
+$msiPaths = @{}
+foreach ($architecture in $architectures) {
+    $msiPath = Join-Path $outputDirectory ("Organessonium-installer-{0}.msi" -f $architecture.Name)
+    $architectureWorkDirectory = Join-Path $msiWorkRoot $architecture.Name
+    & (Join-Path $PSScriptRoot 'Create-Msi.ps1') `
+        -ApplicationExe $msiPublishedExecutables[$architecture.Name] `
+        -ApplicationIcon $iconPath `
+        -OutputPath $msiPath `
+        -Version $Version `
+        -WorkingDirectory $architectureWorkDirectory `
+        -Architecture $architecture.Name
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $msiPath)) {
+        throw "A geração do MSI $($architecture.Name) falhou."
+    }
+    Test-MsiArtifact `
+        -Path $msiPath `
+        -ExpectedVersion $Version `
+        -ExpectedUpgradeCode $architecture.UpgradeCode `
+        -Architecture $architecture.Name
 
-Write-Step 'Validando a extração administrativa do MSI'
-$msiVerifyDirectory = Join-Path $verifyDirectory 'msi'
-$msiLog = Join-Path $verifyDirectory 'msi-validation.log'
-$null = New-Item -ItemType Directory -Force -Path $msiVerifyDirectory
-$msiProcess = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -Wait -PassThru -ArgumentList @(
-    '/a', ('"' + $msiPath + '"'), ('TARGETDIR="' + $msiVerifyDirectory + '"'), '/qn', '/norestart', '/l*v', ('"' + $msiLog + '"')
-)
-$extractedMsiExe = Get-ChildItem -LiteralPath $msiVerifyDirectory -Filter 'Organessonium.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($msiProcess.ExitCode -ne 0 -or $null -eq $extractedMsiExe) {
-    throw "O MSI não passou pela extração administrativa. Código: $($msiProcess.ExitCode). Log: $msiLog"
-}
-if ((Get-Sha256Hex -Path $extractedMsiExe.FullName) -ne (Get-Sha256Hex -Path $publishedExecutables['x64'])) {
-    throw 'O executável extraído do MSI não corresponde ao executável publicado.'
-}
-if ((Get-PeMachine -Path $extractedMsiExe.FullName) -ne 0x8664) {
-    throw 'O executável extraído do MSI não é x64.'
+    Write-Step "Validando a extração administrativa do MSI $($architecture.Name)"
+    $msiVerifyDirectory = Join-Path $verifyDirectory ('msi-' + $architecture.Name)
+    $msiLog = Join-Path $verifyDirectory ("msi-{0}-validation.log" -f $architecture.Name)
+    $null = New-Item -ItemType Directory -Force -Path $msiVerifyDirectory
+    $msiProcess = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -Wait -PassThru -ArgumentList @(
+        '/a', ('"' + $msiPath + '"'), ('TARGETDIR="' + $msiVerifyDirectory + '"'), '/qn', '/norestart', '/l*v', ('"' + $msiLog + '"')
+    )
+    $extractedMsiExe = Get-ChildItem -LiteralPath $msiVerifyDirectory -Filter 'Organessonium.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($msiProcess.ExitCode -ne 0 -or $null -eq $extractedMsiExe) {
+        throw "O MSI $($architecture.Name) não passou pela extração administrativa. Código: $($msiProcess.ExitCode). Log: $msiLog"
+    }
+    $extractedApplicationDirectory = $extractedMsiExe.DirectoryName
+    $publishedDirectory = $msiPublishedDirectories[$architecture.Name]
+    foreach ($publishedFile in (Get-ChildItem -LiteralPath $publishedDirectory -File -Recurse)) {
+        $relativePath = Get-RelativePathCompat -BasePath $publishedDirectory -Path $publishedFile.FullName
+        $extractedFile = Join-Path $extractedApplicationDirectory $relativePath
+        if (-not (Test-Path -LiteralPath $extractedFile -PathType Leaf) -or
+            (Get-Sha256Hex -Path $extractedFile) -ne (Get-Sha256Hex -Path $publishedFile.FullName)) {
+            throw "O arquivo $relativePath extraído do MSI $($architecture.Name) não corresponde à publicação."
+        }
+    }
+    if ((Get-PeMachine -Path $extractedMsiExe.FullName) -ne $architecture.PeMachine) {
+        throw "O executável extraído do MSI $($architecture.Name) tem arquitetura incorreta."
+    }
+    $msiPaths[$architecture.Name] = $msiPath
 }
 
 Write-Step 'Gerando os pacotes MSIX x86, x64 e ARM64'
@@ -664,8 +752,10 @@ Invoke-Native -FilePath $makeAppx -Arguments @(
     'bundle', '/d', $msixOutputDirectory, '/p', $bundlePath, '/bv', $Version, '/o'
 )
 if ($null -ne $signTool) {
-    Write-Step 'Assinando MSI e MSIXBundle com SignTool'
-    Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msiPath))
+    Write-Step 'Assinando MSIs e MSIXBundle com SignTool'
+    foreach ($msiPath in $msiPaths.Values) {
+        Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msiPath))
+    }
     Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($bundlePath))
 }
 Test-MsixBundleArtifact `
@@ -704,7 +794,7 @@ if ($RunWack) {
 }
 
 Write-Step 'Gerando hashes SHA-256'
-$releaseFiles = @($msiPath, $sourceZip, $bundlePath) + @($msixPaths.Values)
+$releaseFiles = @($msiPaths.Values) + @($sourceZip, $bundlePath) + @($msixPaths.Values)
 $hashLines = foreach ($file in $releaseFiles) {
     $relativeOutputPath = [System.IO.Path]::GetFullPath($file).Substring([System.IO.Path]::GetFullPath($outputDirectory).Length).TrimStart('\').Replace('\', '/')
     '{0}  {1}' -f (Get-Sha256Hex -Path $file), $relativeOutputPath
@@ -729,7 +819,7 @@ $storeIdentityStatus = if ($settings.storeIdentityName -eq 'Organessonium.Deskto
 }
 
 Write-Host "`nRelease Organessonium $Version concluída." -ForegroundColor Green
-Write-Host "`nMSI:`n- x64: OK"
+Write-Host "`nMSI framework-dependent e sem compressão:`n- x86: OK`n- x64: OK`n- ARM64: OK"
 Write-Host "`nMSIX:`n- x86: OK`n- x64: OK`n- ARM64: OK"
 Write-Host "`nMSIXBundle:`n- x86 + x64 + ARM64: OK`n- versão: $Version"
 Write-Host "`nSource ZIP:`n- OK"
