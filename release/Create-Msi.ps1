@@ -83,7 +83,7 @@ function Write-Idt {
     [System.IO.File]::WriteAllLines(
         (Join-Path $Directory ($Name + '.idt')),
         $lines,
-        [System.Text.Encoding]::ASCII)
+        [System.Text.Encoding]::GetEncoding(1252))
 }
 
 function Release-ComObject {
@@ -134,6 +134,8 @@ $architectureSettings = @{
         UpgradeCode = '{51F35ACC-553A-4F2B-A54F-18C7F0898D8B}'
     }
 }[$Architecture]
+$productDisplayName = 'Organess' + [char]0x00F4 + 'nium'
+$newerVersionMessage = 'Uma vers' + [char]0x00E3 + 'o mais recente do ' + $productDisplayName + ' j' + [char]0x00E1 + ' est' + [char]0x00E1 + ' instalada.'
 
 $applicationExe = (Resolve-Path -LiteralPath $ApplicationExe).Path
 $applicationDirectory = Split-Path -Parent $applicationExe
@@ -251,9 +253,9 @@ if ($null -eq $mainFileId) {
 Write-Idt -Name 'Property' -Columns @('Property', 'Value') -Types @('s72', 'l0') -PrimaryKeys @('Property') -Directory $idtDirectory -Rows @(
     @('ProductCode', $productCode),
     @('ProductLanguage', '1046'),
-    @('ProductName', 'Organessonium'),
+    @('ProductName', $productDisplayName),
     @('ProductVersion', $msiVersion),
-    @('Manufacturer', 'Organessonium'),
+    @('Manufacturer', $productDisplayName),
     @('UpgradeCode', $upgradeCode),
     @('ALLUSERS', '1'),
     @('ARPNOMODIFY', '1'),
@@ -264,7 +266,7 @@ Write-Idt -Name 'Property' -Columns @('Property', 'Value') -Types @('s72', 'l0')
 Write-Idt -Name 'Directory' -Columns @('Directory', 'Directory_Parent', 'DefaultDir') -Types @('s72', 'S72', 'l255') -PrimaryKeys @('Directory') -Directory $idtDirectory -Rows $directoryRows.ToArray()
 
 Write-Idt -Name 'Feature' -Columns @('Feature', 'Feature_Parent', 'Title', 'Description', 'Display', 'Level', 'Directory_', 'Attributes') -Types @('s38', 'S38', 'L64', 'L255', 'I2', 'i2', 'S72', 'i2') -PrimaryKeys @('Feature') -Directory $idtDirectory -Rows @(
-    @('Complete', '', 'Organessonium', 'Instala o Organessonium.', '1', '1', 'INSTALLFOLDER', '0')
+    @('Complete', '', $productDisplayName, ('Instala o ' + $productDisplayName + '.'), '1', '1', 'INSTALLFOLDER', '0')
 )
 
 Write-Idt -Name 'Component' -Columns @('Component', 'ComponentId', 'Directory_', 'Attributes', 'Condition', 'KeyPath') -Types @('s72', 'S38', 's72', 'i2', 'S255', 'S72') -PrimaryKeys @('Component') -Directory $idtDirectory -Rows $componentRows.ToArray()
@@ -278,7 +280,7 @@ Write-Idt -Name 'Media' -Columns @('DiskId', 'LastSequence', 'DiskPrompt', 'Cabi
 )
 
 Write-Idt -Name 'Shortcut' -Columns @('Shortcut', 'Directory_', 'Name', 'Component_', 'Target', 'Arguments', 'Description', 'Hotkey', 'Icon_', 'IconIndex', 'ShowCmd', 'WkDir', 'DisplayResourceDLL', 'DisplayResourceId', 'DescriptionResourceDLL', 'DescriptionResourceId') -Types @('s72', 's72', 'l128', 's72', 's72', 'S255', 'L255', 'I2', 'S72', 'I2', 'I2', 'S72', 'S255', 'I2', 'S255', 'I2') -PrimaryKeys @('Shortcut') -Directory $idtDirectory -Rows @(
-    @('StartMenuShortcut', 'ProgramMenuFolder', 'ORGNSNM|Organessonium', $mainComponentId, ('[#' + $mainFileId + ']'), '', 'Abrir Organessonium', '', 'OrganessoniumIcon', '0', '1', 'INSTALLFOLDER', '', '', '', '')
+    @('StartMenuShortcut', 'ProgramMenuFolder', ('ORGNSNM|' + $productDisplayName), $mainComponentId, ('[#' + $mainFileId + ']'), '', ('Abrir ' + $productDisplayName), '', 'OrganessoniumIcon', '0', '1', 'INSTALLFOLDER', '', '', '', '')
 )
 
 Write-Idt -Name 'Icon' -Columns @('Name', 'Data') -Types @('s72', 'v0') -PrimaryKeys @('Name') -Directory $idtDirectory -Rows @()
@@ -289,8 +291,8 @@ Write-Idt -Name 'Upgrade' -Columns @('UpgradeCode', 'VersionMin', 'VersionMax', 
 )
 
 Write-Idt -Name 'LaunchCondition' -Columns @('Condition', 'Description') -Types @('s255', 'l255') -PrimaryKeys @('Condition') -Directory $idtDirectory -Rows @(
-    @('VersionNT >= 603 AND WindowsBuild >= 10240', 'O Organessonium requer Windows 10 ou posterior.'),
-    @('NOT NEWERPRODUCTFOUND', 'Uma versão mais recente do Organessonium já está instalada.')
+    @('VersionNT >= 603', ('O ' + $productDisplayName + ' requer Windows 10 ou posterior.')),
+    @('NOT NEWERPRODUCTFOUND', $newerVersionMessage)
 )
 
 Write-Idt -Name 'InstallExecuteSequence' -Columns @('Action', 'Condition', 'Sequence') -Types @('s72', 'S255', 'I2') -PrimaryKeys @('Action') -Directory $idtDirectory -Rows @(
@@ -403,9 +405,9 @@ try {
 
     $summary = $database.SummaryInformation(20)
     $summary.Property(1) = 1252
-    $summary.Property(2) = 'Organessonium Installer'
-    $summary.Property(3) = 'Organessonium'
-    $summary.Property(4) = 'Organessonium'
+    $summary.Property(2) = $productDisplayName + ' Installer'
+    $summary.Property(3) = $productDisplayName
+    $summary.Property(4) = $productDisplayName
     $summary.Property(7) = $architectureSettings.Template
     $summary.Property(9) = $packageCode
     $summary.Property(14) = $architectureSettings.Schema

@@ -197,12 +197,15 @@ function Test-MsiArtifact {
         throw 'O MSI não existe ou está vazio.'
     }
 
+    $expectedProductName = 'Organess' + [char]0x00F4 + 'nium'
+    $expectedLaunchDescription = 'O ' + $expectedProductName + ' requer Windows 10 ou posterior.'
     $productVersion = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductVersion'"
+    $productName = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductName'"
     $upgradeCode = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='UpgradeCode'"
     $componentAttributes = Get-MsiScalar -Path $Path -Query "SELECT ``Attributes`` FROM ``Component`` WHERE ``Component``='ApplicationFiles'"
     $fileName = Get-MsiScalar -Path $Path -Query "SELECT ``FileName`` FROM ``File`` WHERE ``File``='AppExe'"
     $cabinetStream = Get-MsiScalar -Path $Path -Query "SELECT ``Name`` FROM ``_Streams`` WHERE ``Name``='app.cab'"
-    $launchCondition = Get-MsiScalar -Path $Path -Query "SELECT ``Condition`` FROM ``LaunchCondition`` WHERE ``Description``='O Organessonium requer Windows 10 ou posterior.'"
+    $launchCondition = Get-MsiScalar -Path $Path -Query "SELECT ``Condition`` FROM ``LaunchCondition`` WHERE ``Description``='$expectedLaunchDescription'"
     $expectedMsiVersion = ($ExpectedVersion.Split('.')[0..2] -join '.')
     $expectedTemplate = @{ x86 = 'Intel;1046'; x64 = 'x64;1046'; arm64 = 'Arm64;1046' }[$Architecture]
     $expectedSchema = @{ x86 = 200; x64 = 200; arm64 = 500 }[$Architecture]
@@ -226,6 +229,9 @@ function Test-MsiArtifact {
     if ($productVersion -ne $expectedMsiVersion) {
         throw "Versão incorreta no MSI. Esperado: $expectedMsiVersion. Encontrado: $productVersion"
     }
+    if ($productName -ne $expectedProductName) {
+        throw "Nome incorreto ou corrompido no MSI $Architecture`: $productName"
+    }
     if ($upgradeCode -ne $ExpectedUpgradeCode) {
         throw "UpgradeCode incorreto no MSI. Esperado: $ExpectedUpgradeCode. Encontrado: $upgradeCode"
     }
@@ -242,7 +248,7 @@ function Test-MsiArtifact {
     if ($cabinetStream -ne 'app.cab') {
         throw "O MSI $Architecture não contém o cabinet interno esperado."
     }
-    if ($launchCondition -ne 'VersionNT >= 603 AND WindowsBuild >= 10240') {
+    if ($launchCondition -ne 'VersionNT >= 603') {
         throw "O MSI $Architecture não contém a condição correta para Windows 10 ou posterior."
     }
 }
