@@ -201,6 +201,8 @@ function Test-MsiArtifact {
     $expectedLaunchDescription = 'O ' + $expectedProductName + ' requer Windows 10 ou posterior.'
     $productVersion = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductVersion'"
     $productName = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ProductName'"
+    $allUsers = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='ALLUSERS'"
+    $installFolderParent = Get-MsiScalar -Path $Path -Query "SELECT ``Directory_Parent`` FROM ``Directory`` WHERE ``Directory``='INSTALLFOLDER'"
     $upgradeCode = Get-MsiScalar -Path $Path -Query "SELECT ``Value`` FROM ``Property`` WHERE ``Property``='UpgradeCode'"
     $componentAttributes = Get-MsiScalar -Path $Path -Query "SELECT ``Attributes`` FROM ``Component`` WHERE ``Component``='ApplicationFiles'"
     $fileName = Get-MsiScalar -Path $Path -Query "SELECT ``FileName`` FROM ``File`` WHERE ``File``='AppExe'"
@@ -219,6 +221,7 @@ function Test-MsiArtifact {
         $summary = $database.SummaryInformation(0)
         $summaryTemplate = $summary.Property(7)
         $summarySchema = [int]$summary.Property(14)
+        $summaryWords = [int]$summary.Property(15)
     }
     finally {
         Release-ComObject $summary
@@ -231,6 +234,9 @@ function Test-MsiArtifact {
     }
     if ($productName -ne $expectedProductName) {
         throw "Nome incorreto ou corrompido no MSI $Architecture`: $productName"
+    }
+    if ($null -ne $allUsers -or $installFolderParent -ne 'AppDataFolder' -or ($summaryWords -band 8) -eq 0) {
+        throw "O MSI $Architecture não está configurado como instalação por usuário no AppData."
     }
     if ($upgradeCode -ne $ExpectedUpgradeCode) {
         throw "UpgradeCode incorreto no MSI. Esperado: $ExpectedUpgradeCode. Encontrado: $upgradeCode"

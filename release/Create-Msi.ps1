@@ -114,21 +114,18 @@ function Get-RelativePathCompat {
 $architectureSettings = @{
     x86 = @{
         Template = 'Intel;1046'
-        ProgramFilesFolder = 'ProgramFilesFolder'
         ComponentAttributes = '0'
         Schema = 200
         UpgradeCode = '{86D2DF89-568A-4720-B3BE-C0DFC4F1C658}'
     }
     x64 = @{
         Template = 'x64;1046'
-        ProgramFilesFolder = 'ProgramFiles64Folder'
         ComponentAttributes = '256'
         Schema = 200
         UpgradeCode = '{6CA5E42D-31EF-49FC-9C65-C784DB28C1D5}'
     }
     arm64 = @{
         Template = 'Arm64;1046'
-        ProgramFilesFolder = 'ProgramFiles64Folder'
         ComponentAttributes = '256'
         Schema = 500
         UpgradeCode = '{51F35ACC-553A-4F2B-A54F-18C7F0898D8B}'
@@ -174,8 +171,8 @@ $null = New-Item -ItemType Directory -Force -Path $cabDirectory
 
 $directoryRows = [System.Collections.Generic.List[object[]]]::new()
 $directoryRows.Add(@('TARGETDIR', '', 'SourceDir'))
-$directoryRows.Add(@($architectureSettings.ProgramFilesFolder, 'TARGETDIR', '.'))
-$directoryRows.Add(@('INSTALLFOLDER', $architectureSettings.ProgramFilesFolder, 'ORGNSNM|Organessonium'))
+$directoryRows.Add(@('AppDataFolder', 'TARGETDIR', '.'))
+$directoryRows.Add(@('INSTALLFOLDER', 'AppDataFolder', 'ORGNSNM|Organessonium'))
 $directoryRows.Add(@('ProgramMenuFolder', 'TARGETDIR', '.'))
 $directoryIds = @{ '' = 'INSTALLFOLDER' }
 $relativeDirectories = @($files | ForEach-Object {
@@ -257,7 +254,6 @@ Write-Idt -Name 'Property' -Columns @('Property', 'Value') -Types @('s72', 'l0')
     @('ProductVersion', $msiVersion),
     @('Manufacturer', $productDisplayName),
     @('UpgradeCode', $upgradeCode),
-    @('ALLUSERS', '1'),
     @('ARPNOMODIFY', '1'),
     @('ARPNOREPAIR', '1'),
     @('ARPPRODUCTICON', 'OrganessoniumIcon')
