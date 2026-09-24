@@ -942,6 +942,16 @@ window._onSpecialItemsLoaded = (view, items) => {
     if (activeLibraryView === view) render();
     scheduleVisibleThumbnails();
 };
+window._onServerIndexRefreshed = rebuilt => {
+    setStatus(rebuilt ? 'Índice reconstruído.' : 'Índice atualizado.', false);
+    if (activeLibraryView === 'devices') {
+        showDevicesWorkspace();
+    } else if (activeLibraryView === 'favorites') {
+        showFavoritesWorkspace();
+    } else {
+        refreshCurrentFolder();
+    }
+};
 window._onFavoriteChanged = entry => {
     if (!entry) return;
     const key = appIdentityKey(entry);
@@ -2888,6 +2898,11 @@ document.addEventListener('DOMContentLoaded', () => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && activeWorkspaceTab === 'files' && canUseGlobalShortcut(e)) {
             e.preventDefault();
             selectAllCurrentView();
+            return;
+        }
+        if (e.key === 'F5' && activeWorkspaceTab === 'files' && canUseGlobalShortcut(e)) {
+            e.preventDefault();
+            refreshServerIndex(e.ctrlKey || e.metaKey);
             return;
         }
         if ((e.key === 'Delete' || e.key === 'Backspace') && canUseGlobalShortcut(e)) {
@@ -5012,6 +5027,16 @@ function refreshCurrentFolder() {
         return;
     }
     window.bridge.loadApps();
+}
+function refreshServerIndex(rebuildSerials) {
+    setStatus(rebuildSerials ? 'Reconstruindo índice...' : 'Atualizando índice...', true);
+    folderFileCounts.clear();
+    requestedFolderStatistics.clear();
+    if (window.bridge && typeof window.bridge.refreshServerIndex === 'function') {
+        window.bridge.refreshServerIndex(Boolean(rebuildSerials));
+        return;
+    }
+    refreshCurrentFolder();
 }
 function goBack()    { if (!historyBack.length) return;    historyForward.push(currentPath); navigate(historyBack.pop(), false); }
 function goForward() { if (!historyForward.length) return; historyBack.push(currentPath);    navigate(historyForward.pop(), false); }

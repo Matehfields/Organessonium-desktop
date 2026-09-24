@@ -28,6 +28,7 @@ public sealed class AppRegistry
     private readonly SemaphoreSlim _rootCreationGate = new(1, 1);
     private readonly SemaphoreSlim _entryMutationGate = new(1, 1);
     private readonly SemaphoreSlim _serialSynchronizationGate = new(1, 1);
+    private readonly SemaphoreSlim _serverIndexRefreshGate = new(1, 1);
     private int _remoteSerialCleanupStarted;
 
     public AppRegistry(DiscordApiClient discord, SettingsStore store, AppSettings settings)
@@ -89,6 +90,59 @@ public sealed class AppRegistry
 
     public async Task<List<AppEntry>> LoadSynchronizedDevicesAsync(CancellationToken cancellationToken = default)
     {
+        try
+        {
+            var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
+            var rebuilt = await RebuildSynchronizedSerialsAsync(metadataEntries, cancellationToken);
+            if (rebuilt != null)
+            {
+                return rebuilt;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.RefreshSynchronized", ex);
+        }
+
+        return await LoadSynchronizedDevicesFromSerialAsync(cancellationToken);
+    }
+
+    public async Task RefreshServerIndexAsync(
+        bool rebuildSerials,
+        CancellationToken cancellationToken = default)
+    {
+        await _serverIndexRefreshGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (rebuildSerials)
+            {
+                await _serials.ResetAllAsync(cancellationToken);
+            }
+
+            await RefreshMappingsAsync(cancellationToken);
+            await RefreshMappedTreeAsync(
+                RootFolderId,
+                "/",
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                cancellationToken);
+
+            var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
+            await RebuildSynchronizedSerialsAsync(metadataEntries, cancellationToken);
+            await RebuildFavoritesSerialAsync(metadataEntries, cancellationToken);
+        }
+        finally
+        {
+            _serverIndexRefreshGate.Release();
+        }
+    }
+
+    private async Task<List<AppEntry>> LoadSynchronizedDevicesFromSerialAsync(
+        CancellationToken cancellationToken)
+    {
         var serial = await _serials.LoadStandaloneSerialAsync(
             SynchronizedRootFolderId,
             FolderSerialKind.Folder,
@@ -110,6 +164,128 @@ public sealed class AppRegistry
                 MappingSnapshot())
             .Where(entry => entry.Type == "folder")
             .ToList();
+    }
+
+    private async Task<IReadOnlyList<AppEntry>> ReadStandaloneMetadataEntriesAsync(
+        CancellationToken cancellationToken)
+    {
+        var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+        var messages = await _discord.GetMessagesInParallelAsync(
+            _settings.NamesChannelId,
+            workers,
+            cancellationToken);
+        var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+        return envelopes
+            .Select(_metadata.ToAppEntry)
+            .Where(entry => entry != null)
+            .Cast<AppEntry>()
+            .GroupBy(EntryIdentity, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group
+                .OrderByDescending(entry => Snowflake(entry.MetadataMessageId))
+                .First())
+            .ToList();
+    }
+
+    private async Task<List<AppEntry>?> RebuildSynchronizedSerialsAsync(
+        IReadOnlyList<AppEntry> metadataEntries,
+        CancellationToken cancellationToken)
+    {
+        var synchronizedRoot = metadataEntries.FirstOrDefault(entry =>
+            entry.Type == "folder" &&
+            entry.FolderId.Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase));
+        var directChildrenExist = metadataEntries.Any(entry =>
+            NormalizeFolderId(entry.ParentFolderId)
+                .Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase));
+        if (synchronizedRoot == null && !directChildrenExist)
+        {
+            return null;
+        }
+
+        var byParent = metadataEntries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.ParentFolderId))
+            .GroupBy(entry => NormalizeFolderId(entry.ParentFolderId), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        var foldersById = metadataEntries
+            .Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId))
+            .GroupBy(entry => entry.FolderId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<(string FolderId, string Path)>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        queue.Enqueue((SynchronizedRootFolderId, SynchronizedRootPath));
+        List<AppEntry> devices = [];
+
+        while (queue.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = queue.Dequeue();
+            if (!visited.Add(current.FolderId))
+            {
+                continue;
+            }
+
+            var children = byParent.TryGetValue(current.FolderId, out var found)
+                ? found
+                : [];
+            foreach (var child in children)
+            {
+                child.Path = current.Path;
+                child.ParentFolderId = current.FolderId;
+                child.Normalize();
+            }
+
+            _store.CacheFolderEntries(current.FolderId, children);
+            RecordDescriptors(children);
+            var descriptor = foldersById.GetValueOrDefault(current.FolderId);
+            var parentFolderId = descriptor == null
+                ? RootFolderId
+                : NormalizeFolderId(descriptor.ParentFolderId);
+            var folderName = descriptor?.Name ?? current.FolderId;
+            var serial = _serials.BuildFolderSerial(
+                current.FolderId,
+                parentFolderId,
+                folderName,
+                children,
+                MappingSnapshot());
+            await _serials.SaveStandaloneSerialAsync(serial, cancellationToken);
+
+            if (current.FolderId.Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase))
+            {
+                devices = children.Where(entry => entry.Type == "folder").ToList();
+            }
+
+            foreach (var folder in children.Where(entry =>
+                         entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)))
+            {
+                queue.Enqueue((folder.FolderId, PathRules.ChildPath(folder)));
+            }
+        }
+
+        return devices;
+    }
+
+    private async Task RefreshMappedTreeAsync(
+        string folderId,
+        string folderPath,
+        HashSet<string> visited,
+        CancellationToken cancellationToken)
+    {
+        if (!visited.Add(folderId))
+        {
+            return;
+        }
+
+        var entries = await RefreshFolderAsync(folderId, folderPath, cancellationToken);
+        foreach (var folder in entries.Where(entry =>
+                     entry.Type == "folder" &&
+                     !string.IsNullOrWhiteSpace(entry.FolderId) &&
+                     _mappings.ContainsKey(entry.FolderId)))
+        {
+            await RefreshMappedTreeAsync(
+                folder.FolderId,
+                PathRules.ChildPath(folder),
+                visited,
+                cancellationToken);
+        }
     }
 
     public async Task SetFavoriteAsync(
@@ -809,7 +985,14 @@ public sealed class AppRegistry
         }
     }
 
-    private async Task<FolderSerial> RebuildFavoritesSerialAsync(CancellationToken cancellationToken)
+    private Task<FolderSerial> RebuildFavoritesSerialAsync(CancellationToken cancellationToken)
+    {
+        return RebuildFavoritesSerialAsync([], cancellationToken);
+    }
+
+    private async Task<FolderSerial> RebuildFavoritesSerialAsync(
+        IEnumerable<AppEntry> additionalEntries,
+        CancellationToken cancellationToken)
     {
         var favorites = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
         var mappings = MappingSnapshot();
@@ -832,6 +1015,11 @@ public sealed class AppRegistry
             {
                 favorites[EntryIdentity(favorite)] = favorite;
             }
+        }
+
+        foreach (var favorite in additionalEntries.Where(entry => entry.Favorite))
+        {
+            favorites[EntryIdentity(favorite)] = favorite;
         }
 
         var built = _serials.BuildFolderSerial(

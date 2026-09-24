@@ -581,6 +581,49 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             .ToList();
     }
 
+    public async Task<IReadOnlyList<DiscordChannelDto>> GetForumThreadsAsync(
+        string channelId,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        var threads = new Dictionary<string, DiscordChannelDto>(StringComparer.Ordinal);
+        foreach (var thread in await GetActiveThreadsAsync(channelId, cancellationToken, onRateLimitWait))
+        {
+            threads[thread.Id] = thread;
+        }
+
+        string? before = null;
+        while (true)
+        {
+            var url = $"channels/{channelId}/threads/archived/public?limit=100";
+            if (!string.IsNullOrWhiteSpace(before))
+            {
+                url += "&before=" + Uri.EscapeDataString(before);
+            }
+
+            using var response = await SendAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, url),
+                cancellationToken,
+                onRateLimitWait);
+            var page = await ReadJsonAsync<DiscordArchivedThreadsDto>(response, cancellationToken);
+            foreach (var thread in page.Threads.Where(thread =>
+                         string.Equals(thread.ParentId, channelId, StringComparison.Ordinal)))
+            {
+                threads[thread.Id] = thread;
+            }
+
+            var next = page.Threads.LastOrDefault()?.ThreadMetadata?.ArchiveTimestamp;
+            if (!page.HasMore || string.IsNullOrWhiteSpace(next) || next.Equals(before, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            before = next;
+        }
+
+        return threads.Values.ToList();
+    }
+
     public async Task ArchiveThreadAsync(
         string threadId,
         CancellationToken cancellationToken = default,
@@ -1127,6 +1170,15 @@ public sealed class DiscordActiveThreadsDto
     public List<DiscordChannelDto> Threads { get; set; } = [];
 }
 
+public sealed class DiscordArchivedThreadsDto
+{
+    [JsonPropertyName("threads")]
+    public List<DiscordChannelDto> Threads { get; set; } = [];
+
+    [JsonPropertyName("has_more")]
+    public bool HasMore { get; set; }
+}
+
 public sealed class DiscordChannelDto
 {
     [JsonPropertyName("id")]
@@ -1146,6 +1198,15 @@ public sealed class DiscordChannelDto
 
     [JsonPropertyName("message")]
     public DiscordMessageDto? Message { get; set; }
+
+    [JsonPropertyName("thread_metadata")]
+    public DiscordThreadMetadataDto? ThreadMetadata { get; set; }
+}
+
+public sealed class DiscordThreadMetadataDto
+{
+    [JsonPropertyName("archive_timestamp")]
+    public string ArchiveTimestamp { get; set; } = "";
 }
 
 public sealed class DiscordGuildDto

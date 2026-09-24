@@ -279,6 +279,24 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
+    public HashSet<string> LoadCachedFileThreadIds()
+    {
+        lock (_lock)
+        {
+            var result = new HashSet<string>(StringComparer.Ordinal);
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT thread_id FROM app_entries WHERE type = 'file' AND thread_id <> ''";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(reader.GetString(0));
+            }
+
+            return result;
+        }
+    }
+
     private static AppEntry? ReadCachedEntry(SqliteDataReader reader)
     {
         try

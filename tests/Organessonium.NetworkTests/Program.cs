@@ -32,7 +32,9 @@ internal static class Program
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("staleSerialMappingRepublishesCachedSerial", StaleSerialMappingRepublishesCachedSerialAsync),
         ("emptyStandaloneSerialIsDeleted", EmptyStandaloneSerialIsDeletedAsync),
+        ("serialResetDeletesRemoteAndLocalCache", SerialResetDeletesRemoteAndLocalCacheAsync),
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
+        ("forumThreadsIncludeArchivedPages", ForumThreadsIncludeArchivedPagesAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
         ("memoryAttachmentRetryKeepsCiphertext", MemoryAttachmentRetryKeepsCiphertextAsync),
@@ -828,6 +830,31 @@ internal static class Program
         }
     }
 
+    private static async Task<TestOutcome> SerialResetDeletesRemoteAndLocalCacheAsync()
+    {
+        var cache = Directory.CreateTempSubdirectory("organessonium_serial_reset_test_");
+        try
+        {
+            await File.WriteAllBytesAsync(Path.Combine(cache.FullName, "serial_old.bin"), [1, 2, 3]);
+            using var handler = new EmptyStandaloneSerialHandler();
+            using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+            var service = new SerialIndexService(
+                discord,
+                new AppSettings { SerialChannelId = EmptyStandaloneSerialHandler.ChannelId, SearchWorkers = 1 },
+                cache);
+
+            var removed = await service.ResetAllAsync();
+            var valid = removed == 1 && handler.Deletes == 1 && !cache.EnumerateFiles("*.bin").Any();
+            return valid
+                ? TestOutcome.Pass()
+                : TestOutcome.Fail($"reset incompleto: remotos={removed}, deletes={handler.Deletes}, cache={cache.EnumerateFiles("*.bin").Count()}");
+        }
+        finally
+        {
+            try { cache.Delete(true); } catch { }
+        }
+    }
+
     private static async Task<TestOutcome> ActiveThreadsUseGuildRouteAsync()
     {
         using var handler = new ActiveThreadsHandler();
@@ -840,6 +867,19 @@ internal static class Program
         return valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("a listagem de threads ativas não consultou a rota do servidor ou incluiu outro fórum");
+    }
+
+    private static async Task<TestOutcome> ForumThreadsIncludeArchivedPagesAsync()
+    {
+        using var handler = new ForumThreadsHandler();
+        using var discord = new DiscordApiClient("test-token", new HttpClient(handler));
+        var threads = await discord.GetForumThreadsAsync("files-forum");
+        var ids = threads.Select(thread => thread.Id).ToHashSet(StringComparer.Ordinal);
+        var valid = ids.SetEquals(["active-file", "archived-file-1", "archived-file-2"]) &&
+                    handler.ArchivedRequests == 2;
+        return valid
+            ? TestOutcome.Pass()
+            : TestOutcome.Fail($"threads incompletas: ids={string.Join(',', ids)}, páginas={handler.ArchivedRequests}");
     }
 
     private static async Task<TestOutcome> ParallelMessageIndexUsesConcurrentWindowsAsync()
@@ -1017,6 +1057,65 @@ internal static class Program
                         {"id":"other-thread","parent_id":"files-forum","type":11}
                     ]}
                     """));
+            }
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+
+        private static HttpResponseMessage JsonResponse(string json)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class ForumThreadsHandler : HttpMessageHandler
+    {
+        public int ArchivedRequests { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri ?? throw new InvalidOperationException("URI ausente no teste de threads.");
+            var path = uri.AbsolutePath;
+            if (path.EndsWith("/channels/files-forum", StringComparison.Ordinal))
+            {
+                return Task.FromResult(JsonResponse("""{"id":"files-forum","guild_id":"guild-id","type":15}"""));
+            }
+
+            if (path.EndsWith("/guilds/guild-id/threads/active", StringComparison.Ordinal))
+            {
+                return Task.FromResult(JsonResponse("""
+                    {"threads":[
+                        {"id":"active-file","parent_id":"files-forum","type":11},
+                        {"id":"active-other","parent_id":"other-forum","type":11}
+                    ]}
+                    """));
+            }
+
+            if (path.EndsWith("/channels/files-forum/threads/archived/public", StringComparison.Ordinal))
+            {
+                ArchivedRequests++;
+                var secondPage = uri.Query.Contains("before=", StringComparison.Ordinal);
+                var json = secondPage
+                    ? """
+                      {"threads":[
+                          {"id":"archived-file-2","parent_id":"files-forum","type":11,
+                           "thread_metadata":{"archive_timestamp":"2026-09-22T10:00:00.000000+00:00"}}
+                      ],"has_more":false}
+                      """
+                    : """
+                      {"threads":[
+                          {"id":"archived-file-1","parent_id":"files-forum","type":11,
+                           "thread_metadata":{"archive_timestamp":"2026-09-23T10:00:00.000000+00:00"}},
+                          {"id":"archived-other","parent_id":"other-forum","type":11,
+                           "thread_metadata":{"archive_timestamp":"2026-09-23T09:00:00.000000+00:00"}}
+                      ],"has_more":true}
+                      """;
+                return Task.FromResult(JsonResponse(json));
             }
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));

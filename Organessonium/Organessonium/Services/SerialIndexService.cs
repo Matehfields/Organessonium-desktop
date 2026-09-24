@@ -367,6 +367,43 @@ public sealed class SerialIndexService
         return Task.CompletedTask;
     }
 
+    public async Task<int> ResetAllAsync(CancellationToken cancellationToken = default)
+    {
+        var removed = 0;
+        if (!string.IsNullOrWhiteSpace(_settings.SerialChannelId))
+        {
+            var messages = await _discord.GetMessagesInParallelAsync(
+                _settings.SerialChannelId,
+                Math.Clamp(_settings.SearchWorkers, 1, 8),
+                cancellationToken);
+            foreach (var message in messages.Where(message =>
+                         SerialMessageEnvelope.TryParse(message.Content, out _)))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await _discord.DeleteMessageAsync(_settings.SerialChannelId, message.Id, cancellationToken);
+                removed++;
+            }
+        }
+
+        _loadedFolders.Clear();
+        _verifiedRemoteSerialIds.Clear();
+        _cacheDirectory.Create();
+        foreach (var file in _cacheDirectory.EnumerateFiles("*.bin"))
+        {
+            try
+            {
+                file.Delete();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Serial.ResetCache", ex, file.FullName);
+                throw;
+            }
+        }
+
+        return removed;
+    }
+
     private async Task<bool> RequiresRemoteUploadAsync(
         FolderIndexMapping mapping,
         CancellationToken cancellationToken)

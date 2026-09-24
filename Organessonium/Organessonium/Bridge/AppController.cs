@@ -121,6 +121,7 @@ public sealed class AppController : IAsyncDisposable
     private AppRegistry? _registry;
     private string _currentPath = "/";
     private volatile bool _loggingOut;
+    private int _unindexedPayloadScanStarted;
 
     public AppController(
         Window owner,
@@ -142,6 +143,7 @@ public sealed class AppController : IAsyncDisposable
     {
         _session = session;
         _registry = null;
+        Volatile.Write(ref _unindexedPayloadScanStarted, 0);
     }
 
     public bool HasSession => _session != null;
@@ -233,6 +235,7 @@ public sealed class AppController : IAsyncDisposable
             case "loadSynchronizedDevices": _ = RunAsync(LoadSynchronizedDevicesAsync); return Task.CompletedTask;
             case "setFavorite": _ = RunAsync(() => SetFavoriteAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
             case "refreshCurrentFolder": _ = RunAsync(RefreshCurrentFolderAsync); return Task.CompletedTask;
+            case "refreshServerIndex": _ = RunAsync(() => RefreshServerIndexAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -593,6 +596,7 @@ public sealed class AppController : IAsyncDisposable
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
                     await PublishLibraryFileCountAsync(registry);
+                    _ = RunAsync(RecoverUnindexedPayloadPostsAsync);
                 }
                 catch (OperationCanceledException)
                 {
@@ -709,6 +713,20 @@ public sealed class AppController : IAsyncDisposable
         if (path == _currentPath)
         {
             await PublishLibraryFileCountAsync(Registry());
+        }
+    }
+
+    private async Task RefreshServerIndexAsync(bool rebuildSerials)
+    {
+        await _bridge.CallAsync("_onServerReadState", true);
+        try
+        {
+            await Registry().RefreshServerIndexAsync(rebuildSerials);
+            await _bridge.CallAsync("_onServerIndexRefreshed", rebuildSerials);
+        }
+        finally
+        {
+            await _bridge.CallAsync("_onServerReadState", false);
         }
     }
 
@@ -4658,16 +4676,29 @@ public sealed class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onStatus", "Transferências interrompidas marcadas como falha.", false);
     }
 
-    private async Task ResumeInterruptedTransfersAsync()
+    private Task ResumeInterruptedTransfersAsync()
     {
-        var states = await _transferManager.RecoverableAsync();
+        return ResumeInterruptedTransfersAsync(null, silent: false);
+    }
+
+    private async Task ResumeInterruptedTransfersAsync(
+        IReadOnlyList<TransferState>? selectedStates,
+        bool silent)
+    {
+        var states = selectedStates ?? await _transferManager.RecoverableAsync();
         if (states.Count == 0)
         {
-            await _bridge.CallAsync("_onStatus", "Nenhuma transferência interrompida.", false);
+            if (!silent)
+            {
+                await _bridge.CallAsync("_onStatus", "Nenhuma transferência interrompida.", false);
+            }
             return;
         }
 
-        await _bridge.CallAsync("_onStatus", $"Retomando {states.Count} transferência(s)...", true);
+        if (!silent)
+        {
+            await _bridge.CallAsync("_onStatus", $"Retomando {states.Count} transferência(s)...", true);
+        }
         var settings = _store.Load();
         var registry = Registry();
         var all = CurrentLocalEntries();
@@ -4785,7 +4816,62 @@ public sealed class AppController : IAsyncDisposable
 
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
         await LoadAppsAsync();
-        await _bridge.CallAsync("_onStatus", $"{resumed}/{states.Count} transferência(s) retomada(s).", false);
+        if (!silent)
+        {
+            await _bridge.CallAsync("_onStatus", $"{resumed}/{states.Count} transferência(s) retomada(s).", false);
+        }
+    }
+
+    private async Task RecoverUnindexedPayloadPostsAsync()
+    {
+        if (Interlocked.CompareExchange(ref _unindexedPayloadScanStarted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var settings = _store.Load();
+            if (string.IsNullOrWhiteSpace(settings.AppsForumId))
+            {
+                return;
+            }
+
+            var threads = await RequireApi().GetForumThreadsAsync(settings.AppsForumId);
+            var indexed = _store.LoadCachedFileThreadIds();
+            var orphanThreadIds = threads
+                .Select(thread => thread.Id)
+                .Where(id => !string.IsNullOrWhiteSpace(id) && !indexed.Contains(id))
+                .ToHashSet(StringComparer.Ordinal);
+            if (orphanThreadIds.Count == 0)
+            {
+                return;
+            }
+
+            var recoverable = await _transferManager.RecoverableAsync();
+            var repairable = recoverable
+                .Where(state =>
+                    state.TransferType.Equals(TransferTypes.Upload, StringComparison.OrdinalIgnoreCase) &&
+                    orphanThreadIds.Contains(state.ThreadId) &&
+                    !_transferOperations.ContainsKey(state.TransferId) &&
+                    File.Exists(state.SourcePath))
+                .ToList();
+            AppLogger.Info(
+                "Registry.UnindexedPayloadPosts",
+                $"Órfãos detectados: {orphanThreadIds.Count}; recuperáveis: {repairable.Count}.");
+            if (repairable.Count > 0)
+            {
+                await ResumeInterruptedTransfersAsync(repairable, silent: true);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // App shutdown cancels the silent repair.
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("Registry.UnindexedPayloadPosts", ex);
+        }
     }
 
     private async Task<bool> OfferRetryEncryptedDownloadAsync(EncryptedPayloadIntegrityException integrity)
