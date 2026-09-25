@@ -933,7 +933,7 @@ window._onServerReadState = active => {
 window._onSpecialItemsLoaded = (view, items) => {
     if (!Array.isArray(items)) return;
     const byId = new Map(allApps.map(app => [appIdentityKey(app), app]));
-    items.forEach(app => byId.set(appIdentityKey(app), app));
+    items.forEach(app => { if (!byId.has(appIdentityKey(app))) byId.set(appIdentityKey(app), app); });
     allApps = [...byId.values()];
     if (view === 'favorites') {
         specialItems = items;
@@ -5841,11 +5841,11 @@ function setStatus(msg, loading) { statusText.textContent=msg; statusLoader.clas
 // ─── Pastas e arquivos ────────────────────────────────────────────────────────
 function childFolders(apps, path) {
     const s = new Set();
-    apps.filter(a=>a.type==='folder'&&(a.path||'/')=== path).forEach(a=>{
+    apps.filter(a=>a.type==='folder'&&belongsToPath(a, path)).forEach(a=>{
         if (path === '/' && String(a.folderId || '').toLowerCase() === 'synchronized') return;
         s.add(a.name);
     });
-    apps.filter(a=>a.type!=='folder').forEach(a=>{
+    apps.filter(a=>a.type!=='folder' && (path !== '/' || !a.parentFolderId || a.parentFolderId === 'root')).forEach(a=>{
         const p=a.path||'/';
         const ok=path==='/'?(p!=='/'&&p.startsWith('/')):(p.startsWith(path+'/'));
         if(!ok) return;
@@ -5856,7 +5856,11 @@ function childFolders(apps, path) {
     });
     return [...s].sort((a,b)=>a.localeCompare(b));
 }
-function filesAt(apps, path) { return apps.filter(a=>a.type!=='folder'&&(a.path||'/')=== path); }
+function belongsToPath(app, path) {
+    return (app.path || '/') === path &&
+        (path !== '/' || !app.parentFolderId || app.parentFolderId === 'root');
+}
+function filesAt(apps, path) { return apps.filter(a=>a.type!=='folder'&&belongsToPath(a, path)); }
 function matchesTypeFilter(app) {
     if (typeFilter === 'all' || typeFilter === 'folders') return true;
     const type = fileType(app && app.name);

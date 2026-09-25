@@ -9,6 +9,7 @@ public sealed class FolderSerialCodec
 {
     private static readonly byte[] FolderMagic = "OSER"u8.ToArray();
     public const int CurrentVersion = 4;
+    public const int PublishedVersion = 3;
     private const int MaxStringBytes = 16 * 1024 * 1024;
     private const int MaxChildren = 10_000_000;
 

@@ -31,8 +31,8 @@ internal static class Program
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("staleSerialMappingRepublishesCachedSerial", StaleSerialMappingRepublishesCachedSerialAsync),
-        ("emptyStandaloneSerialIsDeleted", EmptyStandaloneSerialIsDeletedAsync),
-        ("serialResetDeletesRemoteAndLocalCache", SerialResetDeletesRemoteAndLocalCacheAsync),
+        ("emptyFavoritesSerialIsPublished", EmptyStandaloneSerialIsDeletedAsync),
+        ("serialResetPreservesRemoteAndClearsLocalCache", SerialResetDeletesRemoteAndLocalCacheAsync),
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("forumThreadsIncludeArchivedPages", ForumThreadsIncludeArchivedPagesAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
@@ -57,11 +57,12 @@ internal static class Program
         ("failedProbeReportedAsUnreachable", FailedProbeReportedAsUnreachableAsync)
     };
 
-    public static async Task<int> Main()
+    public static async Task<int> Main(string[] args)
     {
         var passed = 0;
         var failed = 0;
-        foreach (var (name, run) in Tests)
+        var selected = Tests.Where(test => args.Length == 0 || args.Contains(test.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+        foreach (var (name, run) in selected)
         {
             try
             {
@@ -90,7 +91,7 @@ internal static class Program
         }
 
         Console.WriteLine();
-        Console.WriteLine($"Total: {Tests.Count}  Passou: {passed}  Falhou: {failed}");
+        Console.WriteLine($"Total: {selected.Count}  Passou: {passed}  Falhou: {failed}");
         return failed == 0 ? 0 : 1;
     }
 
@@ -647,7 +648,8 @@ internal static class Program
                     child.MimeType == "image/jpeg" &&
                     child.Favorite &&
                     child.DeviceType == "phone" &&
-                    restoredV3.Children.Single().SizeBytes == 0;
+                    restoredV3.Children.Single().SizeBytes == 0 &&
+                    FolderSerialCodec.PublishedVersion == 3;
         return Task.FromResult(valid
             ? TestOutcome.Pass()
             : TestOutcome.Fail("o serial OSER não voltou com a estrutura esperada"));
@@ -824,9 +826,9 @@ internal static class Program
                 Kind = FolderSerialKind.Favorites
             });
 
-            return handler.Deletes == 1 && handler.Uploads == 0
+            return handler.Deletes == 1 && handler.Uploads == 1
                 ? TestOutcome.Pass()
-                : TestOutcome.Fail($"serial vazio não foi removido: deletes={handler.Deletes}, uploads={handler.Uploads}");
+                : TestOutcome.Fail($"serial vazio de Favoritos não foi publicado: deletes={handler.Deletes}, uploads={handler.Uploads}");
         }
         finally
         {
@@ -848,7 +850,7 @@ internal static class Program
                 cache);
 
             var removed = await service.ResetAllAsync();
-            var valid = removed == 1 && handler.Deletes == 1 && !cache.EnumerateFiles("*.bin").Any();
+            var valid = removed == 0 && handler.Deletes == 0 && !cache.EnumerateFiles("*.bin").Any();
             return valid
                 ? TestOutcome.Pass()
                 : TestOutcome.Fail($"reset incompleto: remotos={removed}, deletes={handler.Deletes}, cache={cache.EnumerateFiles("*.bin").Count()}");
@@ -1212,6 +1214,7 @@ internal static class Program
             if (request.Method == HttpMethod.Post)
             {
                 Uploads++;
+                return Task.FromResult(JsonResponse("{\"id\":\"4000000000000000200\",\"content\":\"\",\"attachments\":[]}"));
             }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }

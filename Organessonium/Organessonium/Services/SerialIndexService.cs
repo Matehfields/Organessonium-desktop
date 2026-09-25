@@ -190,7 +190,7 @@ public sealed class SerialIndexService
             return;
         }
 
-        var bytes = _codec.EncodeFolder(serial);
+        var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         var messages = await _discord.GetMessagesInParallelAsync(
             _settings.SerialChannelId,
@@ -200,7 +200,8 @@ public sealed class SerialIndexService
             .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
                               envelope.FolderId.Equals(serial.FolderId, StringComparison.OrdinalIgnoreCase))
             .ToList();
-        if (serial.Children.Count == 0)
+        if (serial.Children.Count == 0 && serial.Kind != FolderSerialKind.Favorites &&
+            !serial.FolderId.Equals("synchronized", StringComparison.OrdinalIgnoreCase))
         {
             foreach (var message in existing)
             {
@@ -301,7 +302,10 @@ public sealed class SerialIndexService
         CancellationToken cancellationToken = default)
     {
         var previous = await ReadCachedFolderAsync(serial.FolderId, cancellationToken);
-        var requiresRemoteUpload = await RequiresRemoteUploadAsync(mapping, cancellationToken);
+        var requiresRemoteUpload = await RequiresRemoteUploadAsync(mapping, cancellationToken) ||
+            previous == null ||
+            !Convert.ToHexString(SHA256.HashData(_codec.EncodeFolder(previous, FolderSerialCodec.PublishedVersion)))
+                .Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase);
         if (previous != null &&
             FolderSerialCodec.SameContent(previous, serial) &&
             !requiresRemoteUpload)
@@ -309,7 +313,7 @@ public sealed class SerialIndexService
             return mapping;
         }
 
-        var bytes = _codec.EncodeFolder(serial);
+        var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
         _loadedFolders[serial.FolderId] = serial;
@@ -369,22 +373,7 @@ public sealed class SerialIndexService
 
     public async Task<int> ResetAllAsync(CancellationToken cancellationToken = default)
     {
-        var removed = 0;
-        if (!string.IsNullOrWhiteSpace(_settings.SerialChannelId))
-        {
-            var messages = await _discord.GetMessagesInParallelAsync(
-                _settings.SerialChannelId,
-                Math.Clamp(_settings.SearchWorkers, 1, 8),
-                cancellationToken);
-            foreach (var message in messages.Where(message =>
-                         SerialMessageEnvelope.TryParse(message.Content, out _)))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                await _discord.DeleteMessageAsync(_settings.SerialChannelId, message.Id, cancellationToken);
-                removed++;
-            }
-        }
-
+        cancellationToken.ThrowIfCancellationRequested();
         _loadedFolders.Clear();
         _verifiedRemoteSerialIds.Clear();
         _cacheDirectory.Create();
@@ -401,7 +390,7 @@ public sealed class SerialIndexService
             }
         }
 
-        return removed;
+        return 0;
     }
 
     private async Task<bool> RequiresRemoteUploadAsync(

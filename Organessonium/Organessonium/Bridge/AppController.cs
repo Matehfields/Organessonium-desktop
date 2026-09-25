@@ -873,7 +873,7 @@ public sealed class AppController : IAsyncDisposable
 
         foreach (var app in batch)
         {
-            byId[EntryCacheKey(app)] = app;
+            byId.TryAdd(EntryCacheKey(app), app);
         }
 
         _loadedApps = byId.Values.ToList();
@@ -1346,7 +1346,7 @@ public sealed class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onPreviewLoading");
         await _bridge.CallAsync("_onPreviewProgress", 0, "locating", 0, 0);
         ClosePreview(threadId);
-        var entry = FindLoadedEntry(threadId);
+        var entry = await FindLoadedFileDetailsAsync(threadId);
 
         DirectoryInfo? tempDir = null;
         try
@@ -1610,6 +1610,12 @@ public sealed class AppController : IAsyncDisposable
         return _loadedApps.FirstOrDefault(app => app.ThreadId == threadId);
     }
 
+    private async Task<AppEntry?> FindLoadedFileDetailsAsync(string threadId, CancellationToken cancellationToken = default)
+    {
+        var entry = FindLoadedEntry(threadId);
+        return entry == null ? null : await Registry().LoadFileDetailsAsync(entry, cancellationToken);
+    }
+
     private static bool ShouldUseVideoPreview(AppEntry? entry, AppSettings settings)
     {
         return entry != null &&
@@ -1668,7 +1674,7 @@ public sealed class AppController : IAsyncDisposable
             return cached;
         }
 
-        var entry = FindLoadedEntry(threadId);
+        var entry = await FindLoadedFileDetailsAsync(threadId);
         var downloaded = entry != null
             ? await Downloader().DownloadAndAssembleAsync(
                 entry,
@@ -3331,6 +3337,10 @@ public sealed class AppController : IAsyncDisposable
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
                 var entry = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
                     .FirstOrDefault(app => app.ThreadId == threadId);
+                if (entry != null)
+                {
+                    entry = await Registry().LoadFileDetailsAsync(entry, cancellationToken);
+                }
                 totalDownloadBytes = Math.Max(0, entry?.SizeBytes ?? 0);
                 await OpsTransferMetricsAsync(opId, "download", 0, 1, 0, totalDownloadBytes);
                 if (entry != null)
@@ -3444,7 +3454,7 @@ public sealed class AppController : IAsyncDisposable
                 for (var i = 0; i < toDownload.Count; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var app = toDownload[i];
+                    var app = await Registry().LoadFileDetailsAsync(toDownload[i], cancellationToken);
                     var rel = PathRules.Normalize(app.Path)[folderPath.Length..].TrimStart('/');
                     var destDir = string.IsNullOrWhiteSpace(rel)
                         ? new DirectoryInfo(System.IO.Path.Combine(baseDir.FullName, folderName))

@@ -36,6 +36,18 @@ public partial class App : Application
             return;
         }
 
+        if (e.Args.Any(arg => arg.Equals("--audit-metadata", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunMetadataAudit();
+            return;
+        }
+
+        if (e.Args.Any(arg => arg.Equals("--repair-serials", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunSerialRepair();
+            return;
+        }
+
         base.OnStartup(e);
     }
 
@@ -72,6 +84,69 @@ public partial class App : Application
             {
             }
 
+            Shutdown(1);
+        }
+    }
+
+    private void RunMetadataAudit()
+    {
+        var store = new SettingsStore();
+        var reportPath = Path.Combine(store.DataDirectory.FullName, "metadata-server-audit.txt");
+        try
+        {
+            var settings = store.Load();
+            if (string.IsNullOrWhiteSpace(settings.BotToken) ||
+                string.IsNullOrWhiteSpace(settings.NamesChannelId) ||
+                string.IsNullOrWhiteSpace(settings.FoldersForumId) ||
+                string.IsNullOrWhiteSpace(settings.SerialChannelId))
+            {
+                File.WriteAllText(reportPath, "Audit unavailable: Discord channels are not configured.\n");
+                Shutdown(2);
+                return;
+            }
+
+            using var discord = new DiscordApiClient(settings.BotToken);
+            var audit = new ServerMetadataAudit(discord, settings);
+            Task.Run(() => audit.WriteReportAsync(reportPath)).GetAwaiter().GetResult();
+            Shutdown(0);
+        }
+        catch (Exception ex)
+        {
+            File.WriteAllText(reportPath, "Audit failed: " + ex.GetType().Name + "\n");
+            Shutdown(1);
+        }
+    }
+
+    private void RunSerialRepair()
+    {
+        var store = new SettingsStore();
+        var reportPath = Path.Combine(store.DataDirectory.FullName, "metadata-server-audit.txt");
+        try
+        {
+            var settings = store.Load();
+            using var discord = new DiscordApiClient(settings.BotToken);
+            Task.Run(async () =>
+            {
+                var audit = new ServerMetadataAudit(discord, settings);
+                var before = await audit.WriteReportAsync(reportPath);
+                if (before.UnreadableCount > 0 || before.MissingSerialReferences > 0)
+                {
+                    throw new InvalidOperationException("A auditoria encontrou metadados ou referências ausentes; os seriais não foram modificados.");
+                }
+
+                var registry = new AppRegistry(discord, store, settings);
+                await registry.RefreshServerIndexAsync(rebuildSerials: true);
+                var after = await audit.WriteReportAsync(reportPath);
+                if (after.UnreadableCount > 0 || after.MissingSerialReferences > 0 || after.InvalidSerials > 0)
+                {
+                    throw new InvalidOperationException("A validação posterior encontrou problemas nos seriais; consulte o relatório local.");
+                }
+            }).GetAwaiter().GetResult();
+            Shutdown(0);
+        }
+        catch (Exception ex)
+        {
+            File.AppendAllText(reportPath, "\nRepair status: " + ex.GetType().Name + "\n");
             Shutdown(1);
         }
     }

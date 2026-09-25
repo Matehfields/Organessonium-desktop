@@ -15,7 +15,11 @@ public static class AppLogger
 
     public static void Error(string area, Exception exception, string? details = null)
     {
-        Write("ERROR", area, details, exception);
+        if (area is "App.DispatcherUnhandledException" or "App.UnhandledException" or
+            "App.UnobservedTaskException")
+        {
+            Write("ERROR", area, details, exception);
+        }
     }
 
     public static void Info(string area, string details)
@@ -25,8 +29,7 @@ public static class AppLogger
 
     public static void Debug(string area, string details)
     {
-        System.Diagnostics.Debug.WriteLine($"[Organessonium] {area}: {details}");
-        Write("DEBUG", area, details, null, "Debug");
+        // Debug events are not persisted.
     }
 
     private static void Write(string level, string area, string? details, Exception? exception, string? subdirectory = null)

@@ -118,17 +118,24 @@ public sealed class AppRegistry
         await _serverIndexRefreshGate.WaitAsync(cancellationToken);
         try
         {
-            if (rebuildSerials)
+            await RefreshMappingsAsync(cancellationToken);
+            if (!rebuildSerials)
             {
-                await _serials.ResetAllAsync(cancellationToken);
+                return;
             }
 
-            await RefreshMappingsAsync(cancellationToken);
+            await _serials.ResetAllAsync(cancellationToken);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             await RefreshMappedTreeAsync(
                 RootFolderId,
                 "/",
-                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                visited,
                 cancellationToken);
+
+            if (_mappings.ContainsKey(SynchronizedRootFolderId) && !visited.Contains(SynchronizedRootFolderId))
+            {
+                await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken);
+            }
 
             var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
             await RebuildSynchronizedSerialsAsync(metadataEntries, cancellationToken);
@@ -138,6 +145,50 @@ public sealed class AppRegistry
         {
             _serverIndexRefreshGate.Release();
         }
+    }
+
+    public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default)
+    {
+        if (entry.Type != "file" || entry.ChunkMessageIds.Count > 0 ||
+            string.IsNullOrWhiteSpace(entry.MetadataMessageId))
+        {
+            return entry;
+        }
+
+        var channels = new List<string> { _settings.NamesChannelId };
+        if (_mappings.TryGetValue(NormalizeFolderId(entry.ParentFolderId), out var mapping) &&
+            !channels.Contains(mapping.ThreadId, StringComparer.Ordinal))
+        {
+            channels.Add(mapping.ThreadId);
+        }
+
+        foreach (var channelId in channels.Where(id => !string.IsNullOrWhiteSpace(id)))
+        {
+            try
+            {
+                var message = await _discord.GetMessageAsync(channelId, entry.MetadataMessageId, cancellationToken);
+                var envelope = await _metadata.ReadEnvelopeAsync(message, cancellationToken);
+                var detailed = envelope == null ? null : _metadata.ToAppEntry(envelope);
+                if (detailed?.Type == "file" &&
+                    detailed.FileId.Equals(entry.FileId, StringComparison.OrdinalIgnoreCase) &&
+                    detailed.ThreadId.Equals(entry.ThreadId, StringComparison.Ordinal))
+                {
+                    detailed.Path = entry.Path;
+                    detailed.ParentFolderId = entry.ParentFolderId;
+                    return detailed;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Registry.LoadFileDetails", ex, entry.MetadataMessageId);
+            }
+        }
+
+        return entry;
     }
 
     private async Task<List<AppEntry>> LoadSynchronizedDevicesFromSerialAsync(
@@ -255,7 +306,14 @@ public sealed class AppRegistry
                 folderName,
                 children,
                 MappingSnapshot());
-            await _serials.SaveStandaloneSerialAsync(serial, cancellationToken);
+            if (_mappings.ContainsKey(current.FolderId))
+            {
+                await SynchronizeFolderSerialAsync(current.FolderId, current.Path, children, cancellationToken);
+            }
+            else
+            {
+                await _serials.SaveStandaloneSerialAsync(serial, cancellationToken);
+            }
 
             if (current.FolderId.Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase))
             {
@@ -379,7 +437,20 @@ public sealed class AppRegistry
                     [entry],
                     MappingSnapshot()).Children.Single());
             }
-            await _serials.SaveStandaloneSerialAsync(CopySerial(parent, children), cancellationToken);
+            if (_mappings.ContainsKey(parentFolderId))
+            {
+                var path = ResolveKnownFolderPath(parentFolderId);
+                var updatedEntries = _serials.MaterializeEntries(
+                    CopySerial(parent, children),
+                    _store.LoadCachedEntriesForFolder(parentFolderId),
+                    path,
+                    MappingSnapshot()).ToList();
+                await SynchronizeFolderSerialAsync(parentFolderId, path, updatedEntries, cancellationToken);
+            }
+            else
+            {
+                await _serials.SaveStandaloneSerialAsync(CopySerial(parent, children), cancellationToken);
+            }
         }
 
         var favorites = await _serials.LoadStandaloneSerialAsync(
@@ -552,10 +623,19 @@ public sealed class AppRegistry
                     .First())
                 .ToList();
 
-            _mappings.Clear();
+            if (canonical.Count == 0 && !_mappings.IsEmpty)
+            {
+                throw new InvalidOperationException("A leitura dos mappings retornou vazia; o índice local foi preservado.");
+            }
             foreach (var mapping in canonical)
             {
                 _mappings[mapping.FolderId] = mapping;
+            }
+            var currentIds = canonical.Select(mapping => mapping.FolderId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var folderId in _mappings.Keys.Where(folderId => !currentIds.Contains(folderId)))
+            {
+                _mappings.TryRemove(folderId, out _);
             }
             _store.ReplaceFolderIndexMappings(canonical);
             _folderFileCounts.Clear();
@@ -1083,6 +1163,10 @@ public sealed class AppRegistry
             var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
             var messages = await _discord.GetMessagesInParallelAsync(mapping.ThreadId, workers, cancellationToken);
             var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+            if (envelopes.Count == 0 && _store.LoadCachedEntriesForFolder(folderId).Count > 0)
+            {
+                throw new InvalidOperationException("A leitura do índice da pasta não retornou metadados válidos; o cache foi preservado.");
+            }
             var entries = _metadata.ToFolderEntries(envelopes, folderId, folderPath, MappingSnapshot());
             NormalizeFolderEntries(entries, folderId, folderPath);
             RecordDescriptors(entries);
