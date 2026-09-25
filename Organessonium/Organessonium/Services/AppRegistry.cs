@@ -154,7 +154,19 @@ public sealed class AppRegistry
 
         if (serial == null)
         {
-            return [];
+            if (!_mappings.TryGetValue(SynchronizedRootFolderId, out var folderMapping))
+            {
+                return [];
+            }
+
+            var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
+            var messages = await _discord.GetMessagesInParallelAsync(
+                folderMapping.ThreadId, workers, cancellationToken);
+            var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+            return _metadata.ToFolderEntries(
+                    envelopes, SynchronizedRootFolderId, SynchronizedRootPath, MappingSnapshot())
+                .Where(entry => entry.Type == "folder")
+                .ToList();
         }
 
         return _serials.MaterializeEntries(
@@ -190,13 +202,10 @@ public sealed class AppRegistry
         IReadOnlyList<AppEntry> metadataEntries,
         CancellationToken cancellationToken)
     {
-        var synchronizedRoot = metadataEntries.FirstOrDefault(entry =>
-            entry.Type == "folder" &&
-            entry.FolderId.Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase));
         var directChildrenExist = metadataEntries.Any(entry =>
             NormalizeFolderId(entry.ParentFolderId)
                 .Equals(SynchronizedRootFolderId, StringComparison.OrdinalIgnoreCase));
-        if (synchronizedRoot == null && !directChildrenExist)
+        if (!directChildrenExist)
         {
             return null;
         }

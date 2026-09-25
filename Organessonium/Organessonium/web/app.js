@@ -5841,13 +5841,18 @@ function setStatus(msg, loading) { statusText.textContent=msg; statusLoader.clas
 // ─── Pastas e arquivos ────────────────────────────────────────────────────────
 function childFolders(apps, path) {
     const s = new Set();
-    apps.filter(a=>a.type==='folder'&&(a.path||'/')=== path).forEach(a=>s.add(a.name));
+    apps.filter(a=>a.type==='folder'&&(a.path||'/')=== path).forEach(a=>{
+        if (path === '/' && String(a.folderId || '').toLowerCase() === 'synchronized') return;
+        s.add(a.name);
+    });
     apps.filter(a=>a.type!=='folder').forEach(a=>{
         const p=a.path||'/';
         const ok=path==='/'?(p!=='/'&&p.startsWith('/')):(p.startsWith(path+'/'));
         if(!ok) return;
         const rest=path==='/'?p.slice(1):p.slice(path.length+1);
-        const seg=rest.split('/')[0]; if(seg) s.add(seg);
+        const seg=rest.split('/')[0];
+        if(path==='/'&&seg.toLowerCase()==='@synchronized') return;
+        if(seg) s.add(seg);
     });
     return [...s].sort((a,b)=>a.localeCompare(b));
 }
