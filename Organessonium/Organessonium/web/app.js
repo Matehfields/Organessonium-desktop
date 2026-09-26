@@ -6146,13 +6146,16 @@ function makeDriveFileCard(app) {
     card.classList.toggle('selected', selectedKeys.has(itemKey(app)));
     const isThumbable = type === 'image' || type === 'video';
 
-    card.innerHTML = (isThumbable
-            ? `<div class="card-preview" data-thumb="${esc(app.threadId)}">${icon(fileIcon(type),48,clr)}</div>`
-            : `<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`)
-        + `<div class="card-footer">
-            <span class="card-name" title="${esc(app.name)}">${esc(truncate(app.name,22))}</span>
-            ${app.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
+    card.innerHTML = `<div class="card-file-header">
+            <span class="card-file-type">${icon(fileIcon(type),17,clr)}</span>
+            <span class="card-name" title="${esc(app.name)}">${esc(app.name)}</span>
             <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>
+        </div>
+        <div class="card-media">
+            ${isThumbable
+                ? `<div class="card-preview" data-thumb="${esc(app.threadId)}">${icon(fileIcon(type),48,clr)}</div>`
+                : `<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`}
+            ${app.favorite ? `<span class="item-favorite card-favorite" title="${esc(t('removeFavorite'))}">${icon('star',18)}</span>` : ''}
         </div>`;
 
     if (isThumbable && window._thumbs && window._thumbs[app.threadId]) {
