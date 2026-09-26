@@ -116,6 +116,7 @@ public sealed class AppController : IAsyncDisposable
     private readonly TransferManager _transferManager;
     private readonly EncryptionService _encryption;
     private readonly PreviewFileServer _previewServer = new();
+    private readonly Action<bool> _onSplashChanged;
     private IReadOnlyList<AppEntry> _loadedApps = [];
     private DiscordSession? _session;
     private AppRegistry? _registry;
@@ -128,13 +129,15 @@ public sealed class AppController : IAsyncDisposable
         SettingsStore store,
         WebMessageBridge bridge,
         Func<DiscordSession, Task> onConnected,
-        Action<string>? onThemeChanged = null)
+        Action<string>? onThemeChanged = null,
+        Action<bool>? onSplashChanged = null)
     {
         _owner = owner;
         _store = store;
         _bridge = bridge;
         _onConnected = onConnected;
         _onThemeChanged = onThemeChanged ?? (_ => { });
+        _onSplashChanged = onSplashChanged ?? (_ => { });
         _transferManager = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
         _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
     }
@@ -222,7 +225,7 @@ public sealed class AppController : IAsyncDisposable
         switch (method)
         {
             case "connect": return ConnectAsync(args);
-            case "logout": _ = RunAsync(LogoutAsync); return Task.CompletedTask;
+            case "logout": _ = RunAsync(LogoutWithSplashAsync); return Task.CompletedTask;
             case "openGuide": return OpenGuideAsync();
             case "setCurrentPath":
                 var requestedPath = PathRules.Normalize(ArgString(args, 0));
@@ -385,6 +388,21 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
+    private async Task LogoutWithSplashAsync()
+    {
+        _onSplashChanged(true);
+        try
+        {
+            await _owner.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+            await LogoutAsync();
+        }
+        catch
+        {
+            _onSplashChanged(false);
+            throw;
+        }
+    }
+
     private async Task LogoutAsync()
     {
         _loggingOut = true;
@@ -409,6 +427,7 @@ public sealed class AppController : IAsyncDisposable
         }
         catch (Exception)
         {
+            _onSplashChanged(false);
             await _bridge.CallAsync("_onLogoutFailed", "Não foi possível limpar todos os dados locais. Tente sair novamente.");
             return;
         }

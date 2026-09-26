@@ -90,7 +90,8 @@ public partial class MainWindow : Window
             _store,
             _bridge,
             async _ => await Dispatcher.InvokeAsync(() => LoadLocalPage("index.html")),
-            theme => Dispatcher.Invoke(() => ApplyWindowTheme(theme)));
+            theme => Dispatcher.Invoke(() => ApplyWindowTheme(theme)),
+            visible => Dispatcher.Invoke(() => SetStartupSplashVisible(visible)));
 
         var settings = startupState.Settings;
         ApplyWindowTheme(settings.Theme);
