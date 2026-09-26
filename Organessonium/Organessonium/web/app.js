@@ -5945,7 +5945,6 @@ function render() {
     }
     updateSelectionUI();
     scheduleCardPreviewSync();
-    scheduleVisibleFolderStatistics();
 }
 
 function renderPathCrumbs() {
@@ -6076,13 +6075,6 @@ function makeDriveFolderCard(name) {
     const fp = currentPath==='/' ? '/' + name : currentPath + '/' + name;
     const explicitFolders = allApps.filter(a => a.type === 'folder' && (a.path||'/') === currentPath && a.name === name);
     const explicit = explicitFolders[0];
-    const loadedCount = allApps.filter(a => a.type !== 'folder' && ((a.path||'/') === fp || (a.path||'/').startsWith(fp + '/'))).length;
-    const knownCounts = explicitFolders
-        .filter(folder => folder.folderId && folderFileCounts.has(folder.folderId))
-        .map(folder => folderFileCounts.get(folder.folderId));
-    const count = explicitFolders.length > 0 && knownCounts.length === explicitFolders.length
-        ? knownCounts.reduce((total, value) => total + value, 0)
-        : loadedCount > 0 ? loadedCount : '...';
     const folderObj = explicit || { name, threadId:'folder_implicit_' + name, type:'folder', path:currentPath, folderColor:TYPE_COLOR.folder };
     const color = folderObj.folderColor || TYPE_COLOR.folder;
     const card = document.createElement('div');
@@ -6102,7 +6094,6 @@ function makeDriveFolderCard(name) {
     const folderIcon = folderObj.deviceType === 'phone' ? 'smartphone' : folderObj.deviceType === 'pc' ? 'computer' : 'folder';
     card.innerHTML = `<div class="folder-icon">${icon(folderIcon,25,color)}</div>
         <span class="folder-name" title="${esc(name)}">${esc(truncate(name,34))}</span>
-        <span class="folder-count">${count}</span>
         ${folderObj.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
         <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>`;
     card.addEventListener('click', e => {
