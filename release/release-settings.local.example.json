@@ -1,5 +1,6 @@
 {
   "storeIdentityName": "NOME_EXATO_DO_PACKAGE_IDENTITY_NO_PARTNER_CENTER",
   "storePublisher": "CN=ID_EXATO_DO_PUBLISHER_NO_PARTNER_CENTER",
-  "storePublisherDisplayName": "NOME_PUBLICO_DO_PUBLICADOR"
+  "storePublisherDisplayName": "NOME_PUBLICO_DO_PUBLICADOR",
+  "storeDisplayName": "NOME_EXATO_RESERVADO_PARA_O_APLICATIVO"
 }

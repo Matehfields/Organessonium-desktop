@@ -1,7 +1,8 @@
 {
   "version": "1.0.0.0",
-  "storeIdentityName": "Organessonium.Desktop",
-  "storePublisher": "CN=Organessonium",
+  "storeIdentityName": "Matehfields.Organessnium",
+  "storePublisher": "CN=66FC599A-EDDE-429B-8795-70D76B2FCBD6",
   "storePublisherDisplayName": "Matehfields",
+  "storeDisplayName": "Organessônium",
   "storeDescription": "Armazenamento e organização de arquivos no Discord"
 }

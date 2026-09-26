@@ -388,6 +388,7 @@ function Write-MsixManifest {
     $identityName = Escape-Xml $ManifestSettings.storeIdentityName
     $publisher = Escape-Xml $ManifestSettings.storePublisher
     $publisherDisplayName = Escape-Xml $ManifestSettings.storePublisherDisplayName
+    $displayName = Escape-Xml $ManifestSettings.storeDisplayName
     $description = Escape-Xml $ManifestSettings.storeDescription
     $manifest = @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -398,7 +399,7 @@ function Write-MsixManifest {
   IgnorableNamespaces="uap rescap">
   <Identity Name="$identityName" Publisher="$publisher" Version="$PackageVersion" ProcessorArchitecture="$Architecture" />
   <Properties>
-    <DisplayName>Organessonium</DisplayName>
+    <DisplayName>$displayName</DisplayName>
     <PublisherDisplayName>$publisherDisplayName</PublisherDisplayName>
     <Description>$description</Description>
     <Logo>Assets\StoreLogo.png</Logo>
@@ -412,7 +413,7 @@ function Write-MsixManifest {
   <Applications>
     <Application Id="Organessonium" Executable="Organessonium.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Organessonium"
+        DisplayName="$displayName"
         Description="$description"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -462,9 +463,12 @@ function Test-MsixArtifact {
     $xml.LoadXml($rawManifest)
     $namespaces = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
     $namespaces.AddNamespace('a', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+    $namespaces.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
     $namespaces.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
     $identity = $xml.SelectSingleNode('/a:Package/a:Identity', $namespaces)
     $description = $xml.SelectSingleNode('/a:Package/a:Properties/a:Description', $namespaces)
+    $displayName = $xml.SelectSingleNode('/a:Package/a:Properties/a:DisplayName', $namespaces)
+    $visualElements = $xml.SelectSingleNode('/a:Package/a:Applications/a:Application/uap:VisualElements', $namespaces)
     $publisherDisplayName = $xml.SelectSingleNode('/a:Package/a:Properties/a:PublisherDisplayName', $namespaces)
     $runFullTrust = $xml.SelectSingleNode('/a:Package/a:Capabilities/rescap:Capability[@Name="runFullTrust"]', $namespaces)
     if ($null -eq $identity -or $identity.GetAttribute('ProcessorArchitecture') -ne $Architecture -or
@@ -474,6 +478,8 @@ function Test-MsixArtifact {
         throw "O manifesto $Architecture tem identidade, arquitetura ou versão incorreta."
     }
     if ($null -eq $description -or $description.InnerText -ne $ExpectedSettings.storeDescription -or
+        $null -eq $displayName -or $displayName.InnerText -ne $ExpectedSettings.storeDisplayName -or
+        $null -eq $visualElements -or $visualElements.GetAttribute('DisplayName') -ne $ExpectedSettings.storeDisplayName -or
         $null -eq $publisherDisplayName -or $publisherDisplayName.InnerText -ne $ExpectedSettings.storePublisherDisplayName) {
         throw "O manifesto $Architecture não preservou os textos UTF-8 configurados."
     }
@@ -537,7 +543,7 @@ if (Test-Path -LiteralPath $localSettingsPath) {
         $settings[$property.Name] = [string]$property.Value
     }
 }
-foreach ($requiredSetting in @('version', 'storeIdentityName', 'storePublisher', 'storePublisherDisplayName', 'storeDescription')) {
+foreach ($requiredSetting in @('version', 'storeIdentityName', 'storePublisher', 'storePublisherDisplayName', 'storeDisplayName', 'storeDescription')) {
     if ([string]::IsNullOrWhiteSpace($settings[$requiredSetting])) {
         throw "A configuração de release '$requiredSetting' está ausente ou vazia."
     }
