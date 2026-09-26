@@ -66,6 +66,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         lock (_lock)
         {
             ThumbnailCache.Clear();
+            using (var connection = Open()) ClearDatabaseContentsForLogout(connection);
+            SqliteConnection.ClearAllPools();
             var failures = ClearDataDirectoryContents(DataDirectory);
             if (failures.Count > 0)
             {
@@ -73,8 +75,19 @@ public sealed class SettingsStore : IEncryptionSecretStore
                     "Settings.ClearOnLogout",
                     new IOException("Não foi possível remover todos os arquivos locais."),
                     string.Join(Environment.NewLine, failures));
+                throw new IOException("Não foi possível remover todos os dados locais. Tente sair novamente.");
             }
         }
+    }
+
+    internal static void ClearDatabaseContentsForLogout(SqliteConnection connection)
+    {
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "DELETE FROM settings; DELETE FROM app_entries; DELETE FROM folder_index_map;";
+        command.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     internal static IReadOnlyList<string> ClearDataDirectoryContents(DirectoryInfo dataDirectory)

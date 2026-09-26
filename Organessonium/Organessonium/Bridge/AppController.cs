@@ -403,7 +403,15 @@ public sealed class AppController : IAsyncDisposable
             await session.DisposeAsync();
         }
 
-        _store.ClearLocalDataForLogout();
+        try
+        {
+            _store.ClearLocalDataForLogout();
+        }
+        catch (Exception)
+        {
+            await _bridge.CallAsync("_onLogoutFailed", "Não foi possível limpar todos os dados locais. Tente sair novamente.");
+            return;
+        }
         await _bridge.SetSettingsAsync(new AppSettings
         {
             DataPath = _store.DataDirectory.FullName

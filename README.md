@@ -202,7 +202,7 @@ Ao abrir uma pasta, o cache e o serial daquela pasta são mostrados primeiro. Em
 
 O comando `--audit-metadata` faz uma leitura do canal `names`, dos threads do fórum `folders` e do canal `serial`, sem alterar o servidor, e grava `metadata-server-audit.txt` no diretório de dados. O relatório lista os metadados reconhecidos e aponta mensagens ilegíveis, seriais inválidos e referências sem metadata. O comando `--repair-serials` exige uma auditoria inicial sem metadados ilegíveis ou referências ausentes, refaz o cache local e publica os seriais a partir dos metadados, depois repete a auditoria. O relatório contém nomes e IDs privados da biblioteca e não deve ser publicado.
 
-Ao clicar em `Sair`, o app encerra a sessão, cancela transferências e prévias em andamento e limpa o diretório `OrganessoniumData`. O banco SQLite, caches, seriais e estados de transferência são removidos; somente `WebView` e `Logs` são preservados. O banco é recriado automaticamente quando uma nova sessão for configurada, sem exigir reinicialização do app.
+Ao confirmar `Sair`, Configurações permanece aberta até a limpeza terminar, sem mostrar a biblioteca anterior. O app encerra a sessão, cancela transferências e prévias em andamento, apaga configurações e entradas em cache do SQLite e limpa o diretório `OrganessoniumData`. Banco, caches, seriais e estados de transferência são removidos; somente `WebView` e `Logs` são preservados. Se algum dado local não puder ser apagado, a tela inicial não é aberta e o usuário pode tentar novamente. Após a limpeza, a configuração inicial aparece sem token nem IDs anteriores; o banco é recriado vazio, sem exigir reinicialização do app.
 
 ## Interface desktop
 

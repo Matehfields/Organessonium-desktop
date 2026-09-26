@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Data.Sqlite;
 using Organessonium.Models;
 using Organessonium.Services;
 
@@ -135,13 +136,32 @@ internal static class Program
             Directory.CreateDirectory(Path.Combine(root.FullName, "Previews"));
             Directory.CreateDirectory(Path.Combine(root.FullName, "Serials"));
             Directory.CreateDirectory(Path.Combine(root.FullName, "Transfers"));
-            File.WriteAllText(Path.Combine(root.FullName, "organessonium.db"), "settings");
+            var databasePath = Path.Combine(root.FullName, "organessonium.db");
+            bool databaseCleared;
+            using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE settings (key TEXT);
+                    CREATE TABLE app_entries (name TEXT);
+                    CREATE TABLE folder_index_map (folder_id TEXT);
+                    INSERT INTO settings VALUES ('old-token');
+                    INSERT INTO app_entries VALUES ('old-file');
+                    INSERT INTO folder_index_map VALUES ('old-folder');
+                    """;
+                command.ExecuteNonQuery();
+                SettingsStore.ClearDatabaseContentsForLogout(connection);
+                command.CommandText = "SELECT (SELECT COUNT(*) FROM settings) + (SELECT COUNT(*) FROM app_entries) + (SELECT COUNT(*) FROM folder_index_map)";
+                databaseCleared = Convert.ToInt64(command.ExecuteScalar()) == 0;
+            }
+            SqliteConnection.ClearAllPools();
             File.WriteAllText(Path.Combine(root.FullName, "WebView", "User Data", "profile.dat"), "webview");
             File.WriteAllText(Path.Combine(root.FullName, "Logs", "session.log"), "log");
 
             var failures = SettingsStore.ClearDataDirectoryContents(root);
             var children = root.EnumerateFileSystemInfos().Select(item => item.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var valid = failures.Count == 0 &&
+            var valid = databaseCleared && failures.Count == 0 &&
                         children.SetEquals(["WebView", "Logs"]) &&
                         File.Exists(Path.Combine(root.FullName, "WebView", "User Data", "profile.dat")) &&
                         File.Exists(Path.Combine(root.FullName, "Logs", "session.log"));

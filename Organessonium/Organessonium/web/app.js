@@ -982,7 +982,17 @@ window._onBackgroundActivity = (message, active) => {
     }
 };
 window._onLoggedOut = () => {
+    try {
+        localStorage.removeItem('organessonium.lang');
+        localStorage.removeItem('organessonium.sidebarCollapsed');
+    } catch (_) {}
     window.location.href = 'setup.html';
+};
+window._onLogoutFailed = message => {
+    const button = $('btn-logout');
+    if (button) button.disabled = false;
+    const help = $('setting-logout-help');
+    if (help) help.textContent = message;
 };
 
 window._onSystemThemeChanged = theme => {
@@ -2721,7 +2731,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if ($('btn-logout')) $('btn-logout').addEventListener('click', () => {
         askConfirm(t('logoutTitle'), t('logoutMessage'), () => {
-            closeSettings();
+            clearTimeout(settingsSaveTimer);
+            settingsSaveTimer = 0;
+            $('btn-logout').disabled = true;
             setStatus(t('loading'), true);
             if (window.bridge && window.bridge.logout) window.bridge.logout();
         }, 'logout');
@@ -5603,6 +5615,7 @@ function openSettings()  {
     }, 40);
 }
 function closeSettings() {
+    if ($('btn-logout')?.disabled) return;
     if (settingsSaveTimer) {
         clearTimeout(settingsSaveTimer);
         settingsSaveTimer = 0;
