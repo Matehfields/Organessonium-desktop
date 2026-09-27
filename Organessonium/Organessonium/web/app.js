@@ -60,7 +60,7 @@ const transferRateStates = new Map();
 
 const PDF_DEFAULT_BATCH_SIZE = 10;
 
-const CARD_SIZES = { small:'130px', medium:'180px', large:'240px' };
+const CARD_SIZES = { small:'180px', medium:'250px', large:'320px' };
 const DEFAULT_FOLDER_COLOR = '#C4C7C5';
 const FOLDER_COLORS = [DEFAULT_FOLDER_COLOR,'#F28B82','#FDD663','#81C995','#C58AF9','#FFB74D'];
 const SORT_LABEL_KEYS = { 'name-asc':'sortName','name-desc':'sortName','size-desc':'sortSize','size-asc':'sortSize','date-desc':'sortDate','date-asc':'sortDate' };
