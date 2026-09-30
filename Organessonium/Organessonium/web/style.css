@@ -1069,7 +1069,7 @@ html[data-motion="reduced"] *{
 .card-file-type{display:flex;align-items:center;justify-content:center;flex:0 0 18px;}
 .card-file-header .card-name{flex:1;font-size:13px;font-weight:600;}
 .card-file-header .btn-more{flex:0 0 28px;}
-.card-media{position:relative;flex:none;min-height:0;margin:0 12px 12px;aspect-ratio:1;}
+.card-media{position:relative;flex:none;min-height:0;margin:0 8px 8px;aspect-ratio:1;}
 .card-media .card-preview{height:100%;min-height:0;border:0;border-radius:6px;}
 .card-media .card-favorite{
     position:absolute;top:8px;right:8px;z-index:2;
