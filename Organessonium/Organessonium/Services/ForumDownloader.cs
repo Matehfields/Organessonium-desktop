@@ -47,12 +47,14 @@ public sealed class ForumDownloader
     private readonly DiscordApiClient _discord;
     private readonly AppSettings _settings;
     private readonly EncryptionService _encryption;
+    private readonly Func<HttpClient> _downloadClientFactory;
 
-    public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption)
+    public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption, Func<HttpClient>? downloadClientFactory = null)
     {
         _discord = discord;
         _settings = settings;
         _encryption = encryption;
+        _downloadClientFactory = downloadClientFactory ?? (() => NetworkConfig.Current.CreateClient());
     }
 
     public async Task<FileInfo> DownloadAndAssembleAsync(
@@ -464,7 +466,7 @@ public sealed class ForumDownloader
         var buffers = new ConcurrentDictionary<int, byte[]>();
         var parallelism = Math.Min(Math.Clamp(_settings.DownloadThreads, 1, 16), parts.Count);
         using var semaphore = new SemaphoreSlim(parallelism);
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = _downloadClientFactory();
 
         var tasks = parts.Select(async part =>
         {
@@ -544,7 +546,7 @@ public sealed class ForumDownloader
         }
 
         var total = Math.Max(0, attachment.Size);
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = _downloadClientFactory();
         using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -788,6 +790,39 @@ public sealed class ForumDownloader
             .Select(part => new ProgressiveDownloadPart(part.Index, part.Url, part.Name, part.Size))
             .ToList();
     }
+
+    public async Task<DiscordVideoChunkProvider> OpenVideoChunksAsync(AppEntry entry, bool lowQuality,
+        CancellationToken cancellationToken = default)
+    {
+        List<Part> parts;
+        if (lowQuality)
+        {
+            var ids = entry.VideoPreviewChunkMessageIds.Count > 0 ? entry.VideoPreviewChunkMessageIds :
+                string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId) ? [] : new List<string> { entry.VideoPreviewMessageId };
+            parts = ids.Count > 0
+                ? await ResolveMessagePartsAsync(entry.ThreadId, ids, "", cancellationToken)
+                : await CollectPreviewPartsAsync(entry.ThreadId, "video-480", cancellationToken);
+            if (parts.Count == 0 && entry.Encryption == null)
+            {
+                var messages = await _discord.GetMessagesAsync(entry.ThreadId, null, cancellationToken);
+                var marked = messages.FirstOrDefault(m => m.Content.StartsWith(DartVideoPreviewPrefix, StringComparison.OrdinalIgnoreCase));
+                if (marked?.Attachments.FirstOrDefault() is { } attachment)
+                    parts.Add(new Part(0, attachment.Url, attachment.FileName, attachment.Size, marked.Id));
+            }
+        }
+        else
+        {
+            if (entry.Encryption != null && entry.ChunkMessageIds.Count == 0)
+                throw new InvalidDataException("O metadata criptografado não contém referências aos chunks do vídeo.");
+            parts = entry.ChunkMessageIds.Count > 0
+                ? await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken)
+                : await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
+        }
+        return new DiscordVideoChunkProvider(_discord, entry.ThreadId,
+            parts.Select(p => new VideoAttachment(p.Index, p.MessageId, p.Name, p.Url, p.Size)).ToArray(),
+            _encryption, EncryptionContext(entry, lowQuality ? EncryptedPayloadRoles.Video480p : EncryptedPayloadRoles.Original),
+            lowQuality ? entry.VideoPreviewSizeBytes : entry.SizeBytes, _downloadClientFactory());
+    }
     private async Task<List<Part>> CollectPartsAsync(string threadId, CancellationToken cancellationToken, string? preferredBatchId = null)
     {
         var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
@@ -845,8 +880,8 @@ public sealed class ForumDownloader
             .Where(message => !IsPreviewMessage(message.Content) &&
                               !message.Content.Contains("Parte", StringComparison.OrdinalIgnoreCase))
             .OrderBy(m => Snowflake(m.Id))
-            .SelectMany(m => m.Attachments)
-            .Select((attachment, index) => new Part(index, attachment.Url, attachment.FileName, attachment.Size))
+            .SelectMany(m => m.Attachments.Select(a => (Message: m, Attachment: a)))
+            .Select((item, index) => new Part(index, item.Attachment.Url, item.Attachment.FileName, item.Attachment.Size, item.Message.Id))
             .ToList();
         return legacy;
     }
@@ -1096,7 +1131,7 @@ public sealed class ForumDownloader
             return new SortedDictionary<int, FileInfo>();
         }
 
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = _downloadClientFactory();
         var done = 0;
         var downloadedBytes = initialDownloadedBytes;
         var totalBytes = parts.Sum(part => Math.Max(0, part.Size)) + Math.Max(0, initialDownloadedBytes);
@@ -1161,6 +1196,7 @@ public sealed class ForumDownloader
                         var buffer = new byte[DownloadBufferSize];
                         while (true)
                         {
+                            await VideoNetworkPriority.YieldAsync(cancellationToken);
                             var read = await inStream.ReadAsync(buffer, cancellationToken);
                             if (read <= 0)
                             {
@@ -1339,6 +1375,7 @@ public sealed class ForumDownloader
         var buffer = new byte[DownloadBufferSize];
         while (true)
         {
+            await VideoNetworkPriority.YieldAsync(cancellationToken);
             var read = await input.ReadAsync(buffer, cancellationToken);
             if (read <= 0)
             {

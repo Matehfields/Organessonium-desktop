@@ -459,6 +459,11 @@
                 </div>
                 <small id="setting-video-preview-quality-help">Usa a prévia 480p para carregar vídeos mais rápido.</small>
             </div>
+            <div class="setting-row col">
+                <label class="threads-label" for="setting-video-prefetch"><span id="setting-video-prefetch-label">Chunks antecipados de vídeo</span> <span id="video-prefetch-val" class="setting-val">1</span></label>
+                <input id="setting-video-prefetch" type="range" min="0" max="6" value="1" class="setting-range"/>
+                <small id="setting-video-prefetch-help">Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.</small>
+            </div>
             <div class="setting-row">
                 <div class="setting-copy">
                     <label id="setting-cache-label">Cache</label>

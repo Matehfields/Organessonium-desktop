@@ -9,9 +9,12 @@
     <AssemblyName>Organessonium.NetworkTests</AssemblyName>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
   <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
     <ProjectReference Include="..\..\Organessonium\Organessonium\Organessonium.csproj" />
   </ItemGroup>
 

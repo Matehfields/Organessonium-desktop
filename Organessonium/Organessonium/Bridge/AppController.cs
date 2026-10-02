@@ -115,7 +115,11 @@ public sealed class AppController : IAsyncDisposable
     private readonly SemaphoreSlim _registryLoadGate = new(1, 1);
     private readonly TransferManager _transferManager;
     private readonly EncryptionService _encryption;
-    private readonly PreviewFileServer _previewServer = new();
+    private readonly PreviewResourceRegistry _previewResources = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _videoOpenRequests = new();
+    private readonly ConcurrentDictionary<string, VideoStreamSession> _videoSessions = new();
+    private readonly VideoPlaybackTracker _videoProgress;
+    public PreviewResourceRegistry PreviewResources => _previewResources;
     private readonly Action<bool> _onSplashChanged;
     private IReadOnlyList<AppEntry> _loadedApps = [];
     private DiscordSession? _session;
@@ -140,6 +144,9 @@ public sealed class AppController : IAsyncDisposable
         _onSplashChanged = onSplashChanged ?? (_ => { });
         _transferManager = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
         _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
+        var playbackStore = new VideoPlaybackProgressStore(store.DatabasePath);
+        playbackStore.Prune();
+        _videoProgress = new VideoPlaybackTracker(playbackStore);
     }
 
     public void SetSession(DiscordSession session)
@@ -186,6 +193,11 @@ public sealed class AppController : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _loggingOut = true;
+        foreach (var request in _videoOpenRequests.Values) request.Cancel();
+        await Task.Run(_videoProgress.Suspend);
+        foreach (var video in _videoSessions.Values) await video.DisposeAsync();
+        _videoSessions.Clear();
         CancellationTokenSource? thumbnailRequest;
         lock (_thumbnailRequestSync)
         {
@@ -213,7 +225,7 @@ public sealed class AppController : IAsyncDisposable
         _previewDirs.Clear();
         _previewUrls.Clear();
 
-        _previewServer.Dispose();
+        _previewResources.Dispose();
         if (_session != null)
         {
             await _session.DisposeAsync();
@@ -244,6 +256,7 @@ public sealed class AppController : IAsyncDisposable
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
+            case "videoPlayback": _ = RunAsync(() => UpdateVideoPlaybackAsync(args)); return Task.CompletedTask;
             case "clearPreviewCache": _ = RunAsync(ClearPreviewCacheAsync); return Task.CompletedTask;
             case "getPreviewCacheSize": _ = RunAsync(SendPreviewCacheSizeAsync); return Task.CompletedTask;
             case "openPreviewMedia": _ = RunAsync(() => OpenPreviewMediaAsync(ArgString(args, 0))); return Task.CompletedTask;
@@ -292,6 +305,7 @@ public sealed class AppController : IAsyncDisposable
     private async Task ConnectAsync(JsonElement[] args)
     {
         _loggingOut = false;
+        _videoProgress.Resume();
         var token = ArgString(args, 0).Trim();
         var names = ArgString(args, 1, "names").Trim();
         var folders = ArgString(args, 2, "folders").Trim();
@@ -414,6 +428,7 @@ public sealed class AppController : IAsyncDisposable
         await CancelActiveTransfersAndWaitAsync();
         await CancelThumbnailRequestsAndWaitAsync();
         ClearPreviewState();
+        await Task.Run(_videoProgress.Suspend);
         _encryption.ClearCustomKey();
 
         if (session != null)
@@ -1373,55 +1388,38 @@ public sealed class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onPreviewLoading");
         await _bridge.CallAsync("_onPreviewProgress", 0, "locating", 0, 0);
         ClosePreview(threadId);
-        var entry = await FindLoadedFileDetailsAsync(threadId);
-
+        CancellationTokenSource? videoRequest = null;
+        if (type == "video") _videoOpenRequests[threadId] = videoRequest = new CancellationTokenSource();
+        var cancellation = videoRequest?.Token ?? CancellationToken.None;
         DirectoryInfo? tempDir = null;
         try
         {
+            var entry = await FindLoadedFileDetailsAsync(threadId, cancellation);
+            cancellation.ThrowIfCancellationRequested();
             if (type == "archive" && await RegisteredFileSizeAsync(threadId) > ArchivePreviewLimit)
             {
                 await SendPreviewReadyAsync("archive", name, RenderArchiveTooLargePreview(await RegisteredFileSizeAsync(threadId)));
                 return;
             }
 
-            tempDir = CreatePreviewTempDir(threadId);
-            if (type == "video" && ShouldUseVideoPreview(entry, settings))
+            if (type == "video")
             {
-                var preview = await GetOrDownloadVideoPreview480Async(threadId, name, entry, tempDir);
-                if (preview != null)
+                if (entry == null) throw new InvalidOperationException("Metadados do vídeo não encontrados.");
+                var low = ShouldUseVideoPreview(entry, settings) && HasVideoPreview(entry);
+                var streamUrl = await GetOrCreateVideoStreamUrlAsync(entry, low, cancellation);
+                var progress = await Task.Run(() => _videoProgress.Load(entry.FileId));
+                cancellation.ThrowIfCancellationRequested();
+                var qualities = HasVideoPreview(entry) ? new[] { "480p", "full" } : new[] { "full" };
+                await SendPreviewReadyAsync("video", name, JsonSerializer.Serialize(new
                 {
-                    var previewUrl = _previewServer.Register(preview, "video/mp4");
-                    TrackPreviewUrl(threadId, "480p", previewUrl);
-                    await SendPreviewReadyAsync(
-                        "video",
-                        name,
-                        JsonSerializer.Serialize(
-                            new { src = previewUrl, mime = "video/mp4", quality = "480p", qualities = new[] { "480p", "full" } },
-                            JsonOptions.Web));
-                    CleanDir(tempDir);
-                    tempDir = null;
-                    return;
-                }
+                    src = streamUrl, mime = low ? "video/mp4" : MediaMime(name), quality = low ? "480p" : "full",
+                    qualities, fileId = entry.FileId, resumeSeconds = progress?.ResumeAt() ?? 0,
+                    savedDuration = progress?.DurationSeconds ?? 0
+                }, JsonOptions.Web));
+                return;
             }
 
-            if (type == "video" && entry is { ChunkMessageIds.Count: > 0 })
-            {
-                var streamUrl = await GetOrCreateProgressiveVideoUrlAsync(entry, tempDir);
-                if (!string.IsNullOrWhiteSpace(streamUrl))
-                {
-                    var qualities = HasVideoPreview(entry)
-                        ? new[] { "480p", "full" }
-                        : new[] { "full" };
-                    await SendPreviewReadyAsync(
-                        "video",
-                        name,
-                        JsonSerializer.Serialize(
-                            new { src = streamUrl, mime = MediaMime(name), quality = "full", qualities },
-                            JsonOptions.Web));
-                    tempDir = null;
-                    return;
-                }
-            }
+            tempDir = CreatePreviewTempDir(threadId);
 
             var file = type == "markdown"
                 ? entry != null
@@ -1440,12 +1438,12 @@ public sealed class AppController : IAsyncDisposable
             switch (type)
             {
                 case "image":
-                    var imageUrl = _previewServer.Register(file, GuessMime(name));
+                    var imageUrl = _previewResources.Register(file, GuessMime(name));
                     TrackPreviewUrl(threadId, "default", imageUrl);
                     await SendPreviewReadyAsync("image", name, imageUrl);
                     break;
                 case "pdf":
-                    var pdfUrl = _previewServer.Register(file, "application/pdf");
+                    var pdfUrl = _previewResources.Register(file, "application/pdf");
                     TrackPreviewUrl(threadId, "default", pdfUrl);
                     await SendPreviewReadyAsync("pdf", name, JsonSerializer.Serialize(new { threadId, directUrl = pdfUrl, totalPages = 0, batchSize = 0 }, JsonOptions.Web));
                     break;
@@ -1463,7 +1461,7 @@ public sealed class AppController : IAsyncDisposable
                     break;
                 case "video":
                 case "audio":
-                    var url = _previewServer.Register(file, MediaMime(name));
+                    var url = _previewResources.Register(file, MediaMime(name));
                     TrackPreviewUrl(threadId, type == "video" ? "full" : "default", url);
                     var qualities = type == "video" && HasVideoPreview(entry)
                         ? new[] { "480p", "full" }
@@ -1485,6 +1483,7 @@ public sealed class AppController : IAsyncDisposable
                 tempDir = null;
             }
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             if (tempDir != null)
@@ -1519,11 +1518,16 @@ public sealed class AppController : IAsyncDisposable
 
     private void ClosePreview(string threadId)
     {
+        if (_videoOpenRequests.TryRemove(threadId, out var request)) { request.Cancel(); request.Dispose(); }
+        var entry = FindLoadedEntry(threadId);
+        if (entry != null) _videoProgress.Flush(entry.FileId);
+        foreach (var key in _videoSessions.Keys.Where(key => key.StartsWith(threadId + "|", StringComparison.Ordinal)).ToArray())
+            if (_videoSessions.TryRemove(key, out var video)) _ = video.DisposeAsync();
         foreach (var key in _previewUrls.Keys.Where(key => key.StartsWith(threadId + "|", StringComparison.Ordinal)).ToArray())
         {
             if (_previewUrls.TryRemove(key, out var url))
             {
-                _previewServer.RemoveUrl(url);
+                _previewResources.RemoveUrl(url);
             }
         }
 
@@ -1539,7 +1543,7 @@ public sealed class AppController : IAsyncDisposable
         FileInfo? file = null;
         if (url != null)
         {
-            file = _previewServer.GetFileFromUrl(url);
+            file = _previewResources.GetFileFromUrl(url);
             if (file?.Exists != true)
             {
                 file = null;
@@ -1558,7 +1562,7 @@ public sealed class AppController : IAsyncDisposable
             await _bridge.CallAsync("_onPreviewProgress", 0, "full", 0, Math.Max(0, entry.SizeBytes));
             var dir = _previewDirs.GetOrAdd(threadId, _ => CreatePreviewTempDir(threadId));
             file = await GetOrDownloadFullPreviewFileAsync(threadId, entry.Name, dir, "full");
-            var fullUrl = _previewServer.Register(file, GuessFileMime(entry.Name));
+            var fullUrl = _previewResources.Register(file, GuessFileMime(entry.Name));
             TrackPreviewUrl(threadId, "full", fullUrl);
         }
 
@@ -1567,6 +1571,8 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task RequestVideoQualityAsync(string threadId, string name, string quality)
     {
+        if (_loggingOut || !_videoOpenRequests.TryGetValue(threadId, out var opening)) return;
+        var cancellation = opening.Token;
         quality = quality.Equals("480p", StringComparison.OrdinalIgnoreCase) ? "480p" : "full";
         var existing = GetPreviewUrl(threadId, quality);
         if (existing != null)
@@ -1575,39 +1581,20 @@ public sealed class AppController : IAsyncDisposable
             return;
         }
 
-        if (quality == "480p")
+        var entry = await FindLoadedFileDetailsAsync(threadId, cancellation);
+        cancellation.ThrowIfCancellationRequested();
+        if (entry != null)
         {
-            var entry = FindLoadedEntry(threadId);
-            var dir480 = _previewDirs.GetOrAdd(threadId, _ => CreatePreviewTempDir(threadId));
-            var preview = await GetOrDownloadVideoPreview480Async(threadId, name, entry, dir480);
-            if (preview == null)
+            var streamUrl = await GetOrCreateVideoStreamUrlAsync(entry, quality == "480p", cancellation);
+            foreach (var key in _videoSessions.Keys.Where(key => key.StartsWith(threadId + "|", StringComparison.Ordinal) && key != threadId + "|" + quality).ToArray())
             {
-                await _bridge.CallAsync("_onPreviewError", "A prévia 480p não está disponível para este vídeo.");
-                return;
+                if (_videoSessions.TryRemove(key, out var old)) await old.DisposeAsync();
+                if (_previewUrls.TryRemove(key, out var oldUrl)) _previewResources.RemoveUrl(oldUrl);
             }
-
-            var previewUrl = _previewServer.Register(preview, "video/mp4");
-            TrackPreviewUrl(threadId, "480p", previewUrl);
-            await _bridge.CallAsync("_onVideoQualityReady", threadId, "480p", previewUrl, "video/mp4");
+            await _bridge.CallAsync("_onVideoQualityReady", threadId, quality, streamUrl, quality == "480p" ? "video/mp4" : MediaMime(name));
             return;
         }
-
-        var entryForFull = FindLoadedEntry(threadId);
-        var dir = _previewDirs.GetOrAdd(threadId, _ => CreatePreviewTempDir(threadId));
-        if (entryForFull is { ChunkMessageIds.Count: > 0 } && ThumbnailCache.IsVideo(entryForFull.Name))
-        {
-            var streamUrl = await GetOrCreateProgressiveVideoUrlAsync(entryForFull, dir);
-            if (!string.IsNullOrWhiteSpace(streamUrl))
-            {
-                await _bridge.CallAsync("_onVideoQualityReady", threadId, "full", streamUrl, MediaMime(name));
-                return;
-            }
-        }
-
-        var file = await GetOrDownloadFullPreviewFileAsync(threadId, name, dir, "full");
-        var url = _previewServer.Register(file, MediaMime(name));
-        TrackPreviewUrl(threadId, "full", url);
-        await _bridge.CallAsync("_onVideoQualityReady", threadId, "full", url, MediaMime(name));
+        throw new InvalidOperationException("Metadados do vídeo não encontrados.");
     }
 
     private async Task RequestVideoQualitySafeAsync(string threadId, string name, string quality)
@@ -1616,6 +1603,7 @@ public sealed class AppController : IAsyncDisposable
         {
             await RequestVideoQualityAsync(threadId, name, quality);
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             await _bridge.CallAsync("_onVideoQualityError", threadId, ex.Message);
@@ -1656,37 +1644,48 @@ public sealed class AppController : IAsyncDisposable
     }
 
 
-    private async Task<string?> GetOrCreateProgressiveVideoUrlAsync(AppEntry entry, DirectoryInfo tempDir)
+    private async Task<string> GetOrCreateVideoStreamUrlAsync(AppEntry entry, bool lowQuality, CancellationToken cancellation)
     {
-        if (entry.Encryption != null)
-        {
-            return null;
-        }
-
-        var existing = GetPreviewUrl(entry.ThreadId, "full");
+        cancellation.ThrowIfCancellationRequested();
+        if (_loggingOut) throw new OperationCanceledException();
+        var quality = lowQuality ? "480p" : "full";
+        var existing = GetPreviewUrl(entry.ThreadId, quality);
         if (!string.IsNullOrWhiteSpace(existing))
         {
             return existing;
         }
 
-        var parts = await Downloader().ResolveProgressivePartsAsync(entry);
-        if (parts.Count == 0)
+        var provider = await Downloader().OpenVideoChunksAsync(entry, lowQuality, cancellation);
+        var video = new VideoStreamSession(provider, _store.Load().VideoPrefetchChunks);
+        try
         {
-            return null;
+            await video.WarmUpAsync().WaitAsync(cancellation);
+            cancellation.ThrowIfCancellationRequested();
+            var url = _previewResources.RegisterVideo(video, lowQuality ? "video/mp4" : MediaMime(entry.Name));
+            _videoSessions[entry.ThreadId + "|" + quality] = video;
+            TrackPreviewUrl(entry.ThreadId, quality, url);
+            video.Failed += ex =>
+            {
+                AppLogger.Error("Video.Stream", new IOException("Falha permanente ao carregar bytes autenticados do vídeo."));
+                if (GetPreviewUrl(entry.ThreadId, quality) == url)
+                    _ = _bridge.CallAsync("_onVideoStreamError", entry.ThreadId, ex is EncryptedPayloadException ? ex.Message : "Não foi possível carregar o vídeo. Verifique a conexão e tente abrir novamente.");
+            };
+            return url;
         }
+        catch { await video.DisposeAsync(); throw; }
+    }
 
-        tempDir.Create();
-        _previewDirs[entry.ThreadId] = tempDir;
-        var fileName = "stream_" + PathRules.CleanFileName(string.IsNullOrWhiteSpace(entry.Name) ? "video.mp4" : entry.Name);
-        var target = new FileInfo(System.IO.Path.Combine(tempDir.FullName, fileName));
-        var progressive = new ProgressiveDownload(
-            parts,
-            target,
-            entry.SizeBytes,
-            progress => ReportPreviewProgress(progress, "full"));
-        var url = _previewServer.RegisterProgressive(progressive, MediaMime(entry.Name));
-        TrackPreviewUrl(entry.ThreadId, "full", url);
-        return url;
+    private Task UpdateVideoPlaybackAsync(JsonElement[] args)
+    {
+        if (_loggingOut) return Task.CompletedTask;
+        var threadId = ArgString(args, 0);
+        var entry = FindLoadedEntry(threadId);
+        if (entry == null || entry.FileId != ArgString(args, 1)) return Task.CompletedTask;
+        if (args.Length < 4 || !args[2].TryGetDouble(out var position) || !args[3].TryGetDouble(out var duration)) return Task.CompletedTask;
+        foreach (var pair in _videoSessions.Where(pair => pair.Key.StartsWith(threadId + "|", StringComparison.Ordinal)))
+            pair.Value.SetPlaying(ArgBool(args, 4, false), ArgBool(args, 6, false));
+        _videoProgress.Update(entry.FileId, position, duration, ArgBool(args, 5, false));
+        return Task.CompletedTask;
     }
     private async Task<FileInfo> GetOrDownloadFullPreviewFileAsync(
         string threadId,
@@ -2492,6 +2491,7 @@ public sealed class AppController : IAsyncDisposable
         bool deferSerialSynchronization = false)
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
+        var originalFile = file;
         var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.UploadThreads, 1, 16);
         var sourceLength = file.Length;
         var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
@@ -2509,6 +2509,14 @@ public sealed class AppController : IAsyncDisposable
             true,
             useBatchUi,
             progressTracker: progressTracker);
+
+        using var preparedVideo = existingTransferState?.UploadedChunks.Count > 0 && !existingTransferState.FastStartApplied
+            ? new PreparedVideoUpload(file, null, false)
+            : await Mp4FastStart.PrepareAsync(file, cancellationToken);
+        if (existingTransferState?.FastStartApplied == true && !preparedVideo.Applied)
+            throw new IOException("Não foi possível reconstruir o faststart desta transferência. Os chunks já enviados foram preservados.");
+        file = preparedVideo.File;
+        sourceLength = file.Length;
 
         IReadOnlyList<FileInfo>? parts = null;
         var totalChunks = ArchiveSplitter.GetPartCount(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes);
@@ -2533,7 +2541,7 @@ public sealed class AppController : IAsyncDisposable
             if (transferState == null)
             {
                 transferState = await _transferManager.CreateUploadAsync(
-                    file,
+                    originalFile,
                     targetPath,
                     parentFolderId,
                     GuessFileMime(name),
@@ -2567,6 +2575,8 @@ public sealed class AppController : IAsyncDisposable
             }
 
             transferState.FileName = name;
+            transferState.SourcePath = originalFile.FullName;
+            transferState.FastStartApplied = preparedVideo.Applied;
             await _transferManager.SaveAsync(transferState, cancellationToken);
             await ReportUploadItemProgressAsync(
                 opId,
@@ -3141,6 +3151,8 @@ public sealed class AppController : IAsyncDisposable
         UploadProgressTracker? progressTracker,
         EncryptedPayloadContext? videoEncryption)
     {
+        using var preparedVideo = await Mp4FastStart.PrepareAsync(generated, cancellationToken);
+        generated = preparedVideo.File;
         if (videoEncryption != null)
         {
             var totalParts = ArchiveSplitter.GetPartCount(generated.Length, EncryptionService.MaximumPlaintextPayloadBytes);
@@ -3776,6 +3788,7 @@ public sealed class AppController : IAsyncDisposable
         }
 
         await registry.DeleteEntryAsync(entry, synchronizeSerials: synchronizeSerials);
+        if (!isFolder) _videoProgress.Delete(entry.FileId);
     }
 
     private static DeletePlan BuildDeletePlan(List<AppEntry> all, IReadOnlyList<AppEntry> selected)
@@ -4251,7 +4264,7 @@ public sealed class AppController : IAsyncDisposable
             throw new InvalidOperationException("Não foi possível abrir a imagem criptografada.");
         }
 
-        var url = _previewServer.RegisterBytes(bytes, reference.MimeType);
+        var url = _previewResources.RegisterBytes(bytes, reference.MimeType);
         await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, value, url);
     }
 
@@ -4267,7 +4280,7 @@ public sealed class AppController : IAsyncDisposable
         var tempDir = Directory.CreateTempSubdirectory("organessonium_markdown_image_");
         _previewDirs["markdown-image-" + NewId()] = tempDir;
         var file = await Downloader().DownloadAndAssembleAsync(image, tempDir, _ => { });
-        var url = _previewServer.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
+        var url = _previewResources.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
         await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, "organessonium-drive-image://" + imageThreadId, url);
     }
 
@@ -4390,6 +4403,7 @@ public sealed class AppController : IAsyncDisposable
         settings.Proxy.Username = ArgString(args, 18, settings.Proxy.Username);
         settings.Proxy.Password = ArgString(args, 19, settings.Proxy.Password);
         settings.PreviewThreads = Math.Clamp(ArgInt(args, 20, settings.PreviewThreads), 1, 8);
+        settings.VideoPrefetchChunks = Math.Clamp(ArgInt(args, 21, settings.VideoPrefetchChunks), 0, VideoStreamSession.MaximumPrefetchChunks);
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var _))
         {
             settings.Proxy.Mode = ProxyMode.Automatic;
@@ -4646,6 +4660,7 @@ public sealed class AppController : IAsyncDisposable
     {
         var previewIds = _previewDirs.Keys
             .Concat(_previewUrls.Keys.Select(key => key.Split('|', 2)[0]))
+            .Concat(_videoOpenRequests.Keys)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         foreach (var threadId in previewIds)

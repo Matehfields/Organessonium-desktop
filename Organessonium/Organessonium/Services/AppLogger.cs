@@ -16,7 +16,7 @@ public static class AppLogger
     public static void Error(string area, Exception exception, string? details = null)
     {
         if (area is "App.DispatcherUnhandledException" or "App.UnhandledException" or
-            "App.UnobservedTaskException")
+            "App.UnobservedTaskException" or "Video.Stream" or "Video.FastStart" or "Video.Progress")
         {
             Write("ERROR", area, details, exception);
         }

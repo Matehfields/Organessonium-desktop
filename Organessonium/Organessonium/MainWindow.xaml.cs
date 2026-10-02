@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private SettingsStore _store = null!;
     private WebMessageBridge? _bridge;
     private AppController? _controller;
+    private WebView2PreviewAdapter? _previewAdapter;
     private string? _pendingSetupError;
     private bool _draggingFiles;
     private HwndSource? _windowSource;
@@ -321,6 +322,8 @@ public partial class MainWindow : Window
         WebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
         WebView.CoreWebView2.ProcessFailed += OnWebViewProcessFailed;
         WebView.CoreWebView2.ContainsFullScreenElementChanged += OnContainsFullScreenElementChanged;
+        _previewAdapter = new WebView2PreviewAdapter(WebView.CoreWebView2, _controller!.PreviewResources);
+        _previewAdapter.Attach();
     }
 
     private async void OnClosing(object? sender, CancelEventArgs e)
@@ -337,6 +340,7 @@ public partial class MainWindow : Window
         RemoveShellDropSupport();
         try
         {
+            _previewAdapter?.Dispose();
             if (_controller != null)
             {
                 await _controller.DisposeAsync();
@@ -460,6 +464,7 @@ public partial class MainWindow : Window
         try
         {
             var oldWebView = WebView;
+            _previewAdapter?.Dispose();
             UnwireCoreWebView(oldWebView);
             UnwireWebViewDropSupport(oldWebView);
             UninstallWebViewShellDropSupport(oldWebView);

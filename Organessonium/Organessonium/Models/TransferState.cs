@@ -51,6 +51,9 @@ public sealed class TransferState
     [JsonPropertyName("sourcePath")]
     public string SourcePath { get; set; } = "";
 
+    [JsonPropertyName("fastStartApplied")]
+    public bool FastStartApplied { get; set; }
+
     [JsonPropertyName("destinationPath")]
     public string DestinationPath { get; set; } = "";
 

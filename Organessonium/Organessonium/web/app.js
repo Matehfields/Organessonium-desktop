@@ -13,7 +13,7 @@ let confirmCb = null;
 let uploadConflictState = null;
 let settings = {
     cardSize:'medium', downloadThreads:4, uploadThreads:4, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
-    previewEnabled:true, videoPreviewQuality:'low', language:'system',
+    previewEnabled:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
 };
@@ -122,6 +122,7 @@ const I18N = {
         small:'Pequeno', medium:'Médio', large:'Grande', previews:'Prévias',
         videoPreviewQuality:'Qualidade do vídeo', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Usa a prévia 480p para carregar vídeos mais rápido.',
+        videoPrefetch:'Chunks antecipados de vídeo', videoPrefetchHelp:'Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.',
         cache:'Cache', clearCache:'Limpar cache', clearCacheHelp:'Limpa prévias e imagens salvas localmente.',
         cacheSize:v => 'Uso atual: ' + v.size,
         cacheCleared:'Cache limpo.',
@@ -254,6 +255,7 @@ const I18N = {
         small:'Small', medium:'Medium', large:'Large', previews:'Previews',
         videoPreviewQuality:'Video quality', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Uses the 480p preview to load videos faster.',
+        videoPrefetch:'Video chunks to prefetch', videoPrefetchHelp:'RAM-only buffer. Zero disables prefetch; full downloads are not limited.',
         cache:'Cache', clearCache:'Clear cache', clearCacheHelp:'Clears locally saved previews and images.',
         cacheSize:v => 'Current usage: ' + v.size,
         cacheCleared:'Cache cleared.',
@@ -532,6 +534,8 @@ function applyI18n() {
     setText('video-preview-low-text', 'videoPreviewLow');
     setText('video-preview-original-text', 'videoPreviewOriginal');
     setText('setting-video-preview-quality-help', 'videoPreviewQualityHelp');
+    setText('setting-video-prefetch-label', 'videoPrefetch');
+    setText('setting-video-prefetch-help', 'videoPrefetchHelp');
     setText('setting-cache-label', 'cache');
     setText('setting-cache-help', 'clearCacheHelp');
     setText('btn-clear-cache', 'clearCache');
@@ -1117,6 +1121,7 @@ function scheduleVisibleThumbnails() {
 }
 
 window._onPreviewLoading = () => {
+    stopVideoPlayback();
     disposeActiveImage();
     resetPdfPreviewState();
     $('preview-zoom-controls').classList.add('hidden');
@@ -1190,6 +1195,7 @@ window._onPreviewReady = (type, name, data) => {
         player.preload = 'metadata';
         player.autoplay = false;
         player.dataset.quality = currentQuality;
+        if (type === 'video') bindVideoPlayback(player, mediaInfo || {});
         if (type === 'video') player.playsInline = true;
         if (src) setMediaElementSource(player, src, mime);
 
@@ -1382,6 +1388,64 @@ function setMediaElementSource(player, src, mime) {
     if (mime) source.type = mime;
     player.appendChild(source);
 }
+
+function reportVideoPlayback(player, force = false, seeking = false) {
+    if (!player?.dataset.fileId || !window.bridge?.videoPlayback || player.readyState < 1) return;
+    window.bridge.videoPlayback(player.dataset.threadId, player.dataset.fileId,
+        Number.isFinite(player.currentTime) ? player.currentTime : 0,
+        Number.isFinite(player.duration) ? player.duration : 0, !player.paused, force, seeking);
+}
+
+function bindVideoPlayback(player, info) {
+    player.dataset.fileId = info.fileId || previewAppRef?.fileId || '';
+    player.dataset.threadId = previewAppRef?.threadId || '';
+    let lastReport = 0;
+    player.addEventListener('loadedmetadata', () => {
+        const savedDuration = Number(info.savedDuration) || 0;
+        const compatible = !savedDuration || Math.abs(player.duration - savedDuration) <= Math.max(5, savedDuration * 0.01);
+        if (compatible && Number(info.resumeSeconds) > 0 && Number(info.resumeSeconds) < player.duration * 0.95)
+            player.currentTime = Number(info.resumeSeconds);
+    }, { once:true });
+    player.addEventListener('timeupdate', () => {
+        if (Date.now() - lastReport < 1000) return;
+        lastReport = Date.now();
+        reportVideoPlayback(player);
+    });
+    ['play', 'playing', 'pause', 'ended'].forEach(event => player.addEventListener(event, () => reportVideoPlayback(player, event === 'pause' || event === 'ended')));
+    player.addEventListener('seeking', () => reportVideoPlayback(player, true, true));
+    const buffering = visible => {
+        const progress = player.closest('.preview-media-player-shell')?.querySelector('.preview-media-quality-progress');
+        if (!progress || pendingVideoQualitySwitch) return;
+        progress.classList.toggle('hidden', !visible);
+        if (visible) { progress.querySelector('small').textContent = t('loading'); progress.querySelector('span').style.width = '25%'; }
+    };
+    ['waiting', 'stalled'].forEach(event => player.addEventListener(event, () => buffering(true)));
+    ['playing', 'canplay', 'seeked'].forEach(event => player.addEventListener(event, () => buffering(false)));
+}
+
+function stopVideoPlayback() {
+    const player = $('preview-body')?.querySelector('video');
+    if (!player) return;
+    reportVideoPlayback(player, true);
+    player.pause();
+    player.removeAttribute('src');
+    player.replaceChildren();
+    player.load();
+}
+
+window._onVideoStreamError = (threadId, message) => {
+    if (previewAppRef?.threadId !== threadId) return;
+    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
+    if (!shell) return;
+    shell.querySelector('video')?.pause();
+    shell.querySelector('.preview-video-frame')?.classList.add('hidden');
+    shell.querySelector('.preview-media-quality-progress')?.classList.add('hidden');
+    const fallback = shell.querySelector('.preview-media-fallback');
+    fallback?.classList.remove('hidden');
+    if (fallback?.querySelector('p')) fallback.querySelector('p').textContent = message;
+};
+
+window.addEventListener?.('pagehide', () => reportVideoPlayback($('preview-body')?.querySelector('video'), true));
 
 function createVideoChrome(player) {
     const frame = document.createElement('div');
@@ -2740,6 +2804,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     $('setting-threads').addEventListener('input', e => { settings.downloadThreads=+e.target.value; $('thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-preview-threads').addEventListener('input', e => { settings.previewThreads=+e.target.value; $('preview-thr-val').textContent=e.target.value; queueSettingsSave(); });
+    $('setting-video-prefetch').addEventListener('input', e => { settings.videoPrefetchChunks=+e.target.value; $('video-prefetch-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-files').addEventListener('input', e => { settings.maxParallelUploads=+e.target.value; $('upload-files-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-threads').addEventListener('input', e => { settings.uploadThreads=+e.target.value; $('upload-thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('btn-encryption-standard')?.addEventListener('click', () => {
@@ -4904,6 +4969,7 @@ const PREVIEWABLE = new Set(['jpg','jpeg','png','gif','bmp','webp','tiff','tif',
 function canPreview(name) { return !!name; }
 
 function loadPreviewApp(app, showLoading) {
+    stopVideoPlayback();
     const previous = previewAppRef;
     if (previous && previous.threadId !== app.threadId) window.bridge.closePreview(previous.threadId);
     previewAppRef = app;
@@ -4933,6 +4999,7 @@ function isMarkdownFile(name) {
 }
 
 function closePreview() {
+    stopVideoPlayback();
     disposeActiveImage();
     resetPdfPreviewState();
     pendingVideoQualitySwitch = null;
@@ -5496,6 +5563,7 @@ function loadSettings() {
     settings.cardSize = CARD_SIZES[settings.cardSize] ? settings.cardSize : 'medium';
     settings.uploadThreads = Math.max(1, Math.min(16, Number(settings.uploadThreads) || 4));
     settings.previewThreads = Math.max(1, Math.min(8, Number(settings.previewThreads) || 4));
+    settings.videoPrefetchChunks = Math.max(0, Math.min(6, Number.isFinite(Number(settings.videoPrefetchChunks)) ? Number(settings.videoPrefetchChunks) : 1));
     settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
     settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
     settings.customKeyAvailable = settings.customKeyAvailable === true;
@@ -5504,6 +5572,7 @@ function loadSettings() {
     $('setting-upload-files').value=settings.maxParallelUploads; $('upload-files-val').textContent=settings.maxParallelUploads;
     $('setting-upload-threads').value=settings.uploadThreads; $('upload-thr-val').textContent=settings.uploadThreads;
     $('setting-preview-threads').value=settings.previewThreads; $('preview-thr-val').textContent=settings.previewThreads;
+    $('setting-video-prefetch').value=settings.videoPrefetchChunks; $('video-prefetch-val').textContent=settings.videoPrefetchChunks;
     $('setting-dlpath').value=settings.downloadPath||''; $('setting-tmppath').value=settings.tempPath||''; $('setting-datapath').value=settings.dataPath||'';
     $('setting-preview').checked=settings.previewEnabled!==false;
     $('setting-animations').checked=settings.animationsEnabled!==false;
@@ -5595,7 +5664,8 @@ function saveSettings(showStatus = true) {
         settings.proxy.proxyAuthenticationEnabled === true,
         settings.proxy.proxyUsername || '',
         settings.proxy.proxyPassword || '',
-        settings.previewThreads
+        settings.previewThreads,
+        settings.videoPrefetchChunks
     );
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);

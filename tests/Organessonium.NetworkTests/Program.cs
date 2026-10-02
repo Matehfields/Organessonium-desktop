@@ -15,6 +15,17 @@ internal static partial class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
+        ("videoVariableChunkMapping", VideoVariableChunkMappingAsync),
+        ("videoVirtualResourceRanges", VideoVirtualResourceRangesAsync),
+        ("videoSeekAndDeduplication", VideoSeekAndDeduplicationAsync),
+        ("videoPrefetchAndRelease", VideoPrefetchAndReleaseAsync),
+        ("videoCloseCancelsRequiredRead", VideoCloseCancelsRequiredReadAsync),
+        ("videoPlaybackPersistence", VideoPlaybackPersistenceAsync),
+        ("videoEncryptedChunksAndRenewal", VideoEncryptedChunksAndRenewalAsync),
+        ("videoTamperedPayloadNotExposed", VideoTamperedPayloadNotExposedAsync),
+        ("videoStreamingAndFullDownloadIndependent", VideoStreamingAndFullDownloadIndependentAsync),
+        ("mp4FastStartOffsetsAndFallback", Mp4FastStartOffsetsAndFallbackAsync),
+        ("webViewVirtualVideoPlayback", WebViewVirtualVideoPlaybackAsync),
         ("encryptedFileRangeRoundTrip", EncryptedFileRangeRoundTripAsync),
         ("encryptedFileRangeUsesCallerOwnedBuffers", EncryptedFileRangeUsesCallerOwnedBuffersAsync),
         ("encryptedPayloadMessageProtocol", EncryptedPayloadMessageProtocolAsync),

@@ -37,6 +37,9 @@ public sealed class AppSettings
     [JsonPropertyName("previewThreads")]
     public int PreviewThreads { get; set; } = 4;
 
+    [JsonPropertyName("videoPrefetchChunks")]
+    public int VideoPrefetchChunks { get; set; } = 1;
+
     [JsonPropertyName("downloadPath")]
     public string DownloadPath { get; set; } = "";
 
@@ -108,6 +111,7 @@ public sealed class AppSettings
             DownloadThreads = DownloadThreads,
             UploadThreads = UploadThreads,
             PreviewThreads = PreviewThreads,
+            VideoPrefetchChunks = VideoPrefetchChunks,
             DownloadPath = DownloadPath,
             TempPath = TempPath,
             DataPath = DataPath,
