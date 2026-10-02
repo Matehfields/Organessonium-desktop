@@ -7,8 +7,8 @@ public static class DiscordLimits
     public const int ThreadNameCharacters = 100;
     public const int MessagesPerPage = 100;
 
-    // Keep the existing 10 MiB upload budget, including the encrypted envelope.
-    public const int AttachmentBytes = 10 * 1024 * 1024;
+    // Per-file upload limit, including the encrypted envelope.
+    public const int AttachmentBytes = 20 * 1024 * 1024;
     public const int MessageRequestBytes = 25 * 1024 * 1024;
     public const int PlaintextChunkBytes = AttachmentBytes - EncryptionService.EnvelopeOverheadBytes;
 
