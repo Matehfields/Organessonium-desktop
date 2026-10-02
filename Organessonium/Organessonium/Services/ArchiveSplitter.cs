@@ -4,7 +4,7 @@ namespace Organessonium.Services;
 
 public static class ArchiveSplitter
 {
-    private const int SplitBytes = 10 * 1024 * 1024;
+    private const int SplitBytes = DiscordLimits.AttachmentBytes;
 
     public static int GetPartCount(long length, int? maxPartBytes = null)
     {

@@ -746,7 +746,7 @@ public sealed record SerialMessageEnvelope(
 {
     public const int SchemaVersion = 1;
     public const string EntryType = "folderSerial";
-    private const int MaxDiscordContentLength = 2000;
+    private const int MaxDiscordContentLength = DiscordLimits.MessageContentCharacters;
 
     public static bool TryParse(string? content, out SerialMessageEnvelope envelope)
     {

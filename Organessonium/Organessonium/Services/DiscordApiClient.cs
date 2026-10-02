@@ -15,7 +15,7 @@ public sealed class DiscordApiClient : IDisposable
     public const int MaxActiveThreadsCode = 160006;
 
     private readonly HttpClient _http;
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _routeReadyAt = new(StringComparer.Ordinal);
+    private readonly DiscordRequestLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _routeLocks = new(StringComparer.Ordinal);
 
 public DiscordApiClient(string botToken)
@@ -26,6 +26,7 @@ public DiscordApiClient(string botToken)
     public DiscordApiClient(string botToken, HttpClient http)
     {
         _http = http;
+        _rateLimiter = DiscordRequestLimiter.ForToken(botToken);
         _http.Timeout = Timeout.InfiniteTimeSpan;
         _http.BaseAddress = new Uri("https://discord.com/api/v10/");
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bot", botToken);
@@ -78,7 +79,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         while (!limit.HasValue || messages.Count < limit.Value)
         {
-            var take = limit.HasValue ? Math.Min(100, limit.Value - messages.Count) : 100;
+            var take = limit.HasValue ? Math.Min(DiscordLimits.MessagesPerPage, limit.Value - messages.Count) : DiscordLimits.MessagesPerPage;
             var url = $"channels/{channelId}/messages?limit={take}";
             if (!string.IsNullOrWhiteSpace(before))
             {
@@ -195,7 +196,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         while (true)
         {
-            var url = $"channels/{channelId}/messages?limit=100&before={before}";
+            var url = $"channels/{channelId}/messages?limit={DiscordLimits.MessagesPerPage}&before={before}";
 
             using var response = await SendAsync(
                 () => new HttpRequestMessage(HttpMethod.Get, url),
@@ -226,7 +227,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 }
             }
 
-            if (clipped.Count < batch.Count || batch.Count < 100)
+            if (clipped.Count < batch.Count || batch.Count < DiscordLimits.MessagesPerPage)
             {
                 break;
             }
@@ -259,7 +260,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string? before = null;
         while (wanted.Count > 0)
         {
-            var url = $"channels/{channelId}/messages?limit=100";
+            var url = $"channels/{channelId}/messages?limit={DiscordLimits.MessagesPerPage}";
             if (!string.IsNullOrWhiteSpace(before))
             {
                 url += "&before=" + before;
@@ -286,7 +287,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 onResolved?.Invoke(found.Count, total);
             }
 
-            if (batch.Count < 100)
+            if (batch.Count < DiscordLimits.MessagesPerPage)
             {
                 break;
             }
@@ -315,6 +316,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new { content }, JsonOptions.Web);
         using var response = await SendAsync(() =>
         {
@@ -332,6 +334,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new { content }, JsonOptions.Web);
         using var response = await SendAsync(() =>
         {
@@ -469,6 +472,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        DiscordLimits.ValidateMessage(content);
         for (var attempt = 0; attempt < 3; attempt++)
         {
             try
@@ -477,7 +481,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 {
                     var payload = JsonSerializer.Serialize(new
                     {
-                        name = Truncate(title, 100),
+                        name = Truncate(title, DiscordLimits.ThreadNameCharacters),
                         message = new { content }
                     }, JsonOptions.Web);
                     var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
@@ -595,7 +599,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string? before = null;
         while (true)
         {
-            var url = $"channels/{channelId}/threads/archived/public?limit=100";
+            var url = $"channels/{channelId}/threads/archived/public?limit={DiscordLimits.MessagesPerPage}";
             if (!string.IsNullOrWhiteSpace(before))
             {
                 url += "&before=" + Uri.EscapeDataString(before);
@@ -792,7 +796,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
-        var payload = JsonSerializer.Serialize(new { name = Truncate(title, 100) }, JsonOptions.Web);
+        var payload = JsonSerializer.Serialize(new { name = Truncate(title, DiscordLimits.ThreadNameCharacters) }, JsonOptions.Web);
         using var _ = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Patch, $"channels/{threadId}");
@@ -831,9 +835,10 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string fileName,
         Func<Stream> openRead)
     {
+        DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new
         {
-            name = Truncate(title, 100),
+            name = Truncate(title, DiscordLimits.ThreadNameCharacters),
             message = new
             {
                 content,
@@ -843,7 +848,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         var multipart = new MultipartFormDataContent();
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
+        AddFileContent(multipart, fileName, openRead);
         return multipart;
     }
 
@@ -852,6 +857,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string fileName,
         Func<Stream> openRead)
     {
+        DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new
         {
             content,
@@ -860,13 +866,34 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         var multipart = new MultipartFormDataContent();
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
+        AddFileContent(multipart, fileName, openRead);
         return multipart;
+    }
+
+    private static void AddFileContent(MultipartFormDataContent multipart, string fileName, Func<Stream> openRead)
+    {
+        try
+        {
+            multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
+            if (multipart.Headers.ContentLength > DiscordLimits.MessageRequestBytes)
+                throw new ArgumentException($"A mensagem excede o limite de {DiscordLimits.MessageRequestBytes} bytes configurado para o Discord.");
+        }
+        catch
+        {
+            multipart.Dispose();
+            throw;
+        }
     }
 
     private static StreamContent BuildFileContent(Func<Stream> openRead)
     {
-        var content = new StreamContent(openRead());
+        var stream = openRead();
+        if (stream.CanSeek && stream.Length - stream.Position > DiscordLimits.AttachmentBytes)
+        {
+            stream.Dispose();
+            throw new ArgumentException($"O anexo excede o limite de {DiscordLimits.AttachmentBytes} bytes configurado para o Discord.");
+        }
+        var content = new StreamContent(stream);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         return content;
     }
@@ -883,7 +910,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = requestFactory();
-            var routeKey = BuildRouteKey(request);
+            var routeKey = DiscordRequestLimiter.RouteKey(request);
             var routeLock = serializeRoute
                 ? _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1))
                 : null;
@@ -893,7 +920,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             }
             try
             {
-                await WaitForRouteAsync(routeKey, onRateLimitWait, cancellationToken);
+                using var reservation = await _rateLimiter.WaitAsync(routeKey, onRateLimitWait, cancellationToken);
 
                 HttpResponseMessage response;
                 var transferActivityStarted = false;
@@ -902,6 +929,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     onTransferActivity?.Invoke(true);
                     transferActivityStarted = onTransferActivity != null;
                     response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    reservation.Observe(response);
                 }
                 catch (HttpRequestException) when (shouldWaitForTransientNetwork || attempt < 11)
                 {
@@ -924,7 +952,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 {
                     if (response.IsSuccessStatusCode)
                     {
-                        TrackRouteLimit(routeKey, response);
                         return response;
                     }
 
@@ -940,8 +967,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     throw new DiscordApiException(statusCode, body);
                 }
 
-                var retry = await ResolveRetryAfterAsync(response, cancellationToken);
-                SetRouteReadyAt(routeKey, DateTimeOffset.UtcNow.Add(retry));
+                var (retry, global) = await ResolveRetryAfterAsync(response, cancellationToken);
+                _rateLimiter.Block(routeKey, retry, global);
                 response.Dispose();
                 await WaitWithProgressAsync(retry, onRateLimitWait, cancellationToken);
             }
@@ -973,62 +1000,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return WaitWithProgressAsync(TimeSpan.FromMilliseconds(delayMs), onRateLimitWait, cancellationToken);
     }
 
-    private static string BuildRouteKey(HttpRequestMessage request)
-    {
-        var uri = request.RequestUri;
-        var path = uri == null
-            ? string.Empty
-            : uri.IsAbsoluteUri
-                ? uri.AbsolutePath
-                : uri.OriginalString.Split('?', 2)[0];
-        return request.Method.Method + " " + path;
-    }
-
-    private async Task WaitForRouteAsync(
-        string routeKey,
-        Func<TimeSpan, Task>? onRateLimitWait,
-        CancellationToken cancellationToken)
-    {
-        if (!_routeReadyAt.TryGetValue(routeKey, out var readyAt))
-        {
-            return;
-        }
-
-        var delay = readyAt - DateTimeOffset.UtcNow;
-        if (delay <= TimeSpan.Zero)
-        {
-            TryRemoveRouteReadyAt(routeKey, readyAt);
-            return;
-        }
-
-        await WaitWithProgressAsync(delay, onRateLimitWait, cancellationToken);
-        TryRemoveRouteReadyAt(routeKey, readyAt);
-    }
-
-    private void TrackRouteLimit(string routeKey, HttpResponseMessage response)
-    {
-        if (!TryReadHeaderInt(response, "X-RateLimit-Remaining", out var remaining) || remaining > 0)
-        {
-            return;
-        }
-
-        if (TryReadHeaderDouble(response, "X-RateLimit-Reset-After", out var seconds) && seconds > 0)
-        {
-            SetRouteReadyAt(routeKey, DateTimeOffset.UtcNow.AddSeconds(seconds));
-        }
-    }
-
-    private void SetRouteReadyAt(string routeKey, DateTimeOffset readyAt)
-    {
-        _routeReadyAt.AddOrUpdate(routeKey, readyAt, (_, current) => current > readyAt ? current : readyAt);
-    }
-
-    private bool TryRemoveRouteReadyAt(string routeKey, DateTimeOffset expectedReadyAt)
-    {
-        return ((ICollection<KeyValuePair<string, DateTimeOffset>>)_routeReadyAt)
-            .Remove(new KeyValuePair<string, DateTimeOffset>(routeKey, expectedReadyAt));
-    }
-
     private static async Task WaitWithProgressAsync(
         TimeSpan delay,
         Func<TimeSpan, Task>? onRateLimitWait,
@@ -1052,13 +1023,6 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         }
     }
 
-    private static bool TryReadHeaderInt(HttpResponseMessage response, string name, out int value)
-    {
-        value = 0;
-        return response.Headers.TryGetValues(name, out var values) &&
-               int.TryParse(values.FirstOrDefault(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
-    }
-
     private static bool TryReadHeaderDouble(HttpResponseMessage response, string name, out double value)
     {
         value = 0;
@@ -1073,23 +1037,26 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return value ?? throw new DiscordApiException(response.StatusCode, "Resposta vazia do Discord.");
     }
 
-    private static async Task<TimeSpan> ResolveRetryAfterAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    private static async Task<(TimeSpan Delay, bool Global)> ResolveRetryAfterAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
+        var seconds = TryReadHeaderDouble(response, "Retry-After", out var headerSeconds) ? headerSeconds : 0;
+        var global = response.Headers.Contains("X-RateLimit-Global") ||
+            (response.Headers.TryGetValues("X-RateLimit-Scope", out var scopes) && scopes.Contains("global"));
         try
         {
             var text = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(text);
-            if (doc.RootElement.TryGetProperty("retry_after", out var retry) && retry.TryGetDouble(out var seconds))
-            {
-                return TimeSpan.FromMilliseconds(Math.Max(250, seconds * 1000.0));
-            }
+            if (doc.RootElement.TryGetProperty("retry_after", out var retry) && retry.TryGetDouble(out var bodySeconds))
+                seconds = Math.Max(seconds, bodySeconds);
+            if (doc.RootElement.TryGetProperty("global", out var flag) && flag.ValueKind == JsonValueKind.True)
+                global = true;
         }
-        catch
+        catch (JsonException)
         {
-            // Fall back below.
+            // Some proxies return non-JSON 429 responses; retain the HTTP headers.
         }
-
-        return TimeSpan.FromSeconds(1);
+        return (double.IsFinite(seconds) && seconds > 0 ? TimeSpan.FromSeconds(seconds)
+            : TimeSpan.FromMilliseconds(DiscordLimits.RateLimitFallbackMilliseconds), global);
     }
 
     private static string Truncate(string value, int max)

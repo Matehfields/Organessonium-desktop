@@ -11,7 +11,7 @@ public sealed class EncryptionService
     public const int EnvelopeHeaderBytes = 54;
     public const int AuthenticationTagBytes = 16;
     public const int EnvelopeOverheadBytes = EnvelopeHeaderBytes + AuthenticationTagBytes;
-    public const int MaximumPlaintextPayloadBytes = 10 * 1024 * 1024 - EnvelopeOverheadBytes;
+    public const int MaximumPlaintextPayloadBytes = DiscordLimits.PlaintextChunkBytes;
     private const int FileSaltBytes = 16;
     private const int NonceBytes = 12;
     private static readonly byte[] EnvelopeMagic = "ORGAESGC"u8.ToArray();

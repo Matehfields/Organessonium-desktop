@@ -10,8 +10,8 @@ public sealed class MetadataService
 {
     public const int SchemaVersion = 2;
     public const string FileName = "metadata.json";
-    public const int InlineContentLimit = 2000;
-    public const long MaxMetadataBytes = 10L * 1024 * 1024;
+    public const int InlineContentLimit = DiscordLimits.MessageContentCharacters;
+    public const long MaxMetadataBytes = DiscordLimits.AttachmentBytes;
     private static readonly JsonSerializerOptions CompactJsonOptions = new(JsonOptions.Web)
     {
         WriteIndented = false,

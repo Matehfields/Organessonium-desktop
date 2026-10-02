@@ -10,7 +10,7 @@ using Organessonium.Services;
 
 namespace Organessonium.NetworkTests;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
@@ -38,6 +38,10 @@ internal static class Program
         ("forumThreadsIncludeArchivedPages", ForumThreadsIncludeArchivedPagesAsync),
         ("parallelMessageIndexUsesConcurrentWindows", ParallelMessageIndexUsesConcurrentWindowsAsync),
         ("parallelAttachmentUploadsBypassRouteLock", ParallelAttachmentUploadsBypassRouteLockAsync),
+        ("discordLimitsRejectOversizedPayloads", DiscordLimitsRejectOversizedPayloadsAsync),
+        ("discordGlobalPacingAcrossRoutes", DiscordGlobalPacingAcrossRoutesAsync),
+        ("discordBucketsReserveParallelRequests", DiscordBucketsReserveParallelRequestsAsync),
+        ("discordGlobalRetryBlocksOtherRoutes", DiscordGlobalRetryBlocksOtherRoutesAsync),
         ("memoryAttachmentRetryKeepsCiphertext", MemoryAttachmentRetryKeepsCiphertextAsync),
         ("uploadBufferReclaimerReleasesLargeArrays", UploadBufferReclaimerReleasesLargeArraysAsync),
         ("uploadMemoryPlannerKeepsLargeFilesBounded", UploadMemoryPlannerKeepsLargeFilesBoundedAsync),
