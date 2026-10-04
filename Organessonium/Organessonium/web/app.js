@@ -3,6 +3,7 @@
 // ─── Estado ───────────────────────────────────────────────────────────────────
 let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
 let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
+let currentFolderIds = ['root'];
 let activeLibraryView = 'files', specialItems = [], deviceItems = [];
 let favoritesLoaded = false, devicesLoaded = false;
 let serverReadDepth = 0;
@@ -114,6 +115,10 @@ const I18N = {
         uploadConflictSkip:'Pular',
         uploadConflictApplyAll:'Fazer isso para todos os conflitos deste upload',
         rename:'Renomear', addFavorite:'Adicionar aos favoritos', removeFavorite:'Remover dos favoritos',
+        sidebarTrash:'Lixeira', moveToTrash:'Mover para a lixeira', restore:'Restaurar', permanentDelete:'Apagar permanentemente',
+        trashConfirmTitle:'Mover para a lixeira?', trashConfirmMessage:v => v.count + ' item(ns) poderão ser restaurados pela Lixeira.',
+        alreadyTrashed:'O item já está na lixeira. Use Shift+Delete para apagar permanentemente.',
+        trashEmptyHelp:'Os itens enviados à lixeira aparecerão aqui.',
         deleteFilesTitle:'Apagar arquivos?', deleteFilesMessage:v => v.count + ' item(ns) serão removidos permanentemente.',
         deleteFolderTitle:'Apagar pasta?', deleteFolderMessage:v => '"' + v.name + '" e todos os arquivos dentro dela serão removidos permanentemente.',
         deleting:'Apagando...', options:'Opções', openFolder:v => 'Abrir pasta ' + v.name,
@@ -247,6 +252,10 @@ const I18N = {
         uploadConflictSkip:'Skip',
         uploadConflictApplyAll:'Do this for every conflict in this upload',
         rename:'Rename', addFavorite:'Add to favorites', removeFavorite:'Remove from favorites',
+        sidebarTrash:'Trash', moveToTrash:'Move to trash', restore:'Restore', permanentDelete:'Delete permanently',
+        trashConfirmTitle:'Move to trash?', trashConfirmMessage:v => v.count + ' item(s) can be restored from Trash.',
+        alreadyTrashed:'This item is already in Trash. Use Shift+Delete to delete permanently.',
+        trashEmptyHelp:'Items moved to Trash will appear here.',
         deleteFilesTitle:'Delete files?', deleteFilesMessage:v => v.count + ' item(s) will be permanently removed.',
         deleteFolderTitle:'Delete folder?', deleteFolderMessage:v => '"' + v.name + '" and every file inside it will be permanently removed.',
         deleting:'Deleting...', options:'Options', openFolder:v => 'Open folder ' + v.name,
@@ -476,6 +485,10 @@ function applyI18n() {
     setA11y('sidebar-favorites', 'sidebarFavorites');
     setText('sidebar-devices-text', 'sidebarDevices');
     setA11y('sidebar-devices', 'sidebarDevices');
+    setText('sidebar-trash-text', 'sidebarTrash');
+    setA11y('sidebar-trash', 'sidebarTrash');
+    setText('sel-restore-text', 'restore');
+    setText('ctx-restore-text', 'restore');
     setText('sidebar-storage-title', 'sidebarStorage');
     setText('server-items-label', 'sidebarItemSuffix');
     setText('sidebar-settings-text', 'settings');
@@ -810,7 +823,7 @@ function setActiveLibraryView(view) {
         createButton.setAttribute('aria-disabled', createButton.disabled ? 'true' : 'false');
     }
     if (view !== 'files') closeSidebarNewMenu();
-    ['files','favorites','devices'].forEach(name => {
+    ['files','favorites','devices','trash'].forEach(name => {
         const item = $('sidebar-' + name);
         item?.classList.toggle('active', name === view);
         if (name === view) item?.setAttribute('aria-current', 'page');
@@ -824,6 +837,11 @@ function showFavoritesWorkspace(force = false) {
     if (!favoritesLoaded) folderLoadingPath = '/@favorites';
     render();
     if (force || !favoritesLoaded) window.bridge.loadFavorites(force);
+}
+
+function showTrashWorkspace() {
+    activateWorkspaceTab('files');
+    navigate('/@trash');
 }
 
 function showDevicesWorkspace(force = false) {
@@ -2634,6 +2652,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sidebar-upload-folder').addEventListener('click', () => { closeSidebarNewMenu(); window.bridge.startFolderUpload(); });
     $('sidebar-files').addEventListener('click', () => { closeSidebarNewMenu(); showFilesWorkspace(); });
     $('sidebar-favorites').addEventListener('click', () => { closeSidebarNewMenu(); showFavoritesWorkspace(); });
+    $('sidebar-trash').addEventListener('click', () => { closeSidebarNewMenu(); showTrashWorkspace(); });
     $('sidebar-devices').addEventListener('click', () => { closeSidebarNewMenu(); showDevicesWorkspace(); });
     $('sidebar-settings').addEventListener('click', () => { closeSidebarNewMenu(); openSettings(); });
 
@@ -2693,7 +2712,8 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sel-clear').addEventListener('click', clearSelection);
     $('sel-move').addEventListener('click', () => { if (selectedKeys.size) openMoveModal(getSelectedApps()); });
     $('sel-download').addEventListener('click', downloadSelected);
-    $('sel-delete').addEventListener('click', deleteSelected);
+    $('sel-delete').addEventListener('click', () => deleteSelected(activeLibraryView === 'trash'));
+    $('sel-restore').addEventListener('click', () => restoreItems(getSelectedApps()));
 
     // Sort
     $('btn-sort').addEventListener('click', e => { e.stopPropagation(); closeSidebarNewMenu(); sortMenu.classList.toggle('hidden'); });
@@ -2777,6 +2797,10 @@ document.addEventListener('DOMContentLoaded', () => {
         hideCtx();
     });
     $('ctx-delete').addEventListener('click', deleteContextTarget);
+    $('ctx-restore').addEventListener('click', () => {
+        const items = ctxTarget && selectedKeys.has(itemKey(ctxTarget)) ? getSelectedApps() : [ctxTarget];
+        hideCtx(); restoreItems(items.filter(Boolean));
+    });
 
     // Preview
     $('preview-close').addEventListener('click', closePreview);
@@ -2993,7 +3017,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!selectedKeys.size && focused) toggleSelection(focused);
             if (getSelectedApps().length) {
                 e.preventDefault();
-                deleteSelected();
+                deleteSelected(e.key === 'Delete' && e.shiftKey);
                 return;
             }
         }
@@ -4808,6 +4832,7 @@ function bindInternalItemDrag(el, app) {
 
 function beginInternalItemDrag(e, app, sourceEl) {
     if (e.button !== 0 || !app || !app.metadataMessageId) return;
+    if (isTrashApp(app)) return;
     if (e.target.closest('button,input,select,textarea,.btn-more,.btn-row-action')) return;
     if (previewOverlay && !previewOverlay.classList.contains('hidden')) return;
     hideCtx();
@@ -4996,7 +5021,7 @@ function openPreview(app) {
     if (isMarkdownFile(app.name)) { openMarkdownEditor(app); return; }
     previewFiles  = sorted(activeLibraryView === 'favorites'
         ? specialItems.filter(item => item.type !== 'folder')
-        : filesAt(allApps, currentPath)).filter(a => canPreview(a.name));
+        : filesAt(appsForActiveView(), currentPath)).filter(a => canPreview(a.name));
     previewIndex  = previewFiles.findIndex(a => a.threadId === app.threadId);
     if (previewIndex < 0) previewIndex = 0;
     previewOverlay.classList.remove('hidden');
@@ -5068,12 +5093,12 @@ function buildMoveTree() {
 function getAllFolderPaths() {
     const s = new Set();
     // Pastas explícitas
-    allApps.filter(a => a.type==='folder').forEach(a => {
+    allApps.filter(a => a.type==='folder' && !isTrashApp(a)).forEach(a => {
         const fp = (a.path==='/' ? '' : a.path) + '/' + a.name;
         s.add(fp.startsWith('//') ? fp.slice(1) : fp);
     });
     // Derivadas dos arquivos
-    allApps.filter(a => a.type!=='folder' && a.path && a.path !== '/').forEach(a => {
+    allApps.filter(a => a.type!=='folder' && a.path && a.path !== '/' && !isTrashApp(a)).forEach(a => {
         const segs = a.path.split('/').filter(Boolean);
         let built = '';
         segs.forEach(seg => { built += '/' + seg; s.add(built); });
@@ -5095,8 +5120,10 @@ function makeMoveItem(path, label, depth) {
 }
 
 // ─── Navegação ────────────────────────────────────────────────────────────────
-function navigate(path, addHistory = true) {
-    if (addHistory && path !== currentPath) { historyBack.push(currentPath); historyForward = []; }
+function navigate(path, addHistory = true, folderId = '') {
+    setActiveLibraryView(path === '/@trash' || path.startsWith('/@trash/') ? 'trash'
+        : path === '/@synchronized' || path.startsWith('/@synchronized/') ? 'devices' : 'files');
+    if (addHistory && path !== currentPath) { historyBack.push({ path:currentPath, folderIds:[...currentFolderIds] }); historyForward = []; }
     currentPath = path; searchQuery = ''; $('search-input').value = '';
     folderLoadingPath = path;
     const folderIds = path === '/'
@@ -5104,7 +5131,9 @@ function navigate(path, addHistory = true) {
         : [...allApps, ...specialItems, ...deviceItems]
             .filter(app => isFolderApp(app) && folderPathForApp(app) === path && app.folderId)
             .map(app => app.folderId);
-    window.bridge.setCurrentPath(path, path === '/' ? 'root' : JSON.stringify(folderIds));
+    const explicitIds = Array.isArray(folderId) ? folderId : folderId ? [folderId] : [];
+    currentFolderIds = path === '/' ? ['root'] : path === '/@trash' ? ['trash'] : explicitIds.length ? explicitIds : folderIds;
+    window.bridge.setCurrentPath(path, JSON.stringify(currentFolderIds));
     updateNavButtons(); render(); requestVisibleThumbnails();
 }
 
@@ -5130,8 +5159,16 @@ function refreshServerIndex(rebuildSerials) {
     }
     refreshCurrentFolder();
 }
-function goBack()    { if (!historyBack.length) return;    historyForward.push(currentPath); navigate(historyBack.pop(), false); }
-function goForward() { if (!historyForward.length) return; historyBack.push(currentPath);    navigate(historyForward.pop(), false); }
+function goBack() {
+    if (!historyBack.length) return;
+    historyForward.push({ path:currentPath, folderIds:[...currentFolderIds] });
+    const previous = historyBack.pop(); navigate(previous.path, false, previous.folderIds);
+}
+function goForward() {
+    if (!historyForward.length) return;
+    historyBack.push({ path:currentPath, folderIds:[...currentFolderIds] });
+    const next = historyForward.pop(); navigate(next.path, false, next.folderIds);
+}
 function updateNavButtons() { btnBack.disabled = !historyBack.length; btnForward.disabled = !historyForward.length; }
 
 // ─── Modais simples ───────────────────────────────────────────────────────────
@@ -5822,6 +5859,7 @@ function showTabCtx(e, tabId) {
 function configureContextMenu(mode, app = null) {
     const isItem = mode === 'item' && !!app;
     const isFolder = isItem && isFolderApp(app);
+    const inTrash = isItem && isTrashApp(app);
     const hasSelection = selectedKeys.size > 0;
     const isTab = mode === 'tab';
     const isFilesTab = mode === 'files-tab';
@@ -5829,16 +5867,17 @@ function configureContextMenu(mode, app = null) {
 
     showCtxPart('ctx-open', isItem);
     showCtxPart('ctx-download', isItem && !!app.threadId);
-    showCtxPart('ctx-move', isItem && !!app.metadataMessageId);
-    showCtxPart('ctx-rename', isItem && !!app.metadataMessageId);
-    showCtxPart('ctx-favorite', isItem && !!app.metadataMessageId);
-    showCtxPart('ctx-folder-colors', isItem && isFolder && !!app.metadataMessageId);
+    showCtxPart('ctx-move', isItem && !inTrash && !!app.metadataMessageId);
+    showCtxPart('ctx-rename', isItem && !inTrash && !!app.metadataMessageId);
+    showCtxPart('ctx-favorite', isItem && !inTrash && !!app.metadataMessageId);
+    showCtxPart('ctx-folder-colors', isItem && !inTrash && isFolder && !!app.metadataMessageId);
+    showCtxPart('ctx-restore', inTrash && app.parentFolderId === 'trash');
     showCtxPart('ctx-delete', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-item-sep', isItem);
 
-    showCtxPart('ctx-new-folder', mode === 'background' || isFilesTab);
-    showCtxPart('ctx-upload', mode === 'background' || isFilesTab);
-    showCtxPart('ctx-upload-folder', mode === 'background' || isFilesTab);
+    showCtxPart('ctx-new-folder', activeLibraryView !== 'trash' && (mode === 'background' || isFilesTab));
+    showCtxPart('ctx-upload', activeLibraryView !== 'trash' && (mode === 'background' || isFilesTab));
+    showCtxPart('ctx-upload-folder', activeLibraryView !== 'trash' && (mode === 'background' || isFilesTab));
     showCtxPart('ctx-refresh', mode === 'background' || isFilesTab);
     showCtxPart('ctx-view-sep', mode === 'background' || isFilesTab);
     showCtxPart('ctx-grid', mode === 'background' || isFilesTab);
@@ -5850,6 +5889,7 @@ function configureContextMenu(mode, app = null) {
     showCtxPart('ctx-close-others', isTab && hasOtherTabs);
 
     if (isItem) {
+        $('ctx-delete-text').textContent = t(inTrash ? 'permanentDelete' : 'moveToTrash');
         $('ctx-open-text').textContent = isFolder ? t('open') : (canPreview(app.name) ? t('preview') : t('open'));
         $('ctx-dl-label').textContent = isFolder ? t('downloadFolderAction') : t('download');
         $('ctx-favorite-text').textContent = app.favorite ? t('removeFavorite') : t('addFavorite');
@@ -5909,12 +5949,7 @@ function deleteContextTarget() {
     const selected = selectedKeys.has(itemKey(ctxTarget)) ? getSelectedApps() : [];
     const items = selected.length ? selected : [ctxTarget];
     hideCtx();
-    askConfirm(deleteConfirmTitle(items), deleteConfirmMessage(items),
-        () => {
-            setStatus(t('deleting'), true);
-            window.bridge.deleteItems(JSON.stringify(items.map(app => app.metadataMessageId).filter(Boolean)));
-            clearSelection();
-        });
+    requestDelete(items, items.some(isTrashApp));
 }
 
 function deleteConfirmTitle(items) {
@@ -5954,6 +5989,7 @@ function childFolders(apps, path) {
 }
 function belongsToPath(app, path) {
     return (app.path || '/') === path &&
+        (path !== currentPath || !currentFolderIds.length || !app.parentFolderId || currentFolderIds.includes(app.parentFolderId)) &&
         (path !== '/' || !app.parentFolderId || app.parentFolderId === 'root');
 }
 function filesAt(apps, path) { return apps.filter(a=>a.type!=='folder'&&belongsToPath(a, path)); }
@@ -5995,19 +6031,22 @@ function sorted(arr) {
 // ─── Render ───────────────────────────────────────────────────────────────────
 function render() {
     renderPathCrumbs();
+    const viewApps = appsForActiveView();
     const favoritesView = activeLibraryView === 'favorites';
     const devicesRootView = activeLibraryView === 'devices' && currentPath === '/@synchronized';
+    const trashRootView = activeLibraryView === 'trash' && currentPath === '/@trash';
     const favoriteSource = favoritesView
-        ? specialItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
+        ? viewApps.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
         : [];
     const specialSource = devicesRootView
         ? deviceItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
-        : favoriteSource;
-    const folders = favoritesView || devicesRootView
+        : trashRootView ? viewApps.filter(app => (app.path || '/') === currentPath && (!searchQuery || (app.name || '').toLowerCase().includes(searchQuery))) : favoriteSource;
+    const specialRootView = favoritesView || devicesRootView || trashRootView;
+    const folders = specialRootView
         ? (typeFilter === 'all' || typeFilter === 'folders' ? sorted(specialSource.filter(app => app.type === 'folder')) : [])
-        : (typeFilter === 'all' || typeFilter === 'folders' ? childFolders(allApps, currentPath) : []);
-    let files = typeFilter === 'folders' ? [] : sorted(favoritesView || devicesRootView ? specialSource.filter(app => app.type !== 'folder') : filesAt(allApps, currentPath));
-    if (searchQuery && !favoritesView && !devicesRootView) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
+        : (typeFilter === 'all' || typeFilter === 'folders' ? childFolders(viewApps, currentPath) : []);
+    let files = typeFilter === 'folders' ? [] : sorted(specialRootView ? specialSource.filter(app => app.type !== 'folder') : filesAt(viewApps, currentPath));
+    if (searchQuery && !specialRootView) files=sorted(viewApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
     files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
     filesGrid.innerHTML=''; filesList.innerHTML='';
@@ -6019,7 +6058,7 @@ function render() {
         emptyState.classList.remove('hidden');
         emptyState.classList.toggle('folder-loading', loadingFolder);
         $('empty-title').textContent = loadingFolder ? t('loading') : t('emptyTitle');
-        $('empty-help').textContent = loadingFolder ? '' : t('emptyHelp');
+        $('empty-help').textContent = loadingFolder ? '' : t(activeLibraryView === 'trash' ? 'trashEmptyHelp' : 'emptyHelp');
         return;
     }
     emptyState.classList.add('hidden');
@@ -6030,7 +6069,7 @@ function render() {
         if (folders.length) {
             const folderWrap = document.createElement('div');
             folderWrap.className = 'folders-grid';
-            folders.forEach(f=>folderWrap.appendChild(favoritesView || devicesRootView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
+            folders.forEach(f=>folderWrap.appendChild(specialRootView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
             filesGrid.appendChild(folderWrap);
         }
         if (files.length) {
@@ -6042,7 +6081,7 @@ function render() {
     } else {
         filesGrid.classList.add('hidden'); filesList.classList.remove('hidden');
         filesList.appendChild(makeListHeader());
-        folders.forEach(f=>filesList.appendChild(favoritesView || devicesRootView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
+        folders.forEach(f=>filesList.appendChild(specialRootView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
         files.forEach(a=>filesList.appendChild(makeFileRow(a)));
     }
     updateSelectionUI();
@@ -6058,20 +6097,22 @@ function renderPathCrumbs() {
         return;
     }
     const isRoot = currentPath === '/';
+    const trashPath = currentPath === '/@trash' || currentPath.startsWith('/@trash/');
     const devicesPath = currentPath === '/@synchronized' || currentPath.startsWith('/@synchronized/');
-    const segs = currentPath.split('/').filter(Boolean).filter(segment => segment !== '@synchronized');
-    const currentName = devicesPath && segs.length === 0 ? t('sidebarDevices') : isRoot ? t('filesTab') : segs[segs.length - 1];
+    const technicalPath = trashPath || devicesPath;
+    const segs = currentPath.split('/').filter(Boolean).filter(segment => segment !== '@synchronized' && segment !== '@trash');
+    const currentName = technicalPath && segs.length === 0 ? t(trashPath ? 'sidebarTrash' : 'sidebarDevices') : isRoot ? t('filesTab') : segs[segs.length - 1];
     if (currentFolderName) currentFolderName.textContent = currentName;
     if (currentFolderTitle) {
-        currentFolderTitle.title = [t('filesTab'), ...segs].join(' / ');
+        currentFolderTitle.title = [t(trashPath ? 'sidebarTrash' : devicesPath ? 'sidebarDevices' : 'filesTab'), ...segs].join(' / ');
     }
-    pathCrumbs.classList.toggle('empty', isRoot || (devicesPath && segs.length === 0));
-    if (isRoot || (devicesPath && segs.length === 0)) return;
+    pathCrumbs.classList.toggle('empty', isRoot || (technicalPath && segs.length === 0));
+    if (isRoot || (technicalPath && segs.length === 0)) return;
     const root = document.createElement('button');
     root.className = 'p-crumb p-crumb-root';
-    root.textContent = devicesPath ? t('sidebarDevices') : 'root';
+    root.textContent = trashPath ? t('sidebarTrash') : devicesPath ? t('sidebarDevices') : 'root';
     root.title = root.textContent;
-    root.addEventListener('click', () => devicesPath ? showDevicesWorkspace() : navigate('/'));
+    root.addEventListener('click', () => trashPath ? showTrashWorkspace() : devicesPath ? showDevicesWorkspace() : navigate('/'));
     pathCrumbs.appendChild(root);
     segs.slice(0, -1).forEach((seg,i)=>{
         const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
@@ -6079,7 +6120,7 @@ function renderPathCrumbs() {
         const btn=document.createElement('button');
         btn.className='p-crumb';
         btn.textContent=seg; btn.title=seg;
-        btn.addEventListener('click',()=>navigate((devicesPath ? '/@synchronized/' : '/')+segs.slice(0,i+1).join('/')));
+        btn.addEventListener('click',()=>navigate((trashPath ? '/@trash/' : devicesPath ? '/@synchronized/' : '/')+segs.slice(0,i+1).join('/')));
         pathCrumbs.appendChild(btn);
     });
     const sep=document.createElement('span'); sep.className='p-crumb-sep'; sep.textContent='/';
@@ -6136,8 +6177,7 @@ function makeFileCard(app) {
 }
 
 function openSpecialFolder(app) {
-    setActiveLibraryView(app.path && app.path.startsWith('/@synchronized') ? 'devices' : 'files');
-    navigate(folderPathForApp(app));
+    navigate(folderPathForApp(app), true, app.folderId);
 }
 
 function makeSpecialFolderCard(app) {
@@ -6152,8 +6192,15 @@ function makeSpecialFolderCard(app) {
         <span class="folder-name" title="${esc(app.name)}">${esc(truncate(app.name,34))}</span>
         ${app.favorite ? `<span class="item-favorite" title="${esc(t('removeFavorite'))}">${icon('star',16)}</span>` : ''}
         <button class="btn-more" aria-label="${esc(t('options'))}">${icon('more_vert',16)}</button>`;
-    card.addEventListener('click', event => { if (!event.target.closest('.btn-more')) openSpecialFolder(app); });
-    card.addEventListener('keydown', event => { if (event.key === 'Enter') openSpecialFolder(app); });
+    card.addEventListener('click', event => {
+        if (event.target.closest('.btn-more')) return;
+        if (activeLibraryView === 'trash' && (event.ctrlKey || event.metaKey || event.shiftKey)) toggleSelection(app);
+        else openSpecialFolder(app);
+    });
+    card.addEventListener('keydown', event => {
+        if (event.key === 'Enter') openSpecialFolder(app);
+        if (event.key === ' ' && activeLibraryView === 'trash') { event.preventDefault(); toggleSelection(app); }
+    });
     card.querySelector('.btn-more').addEventListener('click', event => { event.stopPropagation(); showCtx(event, app); });
     card.addEventListener('contextmenu', event => showCtx(event, app));
     return card;
@@ -6168,6 +6215,9 @@ function makeSpecialFolderRow(app) {
         <div class="row-name">${esc(app.name)}</div><div class="row-date">${esc(app.uploadedAt || '')}</div><div class="row-size">${app.favorite ? icon('star',16) : ''}</div>
         <div class="row-actions"><button class="btn-row-action btn-more" title="${esc(t('options'))}">${icon('more_vert',17)}</button></div>`;
     row.addEventListener('dblclick', () => openSpecialFolder(app));
+    row.addEventListener('click', event => {
+        if (activeLibraryView === 'trash' && !event.target.closest('.btn-row-action')) toggleSelection(app);
+    });
     row.querySelector('.btn-more').addEventListener('click', event => { event.stopPropagation(); showCtx(event, app); });
     row.addEventListener('contextmenu', event => showCtx(event, app));
     return row;
@@ -6333,12 +6383,12 @@ function makeFolderRow(name) {
     });
     dlBtn.addEventListener('click',e=>{ e.stopPropagation(); window.bridge.startDownload(folderObj.threadId,folderObj.name); });
     mvBtn.addEventListener('click',e=>{ e.stopPropagation(); if(explicit) openMoveModal(explicit); });
+    mvBtn.classList.toggle('hidden', !!explicit && isTrashApp(explicit));
     row.addEventListener('contextmenu', e => showCtx(e, folderObj));
     if (explicit) {
         const delBtn=row.querySelectorAll('.btn-row-action')[2];
         if (delBtn) delBtn.addEventListener('click',e=>{ e.stopPropagation();
-            askConfirm(t('deleteFolderTitle'), t('deleteFolderMessage', { name }),
-                ()=>{ setStatus(t('deleting'), true); window.bridge.deleteApp(explicit.threadId, explicit.metadataMessageId||''); });
+            requestDelete([explicit], isTrashApp(explicit));
         });
     }
     return row;
@@ -6379,11 +6429,12 @@ function makeFileRow(app) {
     });
     bindInternalItemDrag(row, app);
     const [dl,mv,del]=row.querySelectorAll('.btn-row-action');
+    mv.classList.toggle('hidden', isTrashApp(app));
+    del.title = t(isTrashApp(app) ? 'permanentDelete' : 'moveToTrash');
     dl.addEventListener('click',  e=>{ e.stopPropagation(); window.bridge.startDownload(app.threadId,app.name); });
     mv.addEventListener('click',  e=>{ e.stopPropagation(); openMoveModal(app); });
     del.addEventListener('click', e=>{ e.stopPropagation();
-        askConfirm(t('deleteFilesTitle'), t('deleteFilesMessage', { count:1 }),
-            ()=>{ setStatus(t('deleting'), true); window.bridge.deleteApp(app.threadId, app.metadataMessageId||''); });
+        requestDelete([app], isTrashApp(app));
     });
     row.addEventListener('contextmenu', e => showCtx(e, app));
     return row;
@@ -6392,9 +6443,21 @@ function makeFileRow(app) {
 // ─── Tipos e ícones ───────────────────────────────────────────────────────────
 function itemKey(app) { return app && (app.metadataMessageId || app.threadId || app.name); }
 function appsForActiveView() {
-    if (activeLibraryView === 'favorites') return specialItems;
+    if (activeLibraryView === 'favorites') return specialItems.filter(app => !isTrashApp(app));
     if (activeLibraryView === 'devices' && currentPath === '/@synchronized') return deviceItems;
-    return allApps;
+    return allApps.filter(app => isTrashApp(app) === (activeLibraryView === 'trash'));
+}
+function isTrashApp(app) {
+    const path = app.path || '/';
+    if (path === '/@trash' || path.startsWith('/@trash/')) return true;
+    let parent = app.parentFolderId;
+    const visited = new Set();
+    while (parent && !visited.has(parent)) {
+        if (parent === 'trash') return true;
+        visited.add(parent);
+        parent = allApps.find(folder => folder.type === 'folder' && folder.folderId === parent)?.parentFolderId;
+    }
+    return false;
 }
 function getSelectedApps() {
     return appsForActiveView().filter(a => selectedKeys.has(itemKey(a)) && a.metadataMessageId);
@@ -6418,6 +6481,8 @@ function updateSelectionUI() {
     const count = getSelectedApps().length;
     bar.classList.toggle('hidden', count === 0);
     $('selection-count').textContent = t('selectedCount', { count });
+    $('sel-delete-text').textContent = t(activeLibraryView === 'trash' ? 'permanentDelete' : 'moveToTrash');
+    $('sel-restore').classList.toggle('hidden', !count || getSelectedApps().some(app => app.parentFolderId !== 'trash'));
 }
 function clearSelection() {
     selectedKeys.clear();
@@ -6443,8 +6508,8 @@ function selectableAppsInCurrentView() {
     if (activeLibraryView === 'favorites' || (activeLibraryView === 'devices' && currentPath === '/@synchronized')) {
         return source.filter(a => a.metadataMessageId);
     }
-    const files = filesAt(allApps, currentPath).filter(a => a.metadataMessageId);
-    const folders = allApps.filter(a => a.metadataMessageId && a.type === 'folder' && (a.path || '/') === currentPath);
+    const files = filesAt(source, currentPath).filter(a => a.metadataMessageId);
+    const folders = source.filter(a => a.metadataMessageId && a.type === 'folder' && belongsToPath(a, currentPath));
     return [...folders, ...files];
 }
 function selectAllCurrentView() {
@@ -6455,6 +6520,7 @@ function selectAllCurrentView() {
     updateSelectionUI();
 }
 function startCardDrag(e, app) {
+    if (isTrashApp(app)) { e.preventDefault(); return; }
     if (!app.metadataMessageId) { e.preventDefault(); return; }
     const key = itemKey(app);
     if (!selectedKeys.has(key)) {
@@ -6498,9 +6564,10 @@ function clearDragState() {
     document.querySelectorAll('.dragging-source').forEach(el => el.classList.remove('dragging-source'));
 }
 function moveIdsToPath(ids, path) {
+    if (path === '/@trash' || path.startsWith('/@trash/')) return;
     const cleanIds = (ids || []).filter(Boolean).filter(id => {
         const app = allApps.find(a => a.metadataMessageId === id);
-        if (!app || (app.path || '/') === path) return false;
+        if (!app || isTrashApp(app) || (app.path || '/') === path) return false;
         if (app.type !== 'folder') return true;
         const source = (app.path === '/' ? '/' : app.path + '/') + app.name;
         return path !== source && !path.startsWith(source + '/');
@@ -6514,15 +6581,26 @@ function downloadSelected() {
     getSelectedApps().forEach(app => window.bridge.startDownload(app.threadId, app.name));
     clearSelection();
 }
-function deleteSelected() {
+function deleteSelected(permanently = false) {
     const items = getSelectedApps();
+    requestDelete(items, permanently === true);
+}
+function requestDelete(items, permanently = false) {
     if (!items.length) return;
-    askConfirm(deleteConfirmTitle(items), deleteConfirmMessage(items),
+    if (!permanently && items.some(isTrashApp)) { setStatus(t('alreadyTrashed'), false); return; }
+    askConfirm(permanently ? deleteConfirmTitle(items) : t('trashConfirmTitle'),
+        permanently ? deleteConfirmMessage(items) : t('trashConfirmMessage', { count:items.length }),
         () => {
             setStatus(t('deleting'), true);
-            window.bridge.deleteItems(JSON.stringify(items.map(app => app.metadataMessageId).filter(Boolean)));
+            window.bridge.deleteItems(JSON.stringify(items.map(app => app.metadataMessageId).filter(Boolean)), permanently);
             clearSelection();
-        });
+        }, permanently ? 'permanentDelete' : 'moveToTrash');
+}
+function restoreItems(items) {
+    const ids = items.filter(app => app.parentFolderId === 'trash' && app.metadataMessageId).map(app => app.metadataMessageId);
+    if (!ids.length) return;
+    window.bridge.restoreItems(JSON.stringify(ids));
+    clearSelection();
 }
 function safeParseJson(text, fallback) {
     try { return JSON.parse(text); } catch (_) { return fallback; }

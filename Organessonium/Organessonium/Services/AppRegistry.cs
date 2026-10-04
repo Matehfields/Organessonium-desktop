@@ -6,11 +6,13 @@ namespace Organessonium.Services;
 
 public sealed record LibraryStatistics(long FileCount, long FolderCount, long TotalBytes);
 
-public sealed class AppRegistry
+public sealed partial class AppRegistry
 {
     public const string RootFolderId = "root";
     public const string SynchronizedRootFolderId = "synchronized";
     public const string SynchronizedRootPath = "/@synchronized";
+    public const string TrashFolderId = "trash";
+    public const string TrashPath = "/@trash";
 
     private readonly DiscordApiClient _discord;
     private readonly SettingsStore _store;
@@ -41,6 +43,7 @@ public sealed class AppRegistry
             store.LoadFolderIndexMappings(),
             StringComparer.OrdinalIgnoreCase);
         _descriptors[RootFolderId] = new FolderDescriptor(RootFolderId, RootFolderId, RootFolderId, "/");
+        _descriptors[TrashFolderId] = new FolderDescriptor(TrashFolderId, RootFolderId, TrashFolderId, TrashPath);
     }
 
     public async Task<List<AppEntry>> LoadCachedFolderAsync(
@@ -98,7 +101,8 @@ public sealed class AppRegistry
         {
             entry.Path = ResolveKnownFolderPath(entry.ParentFolderId);
         }
-        return entries;
+        var trashedFolders = await LoadTrashFolderIdsAsync(cancellationToken);
+        return entries.Where(entry => !trashedFolders.Contains(NormalizeFolderId(entry.ParentFolderId))).ToList();
     }
 
     public async Task<List<AppEntry>> LoadSynchronizedDevicesAsync(
@@ -157,6 +161,11 @@ public sealed class AppRegistry
             if (_mappings.ContainsKey(SynchronizedRootFolderId) && !visited.Contains(SynchronizedRootFolderId))
             {
                 await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken, onFolderRefreshed);
+            }
+
+            if (_mappings.ContainsKey(TrashFolderId))
+            {
+                await RefreshMappedTreeAsync(TrashFolderId, TrashPath, visited, cancellationToken, onFolderRefreshed);
             }
 
             if (rebuildSerials)
@@ -1118,9 +1127,11 @@ public sealed class AppRegistry
     {
         var favorites = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
         var mappings = MappingSnapshot();
+        var trashedFolders = await LoadTrashFolderIdsAsync(cancellationToken);
         foreach (var mapping in mappings.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (trashedFolders.Contains(mapping.FolderId)) continue;
             var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
             if (serial == null)
             {
@@ -1139,7 +1150,8 @@ public sealed class AppRegistry
             }
         }
 
-        foreach (var favorite in additionalEntries.Where(entry => entry.Favorite))
+        foreach (var favorite in additionalEntries.Where(entry => entry.Favorite &&
+                     !trashedFolders.Contains(NormalizeFolderId(entry.ParentFolderId))))
         {
             favorites[EntryIdentity(favorite)] = favorite;
         }
@@ -1228,7 +1240,8 @@ public sealed class AppRegistry
             var entries = _metadata.ToFolderEntries(envelopes, folderId, folderPath, MappingSnapshot());
             NormalizeFolderEntries(entries, folderId, folderPath);
             RecordDescriptors(entries);
-            await ConsolidateDuplicateFolderEntriesAsync(folderId, entries, cancellationToken);
+            if (!folderId.Equals(TrashFolderId, StringComparison.OrdinalIgnoreCase))
+                await ConsolidateDuplicateFolderEntriesAsync(folderId, entries, cancellationToken);
             _store.CacheFolderEntries(folderId, entries);
             await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
             await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);

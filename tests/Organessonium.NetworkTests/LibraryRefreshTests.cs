@@ -67,7 +67,7 @@ internal static partial class Program
                     view.CoreWebView2.Navigate("https://organessonium.local/index.html");
                     await navigation.Task.WaitAsync(TimeSpan.FromSeconds(20));
                     await bridge.SetSettingsAsync(settings);
-                    await view.CoreWebView2.ExecuteScriptAsync("window.onBridgeReady();currentPath='/Fotos';window.__refreshes=0;const finished=window._onServerIndexRefreshed;window._onServerIndexRefreshed=(r)=>{finished(r);window.__refreshes++};window._onError=(e)=>{window.__testError=String(e)};");
+                    await view.CoreWebView2.ExecuteScriptAsync("window.onBridgeReady();navigate('/Fotos',false,'photos');window.__refreshes=0;const finished=window._onServerIndexRefreshed;window._onServerIndexRefreshed=(r)=>{finished(r);window.__refreshes++};window._onError=(e)=>{window.__testError=String(e)};");
 
                     async Task RefreshAsync(int expected, bool button)
                     {

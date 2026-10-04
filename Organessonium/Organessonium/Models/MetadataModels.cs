@@ -9,6 +9,19 @@ public abstract class MetadataEntry
 
     [JsonPropertyName("entryType")]
     public string EntryType { get; set; } = "";
+
+    [JsonPropertyName("trash")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TrashMetadata? Trash { get; set; }
+}
+
+public sealed class TrashMetadata
+{
+    [JsonPropertyName("originalParentFolderId")]
+    public string OriginalParentFolderId { get; set; } = "root";
+
+    [JsonPropertyName("deletedAt")]
+    public string DeletedAt { get; set; } = "";
 }
 
 public sealed class FileMetadata : MetadataEntry

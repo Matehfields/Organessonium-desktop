@@ -277,8 +277,9 @@ public sealed class AppController : IAsyncDisposable
             case "resumeTransfers": _ = RunAsync(ResumeInterruptedTransfersAsync); return Task.CompletedTask;
             case "failInterruptedTransfers": _ = RunAsync(FailInterruptedTransfersAsync); return Task.CompletedTask;
             case "startDownload": return StartDownloadAsync(ArgString(args, 0), ArgString(args, 1));
-            case "deleteApp": _ = RunAsync(() => DeleteAppAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
-            case "deleteItems": _ = RunAsync(() => DeleteItemsAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "deleteApp": _ = RunAsync(() => DeleteAppAsync(ArgString(args, 0), ArgString(args, 1), ArgBool(args, 2, false))); return Task.CompletedTask;
+            case "deleteItems": _ = RunAsync(() => DeleteItemsAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
+            case "restoreItems": _ = RunAsync(() => RelocateTrashItemsAsync(ArgString(args, 0), restore: true)); return Task.CompletedTask;
             case "saveMarkdown": _ = RunAsync(() => SaveMarkdownAsync(args)); return Task.CompletedTask;
             case "uploadMarkdownImage": _ = RunAsync(() => UploadMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "uploadMarkdownImageData": _ = RunAsync(() => UploadMarkdownImageDataAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2), ArgString(args, 3))); return Task.CompletedTask;
@@ -815,6 +816,11 @@ public sealed class AppController : IAsyncDisposable
         {
             await _bridge.CallAsync("_onServerReadState", true);
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
+            if (normalizedPath == AppRegistry.TrashPath)
+            {
+                await registry.EnsureTrashIndexAsync();
+                folderIds = [AppRegistry.TrashFolderId];
+            }
             if (refreshMappings)
             {
                 await registry.RefreshMappingsAsync();
@@ -3611,18 +3617,24 @@ public sealed class AppController : IAsyncDisposable
         });
     }
 
-    private async Task DeleteAppAsync(string threadId, string metadataMessageId)
+    private async Task DeleteAppAsync(string threadId, string metadataMessageId, bool permanently)
     {
+        if (!permanently)
+        {
+            await RelocateTrashItemsAsync(JsonSerializer.Serialize(new[] { metadataMessageId }), restore: false);
+            return;
+        }
         await SetBackgroundActivityAsync("Em andamento...", true);
         try
         {
             var registry = Registry();
-            var all = CurrentLocalEntries();
+            var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
             var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
             if (entry != null)
             {
                 var result = await DeleteEntriesWithProgressAsync(registry, all, [entry]);
                 await PublishLocalRegistryAsync(registry, all);
+                await RemoveDeletedSpecialItemsAsync(all);
                 if (result.Failed > 0)
                 {
                     await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
@@ -3643,8 +3655,13 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task DeleteItemsAsync(string idsJson)
+    private async Task DeleteItemsAsync(string idsJson, bool permanently)
     {
+        if (!permanently)
+        {
+            await RelocateTrashItemsAsync(idsJson, restore: false);
+            return;
+        }
         var ids = JsonSerializer.Deserialize<string[]>(idsJson, JsonOptions.Web) ?? [];
         if (ids.Length == 0)
         {
@@ -3656,7 +3673,7 @@ public sealed class AppController : IAsyncDisposable
         try
         {
             var registry = Registry();
-            var all = CurrentLocalEntries();
+            var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
             var selected = ids
                 .Select(id => all.FirstOrDefault(a => a.MetadataMessageId == id))
                 .Where(entry => entry != null)
@@ -3671,6 +3688,7 @@ public sealed class AppController : IAsyncDisposable
 
             var result = await DeleteEntriesWithProgressAsync(registry, all, selected);
             await PublishLocalRegistryAsync(registry, all);
+            await RemoveDeletedSpecialItemsAsync(all);
             if (result.Failed == 0)
             {
                 await _bridge.CallAsync("_onStatus", $"OK {result.Deleted} item(ns) apagado(s).", false);
@@ -3686,6 +3704,74 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
+    private async Task RemoveDeletedSpecialItemsAsync(List<AppEntry> remaining)
+    {
+        Interlocked.Increment(ref _favoriteLoadVersion);
+        Interlocked.Increment(ref _deviceLoadVersion);
+        var keys = remaining.Select(EntryCacheKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _favoriteApps = _favoriteApps.Where(entry => keys.Contains(EntryCacheKey(entry))).ToList();
+        _deviceApps = _deviceApps.Where(entry => keys.Contains(EntryCacheKey(entry))).ToList();
+        await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
+        await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
+    }
+
+    private async Task RelocateTrashItemsAsync(string idsJson, bool restore)
+    {
+        var ids = JsonSerializer.Deserialize<string[]>(idsJson, JsonOptions.Web) ?? [];
+        var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
+        var selected = all.Where(entry => ids.Contains(entry.MetadataMessageId, StringComparer.Ordinal)).ToList();
+        selected = selected.Where(entry => !selected.Any(parent => parent != entry && IsFolderEntry(parent) &&
+            IsDescendantOfFolder(entry, parent, all))).ToList();
+        if (selected.Count == 0) throw new InvalidOperationException("Nenhum item encontrado para esta ação.");
+
+        var registry = Registry();
+        var opId = NewId();
+        await OpsAddAsync(opId, "move", restore ? "Restaurando da lixeira" : "Enviando à lixeira");
+        await SetBackgroundActivityAsync("Em andamento...", true);
+        var devicesChanged = false;
+        try
+        {
+            for (var i = 0; i < selected.Count; i++)
+            {
+                var entry = selected[i];
+                var oldFolderPath = IsFolderEntry(entry) ? PathRules.ChildPath(entry) : "";
+                var moved = restore
+                    ? await registry.RestoreFromTrashAsync(entry)
+                    : await registry.MoveToTrashAsync(entry);
+                devicesChanged |= entry.ParentFolderId == AppRegistry.SynchronizedRootFolderId ||
+                                  moved.ParentFolderId == AppRegistry.SynchronizedRootFolderId;
+                if (IsFolderEntry(entry))
+                {
+                    var newFolderPath = PathRules.ChildPath(moved);
+                    foreach (var child in all.Where(child => child != entry && IsDescendantOfFolder(child, entry, all) &&
+                                                           IsInsideFolder(child, oldFolderPath)))
+                        child.Path = MovedChildPath(oldFolderPath, newFolderPath, PathRules.Normalize(child.Path));
+                }
+                ReplaceLocalEntry(all, moved);
+                await PublishLocalRegistryAsync(registry, all);
+                await OpsProgressAsync(opId, Percent(i + 1, selected.Count), moved.Name);
+            }
+            Interlocked.Increment(ref _favoriteLoadVersion);
+            _favoriteApps = await registry.LoadFavoritesAsync();
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
+            if (devicesChanged)
+            {
+                Interlocked.Increment(ref _deviceLoadVersion);
+                _deviceApps = await registry.LoadSynchronizedDevicesAsync();
+                await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
+            }
+            var status = restore ? "OK Item(ns) restaurado(s)." : "OK Item(ns) enviado(s) à lixeira.";
+            await OpsUpdateAsync(opId, "done", status);
+            await _bridge.CallAsync("_onStatus", status, false);
+        }
+        catch (Exception ex)
+        {
+            await OpsUpdateAsync(opId, "error", ex.Message);
+            throw;
+        }
+        finally { await SetBackgroundActivityAsync("", false); }
+    }
+
     private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
     {
         foreach (var folder in selected.Where(IsFolderEntry).ToList())
@@ -3693,10 +3779,7 @@ public sealed class AppController : IAsyncDisposable
             var descendants = await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true);
             foreach (var descendant in descendants)
             {
-                if (!all.Any(existing => EntryCacheKey(existing).Equals(EntryCacheKey(descendant), StringComparison.OrdinalIgnoreCase)))
-                {
-                    all.Add(descendant);
-                }
+                ReplaceLocalEntry(all, descendant);
             }
         }
 
@@ -3834,8 +3917,7 @@ public sealed class AppController : IAsyncDisposable
         {
             if (IsFolderEntry(entry))
             {
-                var folderPath = PathRules.ChildPath(entry);
-                foreach (var child in all.Where(child => child != entry && IsInsideFolder(child, folderPath)))
+                foreach (var child in all.Where(child => child != entry && IsDescendantOfFolder(child, entry, all)))
                 {
                     Add(child);
                 }
@@ -3859,6 +3941,20 @@ public sealed class AppController : IAsyncDisposable
     {
         var path = PathRules.Normalize(entry.Path);
         return path == folderPath || path.StartsWith(folderPath + "/", StringComparison.Ordinal);
+    }
+
+    private static bool IsDescendantOfFolder(AppEntry entry, AppEntry folder, IEnumerable<AppEntry> entries)
+    {
+        if (string.IsNullOrWhiteSpace(folder.FolderId)) return IsInsideFolder(entry, PathRules.ChildPath(folder));
+        var parent = entry.ParentFolderId;
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (!string.IsNullOrWhiteSpace(parent) && visited.Add(parent))
+        {
+            if (parent.Equals(folder.FolderId, StringComparison.OrdinalIgnoreCase)) return true;
+            parent = entries.FirstOrDefault(candidate => IsFolderEntry(candidate) &&
+                candidate.FolderId.Equals(parent, StringComparison.OrdinalIgnoreCase))?.ParentFolderId;
+        }
+        return false;
     }
 
     private static string? FolderIdForPath(IEnumerable<AppEntry> entries, string path)

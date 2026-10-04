@@ -44,6 +44,9 @@
             <button id="sidebar-devices" class="sidebar-nav-item" type="button">
                 <span data-icon="devices" data-size="19"></span><span id="sidebar-devices-text" data-sidebar-label>Dispositivos</span>
             </button>
+            <button id="sidebar-trash" class="sidebar-nav-item" type="button">
+                <span data-icon="delete" data-size="19"></span><span id="sidebar-trash-text" data-sidebar-label>Lixeira</span>
+            </button>
         </nav>
 
         <section class="sidebar-server-summary" aria-labelledby="sidebar-storage-title">
@@ -179,7 +182,8 @@
     <div class="sel-actions">
         <button id="sel-download" class="sel-btn"><span data-icon="download" data-size="16"></span> <span id="sel-download-text">Baixar</span></button>
         <button id="sel-move"     class="sel-btn"><span data-icon="drive_file_move" data-size="16"></span> <span id="sel-move-text">Mover</span></button>
-        <button id="sel-delete"   class="sel-btn sel-btn-danger"><span data-icon="delete" data-size="16"></span> <span id="sel-delete-text">Apagar</span></button>
+        <button id="sel-restore" class="sel-btn hidden"><span data-icon="restore_from_trash" data-size="16"></span> <span id="sel-restore-text">Restaurar</span></button>
+        <button id="sel-delete"   class="sel-btn sel-btn-danger"><span data-icon="delete" data-size="16"></span> <span id="sel-delete-text">Mover para a lixeira</span></button>
     </div>
     <button id="sel-clear" class="sel-close"><span data-icon="close" data-size="16"></span></button>
 </div>
@@ -254,7 +258,8 @@
     <button id="ctx-settings"      class="ctx-item"><span data-icon="settings"          data-size="17"></span> <span id="ctx-settings-text">Configurações</span></button>
     <button id="ctx-close-tab"     class="ctx-item"><span data-icon="close"             data-size="17"></span> <span id="ctx-close-tab-text">Fechar guia</span></button>
     <button id="ctx-close-others"  class="ctx-item"><span data-icon="deselect"          data-size="17"></span> <span id="ctx-close-others-text">Fechar outras guias</span></button>
-    <button id="ctx-delete"   class="ctx-item ctx-danger"><span data-icon="delete" data-size="17"></span> <span id="ctx-delete-text">Apagar</span></button>
+    <button id="ctx-restore" class="ctx-item hidden"><span data-icon="restore_from_trash" data-size="17"></span> <span id="ctx-restore-text">Restaurar</span></button>
+    <button id="ctx-delete"   class="ctx-item ctx-danger"><span data-icon="delete" data-size="17"></span> <span id="ctx-delete-text">Mover para a lixeira</span></button>
 </div>
 
 <!-- ─── Modal: nova pasta ─────────────────────────────────────────────────── -->

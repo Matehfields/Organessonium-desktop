@@ -69,6 +69,10 @@ public sealed class AppEntry
     [JsonPropertyName("encryption")]
     public EncryptionMetadata? Encryption { get; set; }
 
+    [JsonPropertyName("trash")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TrashMetadata? Trash { get; set; }
+
     public static AppEntry File(string name, string threadId, string uploadedAt, long sizeBytes, string? path)
     {
         return new AppEntry
