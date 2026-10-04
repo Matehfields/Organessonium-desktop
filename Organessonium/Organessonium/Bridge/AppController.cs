@@ -122,6 +122,10 @@ public sealed class AppController : IAsyncDisposable
     public PreviewResourceRegistry PreviewResources => _previewResources;
     private readonly Action<bool> _onSplashChanged;
     private IReadOnlyList<AppEntry> _loadedApps = [];
+    private IReadOnlyList<AppEntry> _favoriteApps = [];
+    private IReadOnlyList<AppEntry> _deviceApps = [];
+    private int _favoriteLoadVersion;
+    private int _deviceLoadVersion;
     private DiscordSession? _session;
     private AppRegistry? _registry;
     private string _currentPath = "/";
@@ -246,12 +250,12 @@ public sealed class AppController : IAsyncDisposable
                 _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
-            case "loadFavorites": _ = RunAsync(LoadFavoritesAsync); return Task.CompletedTask;
-            case "loadSynchronizedDevices": _ = RunAsync(LoadSynchronizedDevicesAsync); return Task.CompletedTask;
+            case "loadFavorites": _ = RunAsync(() => LoadFavoritesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
+            case "loadSynchronizedDevices": _ = RunAsync(() => LoadSynchronizedDevicesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "setFavorite": _ = RunAsync(() => SetFavoriteAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
             case "refreshCurrentFolder": _ = RunAsync(RefreshCurrentFolderAsync); return Task.CompletedTask;
             case "refreshServerIndex": _ = RunAsync(() => RefreshServerIndexAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
-            case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
@@ -421,6 +425,10 @@ public sealed class AppController : IAsyncDisposable
     {
         _loggingOut = true;
         _loadedApps = [];
+        _favoriteApps = [];
+        _deviceApps = [];
+        Interlocked.Increment(ref _favoriteLoadVersion);
+        Interlocked.Increment(ref _deviceLoadVersion);
         var session = _session;
         _session = null;
         _registry = null;
@@ -665,18 +673,27 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task LoadFavoritesAsync()
+    private async Task LoadFavoritesAsync(bool forceRefresh)
     {
+        var version = Interlocked.Increment(ref _favoriteLoadVersion);
         await _bridge.CallAsync("_onServerReadState", true);
         try
         {
-            var entries = await Registry().LoadFavoritesAsync();
-            MergeLoadedApps(entries);
+            var entries = await Registry().LoadFavoritesAsync(forceRefresh: forceRefresh);
+            if (version != Volatile.Read(ref _favoriteLoadVersion))
+            {
+                return;
+            }
+            _favoriteApps = entries;
             await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", entries);
         }
         catch
         {
-            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", Array.Empty<AppEntry>());
+            if (version != Volatile.Read(ref _favoriteLoadVersion))
+            {
+                return;
+            }
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
             throw;
         }
         finally
@@ -685,18 +702,27 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task LoadSynchronizedDevicesAsync()
+    private async Task LoadSynchronizedDevicesAsync(bool forceRefresh)
     {
+        var version = Interlocked.Increment(ref _deviceLoadVersion);
         await _bridge.CallAsync("_onServerReadState", true);
         try
         {
-            var entries = await Registry().LoadSynchronizedDevicesAsync();
-            MergeLoadedApps(entries);
+            var entries = await Registry().LoadSynchronizedDevicesAsync(forceRefresh: forceRefresh);
+            if (version != Volatile.Read(ref _deviceLoadVersion))
+            {
+                return;
+            }
+            _deviceApps = entries;
             await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", entries);
         }
         catch
         {
-            await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", Array.Empty<AppEntry>());
+            if (version != Volatile.Read(ref _deviceLoadVersion))
+            {
+                return;
+            }
+            await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
             throw;
         }
         finally
@@ -707,7 +733,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task SetFavoriteAsync(string metadataMessageId, bool favorite)
     {
-        var entry = _loadedApps.FirstOrDefault(candidate =>
+        var entry = LoadedEntriesForLookup().FirstOrDefault(candidate =>
             candidate.MetadataMessageId.Equals(metadataMessageId, StringComparison.Ordinal));
         if (entry == null)
         {
@@ -720,6 +746,9 @@ public sealed class AppController : IAsyncDisposable
         {
             await Registry().SetFavoriteAsync(entry, favorite);
             entry.Favorite = favorite;
+            _favoriteApps = favorite
+                ? _favoriteApps.Where(app => EntryCacheKey(app) != EntryCacheKey(entry)).Append(entry).ToList()
+                : _favoriteApps.Where(app => EntryCacheKey(app) != EntryCacheKey(entry)).ToList();
             await _bridge.CallAsync("_onFavoriteChanged", entry);
         }
         finally
@@ -902,21 +931,8 @@ public sealed class AppController : IAsyncDisposable
             ReplaceLoadedFolder(result!.FolderId, result.Entries);
         }
     }
-    private void MergeLoadedApps(IReadOnlyList<AppEntry> batch)
-    {
-        var byId = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
-        foreach (var app in _loadedApps)
-        {
-            byId[EntryCacheKey(app)] = app;
-        }
-
-        foreach (var app in batch)
-        {
-            byId.TryAdd(EntryCacheKey(app), app);
-        }
-
-        _loadedApps = byId.Values.ToList();
-    }
+    private IEnumerable<AppEntry> LoadedEntriesForLookup() =>
+        CurrentLocalEntries().Concat(_favoriteApps).Concat(_deviceApps);
 
     private void ReplaceLoadedFolder(string folderId, IReadOnlyList<AppEntry> entries)
     {
@@ -1019,7 +1035,7 @@ public sealed class AppController : IAsyncDisposable
         return _bridge.CallAsync("_onBackgroundActivity", message, active);
     }
 
-    private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson)
+    private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson, string? requestedPath = null)
     {
         if (_loggingOut)
         {
@@ -1033,7 +1049,7 @@ public sealed class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
-        var path = _currentPath;
+        var path = requestedPath ?? _currentPath;
         var statistics = new ConcurrentBag<FolderFileStatistic>();
         var workers = Math.Clamp(_store.Load().SearchWorkers, 1, 4);
         await Parallel.ForEachAsync(
@@ -1059,7 +1075,7 @@ public sealed class AppController : IAsyncDisposable
                 }
             });
 
-        if (!_loggingOut && path == _currentPath && statistics.Count > 0)
+        if (!_loggingOut && statistics.Count > 0)
         {
             await _bridge.CallAsync(
                 "_onFolderStatistics",
@@ -1068,7 +1084,7 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task LoadVisibleThumbnailsAsync(string visibleIdsJson)
+    private async Task LoadVisibleThumbnailsAsync(string visibleIdsJson, string libraryView)
     {
         if (_loggingOut)
         {
@@ -1089,7 +1105,8 @@ public sealed class AppController : IAsyncDisposable
         var visibleIdSet = visibleIds.ToHashSet(StringComparer.Ordinal);
 
         var path = _currentPath;
-        var requestKey = path + "|" + string.Join(",", visibleIds);
+        var favoritesView = libraryView.Equals("favorites", StringComparison.Ordinal);
+        var requestKey = libraryView + "|" + path + "|" + string.Join(",", visibleIds);
         CancellationTokenSource request;
         CancellationTokenSource? previous;
         lock (_thumbnailRequestSync)
@@ -1111,7 +1128,9 @@ public sealed class AppController : IAsyncDisposable
         try
         {
             await Task.Delay(80, cancellationToken);
-            var appsByThread = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
+            var appsByThread = (libraryView == "favorites" ? _favoriteApps :
+                    libraryView == "devices" ? _deviceApps.Concat(_loadedApps) :
+                    CurrentLocalEntries())
                 .Where(app => visibleIdSet.Contains(app.ThreadId))
                 .GroupBy(app => app.ThreadId, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
@@ -1128,7 +1147,7 @@ public sealed class AppController : IAsyncDisposable
                 await previewSlots.WaitAsync(cancellationToken);
                 try
                 {
-                    if (path != _currentPath || !IsThumbnailCandidate(app, path))
+                    if (path != _currentPath || !IsThumbnailCandidate(app, path, favoritesView))
                     {
                         return null;
                     }
@@ -1272,7 +1291,7 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private async Task RunTrackedThumbnailRequestAsync(string visibleIdsJson)
+    private async Task RunTrackedThumbnailRequestAsync(string visibleIdsJson, string libraryView)
     {
         var requestId = NewId();
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1281,7 +1300,7 @@ public sealed class AppController : IAsyncDisposable
         {
             if (!_loggingOut)
             {
-                await LoadVisibleThumbnailsAsync(visibleIdsJson);
+                await LoadVisibleThumbnailsAsync(visibleIdsJson, libraryView);
             }
         }
         finally
@@ -1360,10 +1379,10 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
-    private static bool IsThumbnailCandidate(AppEntry app, string path)
+    private static bool IsThumbnailCandidate(AppEntry app, string path, bool favoritesView)
     {
         return app.Type == "file" &&
-               PathRules.Normalize(app.Path) == path &&
+               (favoritesView || PathRules.Normalize(app.Path) == path) &&
                (ThumbnailCache.IsImage(app.Name) || ThumbnailCache.IsVideo(app.Name));
     }
 
@@ -1619,7 +1638,7 @@ public sealed class AppController : IAsyncDisposable
 
     private AppEntry? FindLoadedEntry(string threadId)
     {
-        return _loadedApps.FirstOrDefault(app => app.ThreadId == threadId);
+        return LoadedEntriesForLookup().FirstOrDefault(app => app.ThreadId == threadId);
     }
 
     private async Task<AppEntry?> FindLoadedFileDetailsAsync(string threadId, CancellationToken cancellationToken = default)
@@ -3371,7 +3390,7 @@ public sealed class AppController : IAsyncDisposable
             try
             {
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
-                var entry = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
+                var entry = LoadedEntriesForLookup()
                     .FirstOrDefault(app => app.ThreadId == threadId);
                 if (entry != null)
                 {
@@ -4267,7 +4286,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageThreadId)
     {
-        var image = (_loadedApps.Count > 0 ? _loadedApps : CurrentLocalEntries())
+        var image = LoadedEntriesForLookup()
             .FirstOrDefault(app => app.ThreadId == imageThreadId && app.Encryption != null);
         if (image == null)
         {
@@ -7313,9 +7332,3 @@ private static string ClassifyConnectError(Exception ex)
         }
     }
 }
-
-
-
-
-
-

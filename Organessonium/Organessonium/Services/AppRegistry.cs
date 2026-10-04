@@ -63,15 +63,28 @@ public sealed class AppRegistry
         return entries;
     }
 
-    public async Task<List<AppEntry>> LoadFavoritesAsync(CancellationToken cancellationToken = default)
+    public async Task<List<AppEntry>> LoadFavoritesAsync(
+        CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
         var serial = await _serials.LoadStandaloneSerialAsync(
             SerialIndexService.FavoritesSerialId,
             FolderSerialKind.Favorites,
-            cancellationToken);
+            cancellationToken,
+            forceRefresh);
         if (serial == null)
         {
             return [];
+        }
+
+        if (_mappings.TryGetValue(SerialIndexService.FavoritesSerialId, out var mapping))
+        {
+            var cachedHash = await _serials.CachedSerialSha256Async(
+                SerialIndexService.FavoritesSerialId, cancellationToken);
+            if (cachedHash == null ||
+                !cachedHash.Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                await PublishFavoritesSerialAsync(serial, cancellationToken);
+            }
         }
 
         var entries = _serials.MaterializeEntries(
@@ -88,8 +101,16 @@ public sealed class AppRegistry
         return entries;
     }
 
-    public async Task<List<AppEntry>> LoadSynchronizedDevicesAsync(CancellationToken cancellationToken = default)
+    public async Task<List<AppEntry>> LoadSynchronizedDevicesAsync(
+        CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
+        if (!forceRefresh &&
+            await _serials.LoadCachedFolderAsync(SynchronizedRootFolderId, cancellationToken) is
+                { Kind: FolderSerialKind.Folder, Children.Count: > 0 })
+        {
+            return await LoadSynchronizedDevicesFromSerialAsync(cancellationToken);
+        }
+
         try
         {
             var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
@@ -108,7 +129,7 @@ public sealed class AppRegistry
             AppLogger.Error("Registry.RefreshSynchronized", ex);
         }
 
-        return await LoadSynchronizedDevicesFromSerialAsync(cancellationToken);
+        return await LoadSynchronizedDevicesFromSerialAsync(cancellationToken, forceRefresh);
     }
 
     public async Task RefreshServerIndexAsync(
@@ -196,12 +217,14 @@ public sealed class AppRegistry
     }
 
     private async Task<List<AppEntry>> LoadSynchronizedDevicesFromSerialAsync(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceRefresh = false)
     {
         var serial = await _serials.LoadStandaloneSerialAsync(
             SynchronizedRootFolderId,
             FolderSerialKind.Folder,
-            cancellationToken);
+            cancellationToken,
+            forceRefresh);
         if (serial == null && _mappings.TryGetValue(SynchronizedRootFolderId, out var mapping))
         {
             serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
@@ -504,7 +527,7 @@ public sealed class AppRegistry
             SerialIndexService.FavoritesSerialId,
             materialized,
             MappingSnapshot());
-        await _serials.SaveStandaloneSerialAsync(new FolderSerial
+        await PublishFavoritesSerialAsync(new FolderSerial
         {
             FolderId = built.FolderId,
             ParentFolderId = built.ParentFolderId,
@@ -1137,8 +1160,33 @@ public sealed class AppRegistry
             Children = built.Children,
             Kind = FolderSerialKind.Favorites
         };
-        await _serials.SaveStandaloneSerialAsync(result, cancellationToken);
+        await PublishFavoritesSerialAsync(result, cancellationToken);
         return result;
+    }
+
+    private async Task PublishFavoritesSerialAsync(FolderSerial serial, CancellationToken cancellationToken)
+    {
+        _mappings.TryGetValue(SerialIndexService.FavoritesSerialId, out var mapping);
+        var published = await _serials.SaveStandaloneSerialAsync(
+            serial, cancellationToken, mapping?.SerialMessageId ?? "");
+        if (published == null || mapping == null ||
+            (mapping.SerialMessageId == published.Value.MessageId &&
+             mapping.SerialSha256.Equals(published.Value.Sha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var updated = mapping with
+        {
+            SerialMessageId = published.Value.MessageId,
+            SerialSha256 = published.Value.Sha256
+        };
+        var message = await _discord.UpdateMessageAsync(
+            _settings.NamesChannelId, mapping.NamesMessageId,
+            _metadata.SerializeFolderIndex(updated), cancellationToken);
+        updated = updated with { NamesMessageId = message.Id };
+        _mappings[updated.FolderId] = updated;
+        _store.UpsertFolderIndexMapping(updated);
     }
 
     private async Task<List<AppEntry>> RefreshFolderCoreAsync(

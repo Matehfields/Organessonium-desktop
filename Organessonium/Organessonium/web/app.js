@@ -3,7 +3,8 @@
 // ─── Estado ───────────────────────────────────────────────────────────────────
 let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
 let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
-let activeLibraryView = 'files', specialItems = [];
+let activeLibraryView = 'files', specialItems = [], deviceItems = [];
+let favoritesLoaded = false, devicesLoaded = false;
 let serverReadDepth = 0;
 let ctxTarget = null;
 let customFolderColorTarget = null;
@@ -817,24 +818,23 @@ function setActiveLibraryView(view) {
     });
 }
 
-function showFavoritesWorkspace() {
+function showFavoritesWorkspace(force = false) {
     activateWorkspaceTab('files');
     setActiveLibraryView('favorites');
-    specialItems = [];
-    folderLoadingPath = '/@favorites';
+    if (!favoritesLoaded) folderLoadingPath = '/@favorites';
     render();
-    window.bridge.loadFavorites();
+    if (force || !favoritesLoaded) window.bridge.loadFavorites(force);
 }
 
-function showDevicesWorkspace() {
+function showDevicesWorkspace(force = false) {
     activateWorkspaceTab('files');
     setActiveLibraryView('devices');
     currentPath = '/@synchronized';
-    folderLoadingPath = currentPath;
+    if (!devicesLoaded) folderLoadingPath = currentPath;
     historyBack = [];
     historyForward = [];
     render();
-    window.bridge.loadSynchronizedDevices();
+    if (force || !devicesLoaded) window.bridge.loadSynchronizedDevices(force);
 }
 
 // ─── Java → JS ────────────────────────────────────────────────────────────────
@@ -936,22 +936,27 @@ window._onServerReadState = active => {
 };
 window._onSpecialItemsLoaded = (view, items) => {
     if (!Array.isArray(items)) return;
-    const byId = new Map(allApps.map(app => [appIdentityKey(app), app]));
-    items.forEach(app => { if (!byId.has(appIdentityKey(app))) byId.set(appIdentityKey(app), app); });
-    allApps = [...byId.values()];
     if (view === 'favorites') {
         specialItems = items;
+        favoritesLoaded = true;
+    } else if (view === 'devices') {
+        deviceItems = items;
+        devicesLoaded = true;
     }
-    folderLoadingPath = '';
-    if (activeLibraryView === view) render();
-    scheduleVisibleThumbnails();
+    if (activeLibraryView === view) {
+        folderLoadingPath = '';
+        render();
+        scheduleVisibleThumbnails();
+    }
 };
 window._onServerIndexRefreshed = rebuilt => {
     setStatus(rebuilt ? 'Índice reconstruído.' : 'Índice atualizado.', false);
+    favoritesLoaded = false;
+    devicesLoaded = false;
     if (activeLibraryView === 'devices') {
-        showDevicesWorkspace();
+        showDevicesWorkspace(true);
     } else if (activeLibraryView === 'favorites') {
-        showFavoritesWorkspace();
+        showFavoritesWorkspace(true);
     } else {
         scheduleVisibleThumbnails();
     }
@@ -972,7 +977,7 @@ window._onFolderStatistics = (path, statistics) => {
         folderFileCounts.set(statistic.folderId, Number(statistic.fileCount));
         requestedFolderStatistics.delete(statistic.folderId);
     });
-    if (path === currentPath) render();
+    if (path === currentPath && activeLibraryView !== 'favorites') render();
 };
 window._onBackgroundActivity = (message, active) => {
     const activity = $('background-activity');
@@ -1108,7 +1113,7 @@ function requestVisibleThumbnails() {
         .filter((id, index, all) => id && all.indexOf(id) === index)
         .filter(id => visibleThumbnailIds.has(id) && !(window._thumbs && window._thumbs[id]));
     if (!ids.length) return;
-    window.bridge.loadVisibleThumbnails(JSON.stringify(ids));
+    window.bridge.loadVisibleThumbnails(JSON.stringify(ids), activeLibraryView);
 }
 
 function scheduleVisibleThumbnails() {
@@ -2490,6 +2495,7 @@ function setOpProgress(id, percent) {
 
 function requestVisibleFolderStatistics() {
     if (!window.bridge || typeof window.bridge.loadVisibleFolderStatistics !== 'function') return;
+    if (activeLibraryView === 'favorites' || (activeLibraryView === 'devices' && currentPath === '/@synchronized')) return;
     const requestedAt = Date.now();
     const folderIds = allApps
         .filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.folderId)
@@ -5095,7 +5101,7 @@ function navigate(path, addHistory = true) {
     folderLoadingPath = path;
     const folderIds = path === '/'
         ? []
-        : allApps
+        : [...allApps, ...specialItems, ...deviceItems]
             .filter(app => isFolderApp(app) && folderPathForApp(app) === path && app.folderId)
             .map(app => app.folderId);
     window.bridge.setCurrentPath(path, path === '/' ? 'root' : JSON.stringify(folderIds));
@@ -5103,6 +5109,8 @@ function navigate(path, addHistory = true) {
 }
 
 function refreshCurrentFolder() {
+    if (activeLibraryView === 'favorites') { showFavoritesWorkspace(true); return; }
+    if (activeLibraryView === 'devices' && currentPath === '/@synchronized') { showDevicesWorkspace(true); return; }
     setStatus(t('loading'), true);
     folderFileCounts.clear();
     requestedFolderStatistics.clear();
@@ -5988,20 +5996,26 @@ function sorted(arr) {
 function render() {
     renderPathCrumbs();
     const favoritesView = activeLibraryView === 'favorites';
+    const devicesRootView = activeLibraryView === 'devices' && currentPath === '/@synchronized';
     const favoriteSource = favoritesView
         ? specialItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
         : [];
-    const folders = favoritesView
-        ? (typeFilter === 'all' || typeFilter === 'folders' ? sorted(favoriteSource.filter(app => app.type === 'folder')) : [])
+    const specialSource = devicesRootView
+        ? deviceItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
+        : favoriteSource;
+    const folders = favoritesView || devicesRootView
+        ? (typeFilter === 'all' || typeFilter === 'folders' ? sorted(specialSource.filter(app => app.type === 'folder')) : [])
         : (typeFilter === 'all' || typeFilter === 'folders' ? childFolders(allApps, currentPath) : []);
-    let files = typeFilter === 'folders' ? [] : sorted(favoritesView ? favoriteSource.filter(app => app.type !== 'folder') : filesAt(allApps, currentPath));
-    if (searchQuery && !favoritesView) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
+    let files = typeFilter === 'folders' ? [] : sorted(favoritesView || devicesRootView ? specialSource.filter(app => app.type !== 'folder') : filesAt(allApps, currentPath));
+    if (searchQuery && !favoritesView && !devicesRootView) files=sorted(allApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
     files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
     filesGrid.innerHTML=''; filesList.innerHTML='';
     const total=folders.length+files.length;
     if (!total) {
-        const loadingFolder = !searchQuery && (folderLoadingPath === currentPath || (favoritesView && folderLoadingPath === '/@favorites'));
+        const loadingFolder = !searchQuery && (favoritesView
+            ? folderLoadingPath === '/@favorites'
+            : folderLoadingPath === currentPath);
         emptyState.classList.remove('hidden');
         emptyState.classList.toggle('folder-loading', loadingFolder);
         $('empty-title').textContent = loadingFolder ? t('loading') : t('emptyTitle');
@@ -6016,7 +6030,7 @@ function render() {
         if (folders.length) {
             const folderWrap = document.createElement('div');
             folderWrap.className = 'folders-grid';
-            folders.forEach(f=>folderWrap.appendChild(favoritesView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
+            folders.forEach(f=>folderWrap.appendChild(favoritesView || devicesRootView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
             filesGrid.appendChild(folderWrap);
         }
         if (files.length) {
@@ -6028,7 +6042,7 @@ function render() {
     } else {
         filesGrid.classList.add('hidden'); filesList.classList.remove('hidden');
         filesList.appendChild(makeListHeader());
-        folders.forEach(f=>filesList.appendChild(favoritesView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
+        folders.forEach(f=>filesList.appendChild(favoritesView || devicesRootView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
         files.forEach(a=>filesList.appendChild(makeFileRow(a)));
     }
     updateSelectionUI();
@@ -6377,18 +6391,23 @@ function makeFileRow(app) {
 
 // ─── Tipos e ícones ───────────────────────────────────────────────────────────
 function itemKey(app) { return app && (app.metadataMessageId || app.threadId || app.name); }
+function appsForActiveView() {
+    if (activeLibraryView === 'favorites') return specialItems;
+    if (activeLibraryView === 'devices' && currentPath === '/@synchronized') return deviceItems;
+    return allApps;
+}
 function getSelectedApps() {
-    return allApps.filter(a => selectedKeys.has(itemKey(a)) && a.metadataMessageId);
+    return appsForActiveView().filter(a => selectedKeys.has(itemKey(a)) && a.metadataMessageId);
 }
 function focusedFileApp() {
     const focused = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest('[data-key]')
         : null;
     if (!focused) return null;
-    return allApps.find(a => itemKey(a) === focused.dataset.key && a.metadataMessageId) || null;
+    return appsForActiveView().find(a => itemKey(a) === focused.dataset.key && a.metadataMessageId) || null;
 }
 function updateSelectionUI() {
-    const validKeys = new Set(allApps.filter(a => a.metadataMessageId).map(itemKey));
+    const validKeys = new Set(appsForActiveView().filter(a => a.metadataMessageId).map(itemKey));
     selectedKeys = new Set([...selectedKeys].filter(k => validKeys.has(k)));
     document.querySelectorAll('[data-key]').forEach(el => {
         const selected = selectedKeys.has(el.dataset.key);
@@ -6417,8 +6436,12 @@ function canUseGlobalShortcut(e) {
     return !target || !target.closest('input,textarea,select,[contenteditable="true"],.markdown-editor-page,.markdown-raw-editor,.preview-pdf-doc,.pdfjs-text-layer');
 }
 function selectableAppsInCurrentView() {
+    const source = appsForActiveView();
     if (searchQuery) {
-        return sorted(allApps.filter(a => a.metadataMessageId && a.type !== 'folder' && (a.name || '').toLowerCase().includes(searchQuery)));
+        return sorted(source.filter(a => a.metadataMessageId && a.type !== 'folder' && (a.name || '').toLowerCase().includes(searchQuery)));
+    }
+    if (activeLibraryView === 'favorites' || (activeLibraryView === 'devices' && currentPath === '/@synchronized')) {
+        return source.filter(a => a.metadataMessageId);
     }
     const files = filesAt(allApps, currentPath).filter(a => a.metadataMessageId);
     const folders = allApps.filter(a => a.metadataMessageId && a.type === 'folder' && (a.path || '/') === currentPath);

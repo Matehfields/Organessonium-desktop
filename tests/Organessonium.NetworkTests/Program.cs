@@ -44,7 +44,7 @@ internal static partial class Program
         ("folderIndexReturnsOnlyDirectChildren", FolderIndexReturnsOnlyDirectChildrenAsync),
         ("serialMessageEnvelopeProtocol", SerialMessageEnvelopeProtocolAsync),
         ("staleSerialMappingRepublishesCachedSerial", StaleSerialMappingRepublishesCachedSerialAsync),
-        ("emptyFavoritesSerialIsPublished", EmptyStandaloneSerialIsDeletedAsync),
+        ("favoritesSerialKeepsMessageIdAndCache", EmptyStandaloneSerialIsDeletedAsync),
         ("serialResetPreservesRemoteAndClearsLocalCache", SerialResetDeletesRemoteAndLocalCacheAsync),
         ("activeThreadsUseGuildRoute", ActiveThreadsUseGuildRouteAsync),
         ("forumThreadsIncludeArchivedPages", ForumThreadsIncludeArchivedPagesAsync),
@@ -862,9 +862,17 @@ internal static partial class Program
                 Kind = FolderSerialKind.Favorites
             });
 
-            return handler.Deletes == 1 && handler.Uploads == 1
+            var reopened = new SerialIndexService(
+                discord,
+                new AppSettings { SerialChannelId = EmptyStandaloneSerialHandler.ChannelId, SearchWorkers = 1 },
+                cache);
+            var cached = await reopened.LoadStandaloneSerialAsync(
+                SerialIndexService.FavoritesSerialId, FolderSerialKind.Favorites);
+
+            return handler.Deletes == 0 && handler.Uploads == 0 && handler.Replacements == 1 &&
+                   handler.MessageReads == 1 && cached?.Kind == FolderSerialKind.Favorites
                 ? TestOutcome.Pass()
-                : TestOutcome.Fail($"serial vazio de Favoritos não foi publicado: deletes={handler.Deletes}, uploads={handler.Uploads}");
+                : TestOutcome.Fail($"serial de Favoritos não preservou ID/cache: deletes={handler.Deletes}, uploads={handler.Uploads}, replacements={handler.Replacements}, reads={handler.MessageReads}");
         }
         finally
         {
@@ -1220,6 +1228,8 @@ internal static partial class Program
 
         public int Deletes { get; private set; }
         public int Uploads { get; private set; }
+        public int Replacements { get; private set; }
+        public int MessageReads { get; private set; }
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -1230,6 +1240,7 @@ internal static partial class Program
             if (request.Method == HttpMethod.Get &&
                 path.EndsWith($"/channels/{ChannelId}/messages", StringComparison.Ordinal))
             {
+                MessageReads++;
                 var before = QueryValue(uri, "before");
                 var include = string.IsNullOrWhiteSpace(before) ||
                               !ulong.TryParse(before, out var beforeId) ||
@@ -1245,6 +1256,13 @@ internal static partial class Program
             {
                 Deletes++;
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
+            }
+
+            if (request.Method == HttpMethod.Patch &&
+                path.EndsWith($"/channels/{ChannelId}/messages/{MessageId}", StringComparison.Ordinal))
+            {
+                Replacements++;
+                return Task.FromResult(JsonResponse($"{{\"id\":\"{MessageId}\",\"content\":\"\",\"attachments\":[]}}"));
             }
 
             if (request.Method == HttpMethod.Post)

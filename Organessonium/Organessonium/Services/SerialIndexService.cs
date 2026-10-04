@@ -41,6 +41,14 @@ public sealed class SerialIndexService
         return ReadCachedFolderAsync(folderId, cancellationToken);
     }
 
+    public async Task<string?> CachedSerialSha256Async(string serialId, CancellationToken cancellationToken = default)
+    {
+        var file = CacheFile(serialId);
+        return file.Exists
+            ? Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(file.FullName, cancellationToken))).ToLowerInvariant()
+            : null;
+    }
+
     public async Task<FolderSerial?> LoadFolderAsync(
         FolderIndexMapping mapping,
         CancellationToken cancellationToken = default)
@@ -115,12 +123,19 @@ public sealed class SerialIndexService
     public async Task<FolderSerial?> LoadStandaloneSerialAsync(
         string serialId,
         FolderSerialKind expectedKind,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool forceRefresh = false)
     {
         var normalizedId = serialId.Trim();
         if (normalizedId.Length == 0 || string.IsNullOrWhiteSpace(_settings.SerialChannelId))
         {
             return null;
+        }
+
+        var cached = await ReadCachedFolderAsync(normalizedId, cancellationToken);
+        if (!forceRefresh && cached?.Kind == expectedKind)
+        {
+            return cached;
         }
 
         var messages = await _discord.GetMessagesInParallelAsync(
@@ -134,7 +149,10 @@ public sealed class SerialIndexService
             .ToList();
         if (candidates.Count == 0)
         {
-            await InvalidateCachedFolderAsync(normalizedId);
+            if (cached?.Kind == expectedKind)
+            {
+                return cached;
+            }
             return null;
         }
 
@@ -176,18 +194,17 @@ public sealed class SerialIndexService
             }
         }
 
-        return await ReadCachedFolderAsync(normalizedId, cancellationToken) is { } cached && cached.Kind == expectedKind
-            ? cached
-            : null;
+        return cached?.Kind == expectedKind ? cached : null;
     }
 
-    public async Task SaveStandaloneSerialAsync(
+    public async Task<(string MessageId, string Sha256)?> SaveStandaloneSerialAsync(
         FolderSerial serial,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string preferredMessageId = "")
     {
         if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
         {
-            return;
+            return null;
         }
 
         var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
@@ -208,17 +225,19 @@ public sealed class SerialIndexService
                 await TryDeleteRemoteSerialAsync(message.Id, cancellationToken: cancellationToken);
             }
             await InvalidateCachedFolderAsync(serial.FolderId);
-            return;
+            return null;
         }
 
-        var unchanged = existing.FirstOrDefault(message =>
-            SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
-            envelope.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase));
+        var current = existing.FirstOrDefault(message => message.Id == preferredMessageId)
+            ?? existing.OrderByDescending(message => ulong.TryParse(message.Id, out var id) ? id : 0).FirstOrDefault();
+        var unchanged = current != null &&
+            SerialMessageEnvelope.TryParse(current.Content, out var currentEnvelope) &&
+            currentEnvelope.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase);
 
         string preservedMessageId;
-        if (unchanged != null)
+        if (unchanged)
         {
-            preservedMessageId = unchanged.Id;
+            preservedMessageId = current!.Id;
         }
         else
         {
@@ -226,11 +245,10 @@ public sealed class SerialIndexService
             try
             {
                 var folderName = SerialMessageEnvelope.FolderNameForMessage(serial.FolderId, serial.FolderName, hash);
-                var sent = await _discord.SendFileMessageAsync(
-                    _settings.SerialChannelId,
-                    SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash),
-                    temporary,
-                    cancellationToken);
+                var envelope = SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash);
+                var sent = current == null
+                    ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
+                    : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, current.Id, envelope, temporary, cancellationToken);
                 preservedMessageId = sent.Id;
             }
             finally
@@ -245,6 +263,7 @@ public sealed class SerialIndexService
         {
             await TryDeleteRemoteSerialAsync(duplicate.Id, preservedMessageId, cancellationToken);
         }
+        return (preservedMessageId, hash);
     }
 
     public FolderSerial BuildFolderSerial(
