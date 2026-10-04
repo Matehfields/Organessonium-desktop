@@ -36,6 +36,7 @@ internal static partial class Program
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
+        ("webViewLibraryRefreshAndLayout", WebViewLibraryRefreshAndLayoutAsync),
         ("favoriteAndDeviceMetadataCompatibility", FavoriteAndDeviceMetadataCompatibilityAsync),
         ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
         ("fourChannelSettingsRequireFoldersForum", FourChannelSettingsRequireFoldersForumAsync),

@@ -14,8 +14,13 @@ public sealed class SettingsStore : IEncryptionSecretStore
     private readonly object _lock = new();
 
     public SettingsStore()
+        : this(ResolveDataDirectory(), migrateIni: true)
     {
-        DataDirectory = ResolveDataDirectory();
+    }
+
+    internal SettingsStore(DirectoryInfo dataDirectory, bool migrateIni = false)
+    {
+        DataDirectory = dataDirectory;
         AppLogger.Configure(DataDirectory);
         PreviewCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Previews"));
         SerialCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Serials"));
@@ -25,7 +30,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         DatabasePath = System.IO.Path.Combine(DataDirectory.FullName, "organessonium.db");
         Directory.CreateDirectory(DataDirectory.FullName);
         InitializeDatabase();
-        MigrateIniIfNeeded();
+        if (migrateIni) MigrateIniIfNeeded();
     }
 
     public DirectoryInfo DataDirectory { get; }

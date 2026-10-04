@@ -302,21 +302,22 @@ public sealed class SerialIndexService
         CancellationToken cancellationToken = default)
     {
         var previous = await ReadCachedFolderAsync(serial.FolderId, cancellationToken);
-        var requiresRemoteUpload = await RequiresRemoteUploadAsync(mapping, cancellationToken) ||
+        var remoteMissing = await RequiresRemoteUploadAsync(mapping, cancellationToken);
+        var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
+        var requiresRemoteUpload = remoteMissing ||
             previous == null ||
             !Convert.ToHexString(SHA256.HashData(_codec.EncodeFolder(previous, FolderSerialCodec.PublishedVersion)))
                 .Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase);
         if (previous != null &&
-            FolderSerialCodec.SameContent(previous, serial) &&
+            FolderSerialCodec.SameContent(previous, _codec.DecodeFolder(bytes)) &&
             !requiresRemoteUpload)
         {
             return mapping;
         }
 
-        var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
-        _loadedFolders[serial.FolderId] = serial;
+        _loadedFolders[serial.FolderId] = _codec.DecodeFolder(bytes);
         if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
         {
             _verifiedRemoteSerialIds.TryRemove(serial.FolderId, out _);
@@ -327,11 +328,10 @@ public sealed class SerialIndexService
         try
         {
             var folderName = SerialMessageEnvelope.FolderNameForMessage(serial.FolderId, serial.FolderName, hash);
-            var message = await _discord.SendFileMessageAsync(
-                _settings.SerialChannelId,
-                SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash),
-                temporary,
-                cancellationToken);
+            var envelope = SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash);
+            var message = remoteMissing
+                ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
+                : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, mapping.SerialMessageId, envelope, temporary, cancellationToken);
             _verifiedRemoteSerialIds[serial.FolderId] = message.Id;
             return mapping with { SerialMessageId = message.Id, SerialSha256 = hash };
         }

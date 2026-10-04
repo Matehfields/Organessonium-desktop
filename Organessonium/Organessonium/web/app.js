@@ -953,7 +953,7 @@ window._onServerIndexRefreshed = rebuilt => {
     } else if (activeLibraryView === 'favorites') {
         showFavoritesWorkspace();
     } else {
-        refreshCurrentFolder();
+        scheduleVisibleThumbnails();
     }
 };
 window._onFavoriteChanged = entry => {
@@ -4731,14 +4731,19 @@ function stepMarqueeAutoScroll() {
 
 function updateMarqueeRect() {
     const main = $('main-area');
-    const mainRect = main.getBoundingClientRect();
+    const surface = marqueeSurfaceBounds();
+    const mainRect = surface.mainRect;
     const contentX = Math.min(marqueeState.startX, marqueeState.lastX);
     const contentY = Math.min(marqueeState.startY, marqueeState.lastY);
     const x = contentX - main.scrollLeft + mainRect.left;
     const y = contentY - main.scrollTop + mainRect.top;
     const w = Math.abs(marqueeState.lastX - marqueeState.startX);
     const h = Math.abs(marqueeState.lastY - marqueeState.startY);
-    Object.assign(marqueeEl.style, { left:x + 'px', top:y + 'px', width:w + 'px', height:h + 'px' });
+    const left = Math.max(surface.left, Math.min(surface.right, x));
+    const top = Math.max(surface.top, Math.min(surface.bottom, y));
+    const right = Math.max(left, Math.min(surface.right, x + w));
+    const bottom = Math.max(top, Math.min(surface.bottom, y + h));
+    Object.assign(marqueeEl.style, { left:left + 'px', top:top + 'px', width:(right - left) + 'px', height:(bottom - top) + 'px' });
 }
 
 function updateMarqueeSelection() {
@@ -4751,7 +4756,7 @@ function updateMarqueeSelection() {
         bottom:Math.max(marqueeState.startY, marqueeState.lastY)
     };
     const next = marqueeState.additive ? new Set(marqueeState.base) : new Set();
-    document.querySelectorAll('[data-key]').forEach(el => {
+    main.querySelectorAll('.file-card[data-key],.file-row[data-key]').forEach(el => {
         if (!el.dataset.key) return;
         const r = el.getBoundingClientRect();
         const itemRect = {

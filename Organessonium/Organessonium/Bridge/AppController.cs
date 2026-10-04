@@ -746,16 +746,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task RefreshCurrentFolderAsync()
     {
-        var path = _currentPath;
-        var folderIds = FindLoadedFolderIdsAtPath(path);
-        await LoadFolderAtPathAsync(
-            path,
-            JsonSerializer.Serialize(folderIds, JsonOptions.Web),
-            refreshMappings: true);
-        if (path == _currentPath)
-        {
-            await PublishLibraryFileCountAsync(Registry());
-        }
+        await RefreshServerIndexAsync(rebuildSerials: false);
     }
 
     private async Task RefreshServerIndexAsync(bool rebuildSerials)
@@ -763,7 +754,13 @@ public sealed class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onServerReadState", true);
         try
         {
-            await Registry().RefreshServerIndexAsync(rebuildSerials);
+            var registry = Registry();
+            await registry.RefreshServerIndexAsync(rebuildSerials, onFolderRefreshed: async (folderId, entries) =>
+            {
+                ReplaceLoadedFolder(folderId, entries);
+                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+            });
+            await PublishLibraryFileCountAsync(registry);
             await _bridge.CallAsync("_onServerIndexRefreshed", rebuildSerials);
         }
         finally

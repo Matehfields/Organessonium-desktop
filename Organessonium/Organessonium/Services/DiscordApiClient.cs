@@ -738,6 +738,23 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
+    public async Task<DiscordMessageDto> ReplaceFileMessageAsync(
+        string channelId,
+        string messageId,
+        string content,
+        FileInfo file,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        using var response = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Patch, $"channels/{channelId}/messages/{messageId}");
+            request.Content = BuildMessageFileContent(content, file.Name, file.OpenRead);
+            return request;
+        }, cancellationToken);
+        return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
+    }
+
     public async Task<byte[]> DownloadAttachmentBytesAsync(
         DiscordAttachmentDto attachment,
         CancellationToken cancellationToken = default)

@@ -113,33 +113,37 @@ public sealed class AppRegistry
 
     public async Task RefreshServerIndexAsync(
         bool rebuildSerials,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<string, IReadOnlyList<AppEntry>, Task>? onFolderRefreshed = null)
     {
         await _serverIndexRefreshGate.WaitAsync(cancellationToken);
         try
         {
             await RefreshMappingsAsync(cancellationToken);
-            if (!rebuildSerials)
+            if (rebuildSerials)
             {
-                return;
+                await _serials.ResetAllAsync(cancellationToken);
             }
 
-            await _serials.ResetAllAsync(cancellationToken);
             var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             await RefreshMappedTreeAsync(
                 RootFolderId,
                 "/",
                 visited,
-                cancellationToken);
+                cancellationToken,
+                onFolderRefreshed);
 
             if (_mappings.ContainsKey(SynchronizedRootFolderId) && !visited.Contains(SynchronizedRootFolderId))
             {
-                await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken);
+                await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken, onFolderRefreshed);
             }
 
-            var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
-            await RebuildSynchronizedSerialsAsync(metadataEntries, cancellationToken);
-            await RebuildFavoritesSerialAsync(metadataEntries, cancellationToken);
+            if (rebuildSerials)
+            {
+                var metadataEntries = await ReadStandaloneMetadataEntriesAsync(cancellationToken);
+                await RebuildSynchronizedSerialsAsync(metadataEntries, cancellationToken);
+                await RebuildFavoritesSerialAsync(metadataEntries, cancellationToken);
+            }
         }
         finally
         {
@@ -334,7 +338,8 @@ public sealed class AppRegistry
         string folderId,
         string folderPath,
         HashSet<string> visited,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, IReadOnlyList<AppEntry>, Task>? onFolderRefreshed = null)
     {
         if (!visited.Add(folderId))
         {
@@ -342,6 +347,10 @@ public sealed class AppRegistry
         }
 
         var entries = await RefreshFolderAsync(folderId, folderPath, cancellationToken);
+        if (onFolderRefreshed != null)
+        {
+            await onFolderRefreshed(folderId, entries);
+        }
         foreach (var folder in entries.Where(entry =>
                      entry.Type == "folder" &&
                      !string.IsNullOrWhiteSpace(entry.FolderId) &&
@@ -351,7 +360,8 @@ public sealed class AppRegistry
                 folder.FolderId,
                 PathRules.ChildPath(folder),
                 visited,
-                cancellationToken);
+                cancellationToken,
+                onFolderRefreshed);
         }
     }
 
@@ -1163,7 +1173,7 @@ public sealed class AppRegistry
             var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
             var messages = await _discord.GetMessagesInParallelAsync(mapping.ThreadId, workers, cancellationToken);
             var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
-            if (envelopes.Count == 0 && _store.LoadCachedEntriesForFolder(folderId).Count > 0)
+            if (messages.Count > 0 && envelopes.Count == 0 && _store.LoadCachedEntriesForFolder(folderId).Count > 0)
             {
                 throw new InvalidOperationException("A leitura do índice da pasta não retornou metadados válidos; o cache foi preservado.");
             }
