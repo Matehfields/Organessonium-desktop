@@ -395,8 +395,10 @@ function Write-MsixManifest {
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap desktop uap10 rescap">
   <Identity Name="$identityName" Publisher="$publisher" Version="$PackageVersion" ProcessorArchitecture="$Architecture" />
   <Properties>
     <DisplayName>$displayName</DisplayName>
@@ -418,6 +420,11 @@ function Write-MsixManifest {
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="Organessonium.exe" EntryPoint="Windows.FullTrustApplication" uap10:Parameters="--background">
+          <desktop:StartupTask TaskId="OrganessoniumSync" Enabled="false" DisplayName="$displayName" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities>

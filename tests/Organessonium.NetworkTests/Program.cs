@@ -14,6 +14,11 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("twoComputerSyncLifecycle", TwoComputerSyncLifecycleAsync),
+        ("syncFailuresPreserveFiles", SyncFailuresPreserveFilesAsync),
+        ("syncScannerPathsAndPersistence", SyncScannerPathsAndPersistenceAsync),
+        ("syncDiscordPublicationAndRecovery", SyncDiscordPublicationAndRecoveryAsync),
+        ("webViewSyncControls", WebViewSyncControlsAsync),
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
         ("videoVariableChunkMapping", VideoVariableChunkMappingAsync),
         ("videoVirtualResourceRanges", VideoVirtualResourceRangesAsync),
@@ -72,14 +77,25 @@ internal static partial class Program
         ("autoDetectChoosesHttp", AutoDetectChoosesHttpAsync),
         ("autoDetectChoosesSocks5", AutoDetectChoosesSocks5Async),
         ("discordCheckThroughProxySucceeds", DiscordCheckThroughProxySucceedsAsync),
-        ("failedProbeReportedAsUnreachable", FailedProbeReportedAsUnreachableAsync)
+        ("failedProbeReportedAsUnreachable", FailedProbeReportedAsUnreachableAsync),
+        ("syncHeadlessTrayWindowLifecycle", SyncHeadlessTrayWindowLifecycleAsync)
     };
 
     public static async Task<int> Main(string[] args)
     {
         var passed = 0;
         var failed = 0;
-        var selected = Tests.Where(test => args.Length == 0 || args.Contains(test.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+        var allowUi = args.Contains("--include-ui", StringComparer.OrdinalIgnoreCase);
+        var names = args.Where(arg => !arg.Equals("--include-ui", StringComparison.OrdinalIgnoreCase)).ToArray();
+        static bool OpensWindow(string name) => name.StartsWith("webView", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("syncHeadlessTrayWindowLifecycle", StringComparison.OrdinalIgnoreCase);
+        if (!allowUi && names.Any(OpensWindow))
+        {
+            Console.WriteLine("Teste gráfico não executado. A opção --include-ui é necessária e pode abrir janelas.");
+            return 1;
+        }
+        var selected = Tests.Where(test => (names.Length == 0 || names.Contains(test.Name, StringComparer.OrdinalIgnoreCase)) &&
+            (allowUi || !OpensWindow(test.Name))).ToList();
         foreach (var (name, run) in selected)
         {
             try

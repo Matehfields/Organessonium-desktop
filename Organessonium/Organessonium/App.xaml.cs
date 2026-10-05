@@ -6,7 +6,7 @@ namespace Organessonium;
 
 public partial class App : Application
 {
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         DispatcherUnhandledException += (_, args) =>
         {
@@ -49,6 +49,15 @@ public partial class App : Application
         }
 
         base.OnStartup(e);
+        try { await StartDesktopAsync(_startBackground || e.Args.Any(arg => arg.Equals("--background", StringComparison.OrdinalIgnoreCase)), _desktopStore, _initialIdentityPath); }
+        catch (Exception ex)
+        {
+            _desktopStarted.TrySetException(ex);
+            AppLogger.Error("App.UnhandledException", ex);
+            if (!_startBackground && !e.Args.Any(arg => arg.Equals("--background", StringComparison.OrdinalIgnoreCase)))
+                MessageBox.Show("Não foi possível iniciar o Organessônium. Consulte os logs de erro.", "Organessônium");
+            await ExitDesktopAsync();
+        }
     }
 
     private void RunNamesDebug()

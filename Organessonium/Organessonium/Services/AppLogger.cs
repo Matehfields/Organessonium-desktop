@@ -32,6 +32,12 @@ public static class AppLogger
         // Debug events are not persisted.
     }
 
+    internal static void SyncEvent(string area, string summary, bool warning = false)
+    {
+        // Sync summaries contain counts/status codes only, never paths, names or exception bodies.
+        if (area.StartsWith("Sync.", StringComparison.Ordinal)) Write(warning ? "WARN" : "INFO", area, summary, null);
+    }
+
     private static void Write(string level, string area, string? details, Exception? exception, string? subdirectory = null)
     {
         try

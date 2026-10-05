@@ -157,7 +157,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
             }
 
             reader.Dispose();
+            settings.SyncPaused = GetBool(values, "syncPaused", false);
             settings.BotToken = Get(values, "botToken", settings.BotToken);
+            settings.StartWithWindows = GetBool(values, "startWithWindows", false);
+            settings.CloseToTray = GetBool(values, "closeToTray", false);
             settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
             settings.FoldersForumId = Get(values, "foldersForumId", settings.FoldersForumId);
             settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
@@ -202,7 +205,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
         {
             using var connection = Open();
             using var tx = connection.BeginTransaction();
+            Upsert(connection, "syncPaused", settings.SyncPaused ? "true" : "false");
             Upsert(connection, "botToken", settings.BotToken);
+            Upsert(connection, "startWithWindows", settings.StartWithWindows ? "true" : "false");
+            Upsert(connection, "closeToTray", settings.CloseToTray ? "true" : "false");
             Upsert(connection, "namesChannelId", settings.NamesChannelId);
             Upsert(connection, "foldersForumId", settings.FoldersForumId);
             Upsert(connection, "appsForumId", settings.AppsForumId);
@@ -252,7 +258,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt, favorite, device_type
+                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json
                 FROM app_entries
                 WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
                 ORDER BY rowid
@@ -288,7 +294,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt, favorite, device_type
+                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json
                 FROM app_entries
                 WHERE folder_id = $folderId AND type = 'folder'
                 LIMIT 1
@@ -352,6 +358,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
             }
             entry.Favorite = reader.GetInt32(22) != 0;
             entry.DeviceType = reader.IsDBNull(23) ? null : reader.GetString(23);
+            entry.Sync = reader.GetString(24).Length == 0 ? null :
+                System.Text.Json.JsonSerializer.Deserialize<SyncMetadata>(reader.GetString(24), JsonOptions.Web);
+            entry.SyncDevice = reader.GetString(25).Length == 0 ? null :
+                System.Text.Json.JsonSerializer.Deserialize<SyncDeviceMetadata>(reader.GetString(25), JsonOptions.Web);
             entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
             entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
             entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
@@ -544,6 +554,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         EnsureColumn(connection, "app_entries", "encryption_salt", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "favorite", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "app_entries", "device_type", "TEXT");
+        EnsureColumn(connection, "app_entries", "sync_json", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "sync_device_json", "TEXT NOT NULL DEFAULT ''");
     }
 
     private void MigrateIniIfNeeded()
@@ -659,11 +671,11 @@ public sealed class SettingsStore : IEncryptionSecretStore
             (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
              mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
              video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
-             encryption_version, encryption_mode, encryption_salt, favorite, device_type)
+             encryption_version, encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json)
             VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
              $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
              $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
-             $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType)
+             $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType, $syncJson, $syncDeviceJson)
             """;
         insert.Parameters.AddWithValue("$name", entry.Name);
         insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
@@ -689,6 +701,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         insert.Parameters.AddWithValue("$encryptionSalt", entry.Encryption?.Salt ?? "");
         insert.Parameters.AddWithValue("$favorite", entry.Favorite ? 1 : 0);
         insert.Parameters.AddWithValue("$deviceType", (object?)entry.DeviceType ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$syncJson", entry.Sync == null ? "" : System.Text.Json.JsonSerializer.Serialize(entry.Sync, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$syncDeviceJson", entry.SyncDevice == null ? "" : System.Text.Json.JsonSerializer.Serialize(entry.SyncDevice, JsonOptions.Web));
         insert.ExecuteNonQuery();
     }
 

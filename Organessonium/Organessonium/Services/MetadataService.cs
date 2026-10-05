@@ -401,6 +401,8 @@ public sealed class MetadataService
 
         entry.MetadataMessageId = envelope.MessageId;
         entry.Trash = envelope.Entry.Trash;
+        entry.Sync = envelope.Entry.Sync;
+        entry.SyncDevice = envelope.Entry.SyncDevice;
         entry.Normalize();
         return entry;
     }
@@ -422,6 +424,7 @@ public sealed class MetadataService
             Preview = CreatePreviewMetadata(entry),
             Encryption = entry.Encryption?.Clone(),
             Trash = entry.Trash,
+            Sync = entry.Sync,
             Favorite = entry.Favorite
         };
     }
@@ -509,6 +512,8 @@ public sealed class MetadataService
             FolderColor = string.IsNullOrWhiteSpace(entry.FolderColor) ? "#C4C7C5" : entry.FolderColor,
             DeviceType = entry.DeviceType,
             Trash = entry.Trash,
+            Sync = entry.Sync,
+            SyncDevice = entry.SyncDevice,
             Favorite = entry.Favorite
         };
     }

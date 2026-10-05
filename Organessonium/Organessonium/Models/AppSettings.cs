@@ -4,6 +4,13 @@ namespace Organessonium.Models;
 
 public sealed class AppSettings
 {
+    [JsonPropertyName("startWithWindows")]
+    public bool StartWithWindows { get; set; }
+
+    [JsonPropertyName("closeToTray")]
+    public bool CloseToTray { get; set; }
+    [JsonPropertyName("syncPaused")]
+    public bool SyncPaused { get; set; }
     [JsonPropertyName("botToken")]
     public string BotToken { get; set; } = "";
 
@@ -100,6 +107,9 @@ public sealed class AppSettings
     {
         return new AppSettings
         {
+            StartWithWindows = StartWithWindows,
+            CloseToTray = CloseToTray,
+            SyncPaused = SyncPaused,
             BotToken = BotToken,
             NamesChannelId = NamesChannelId,
             FoldersForumId = FoldersForumId,

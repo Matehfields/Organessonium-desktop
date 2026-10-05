@@ -16,7 +16,7 @@ using System.Xml;
 
 namespace Organessonium.Bridge;
 
-public sealed class AppController : IAsyncDisposable
+public sealed partial class AppController : IAsyncDisposable
 {
     private static readonly JsonSerializerOptions ProxyJsonOptions = CreateProxyJsonOptions();
 
@@ -151,6 +151,7 @@ public sealed class AppController : IAsyncDisposable
         var playbackStore = new VideoPlaybackProgressStore(store.DatabasePath);
         playbackStore.Prune();
         _videoProgress = new VideoPlaybackTracker(playbackStore);
+        if (Application.Current is App { SyncHost: { } syncHost }) AttachSyncHost(syncHost);
     }
 
     public void SetSession(DiscordSession session)
@@ -197,6 +198,7 @@ public sealed class AppController : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        DetachSyncHost();
         _loggingOut = true;
         foreach (var request in _videoOpenRequests.Values) request.Cancel();
         await Task.Run(_videoProgress.Suspend);
@@ -240,6 +242,11 @@ public sealed class AppController : IAsyncDisposable
     {
         switch (method)
         {
+            case "loadSyncState": case "discoverSyncFolders": case "chooseSyncFolder":
+            case "openSyncFolder":
+            case "addSyncFolder": case "updateSyncFolder": case "removeSyncFolder":
+            case "syncNow": case "pauseSync": case "resolveSyncConflict": case "setSyncPreferences":
+                return SyncDispatchAsync(method, args);
             case "connect": return ConnectAsync(args);
             case "logout": _ = RunAsync(LogoutWithSplashAsync); return Task.CompletedTask;
             case "openGuide": return OpenGuideAsync();
@@ -387,6 +394,7 @@ public sealed class AppController : IAsyncDisposable
             await session.ConnectAsync(settings);
             _store.Save(settings);
             await ReplaceSessionAsync(session);
+            if (_syncHost != null) await _syncHost.ReloadAsync();
             await _onConnected(session);
             await NotifyInterruptedTransfersAsync();
         }
@@ -425,9 +433,12 @@ public sealed class AppController : IAsyncDisposable
     private async Task LogoutAsync()
     {
         _loggingOut = true;
+        if (_syncHost != null) await _syncHost.SuspendAccountAsync();
+        if (_store.Load().StartWithWindows) await Organessonium.Services.Sync.StartupManager.SetEnabledAsync(false);
         _loadedApps = [];
         _favoriteApps = [];
         _deviceApps = [];
+        _syncSources = [];
         Interlocked.Increment(ref _favoriteLoadVersion);
         Interlocked.Increment(ref _deviceLoadVersion);
         var session = _session;
@@ -4813,7 +4824,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task NotifyInterruptedTransfersAsync()
     {
-        var states = await _transferManager.RecoverableAsync();
+        var states = (await _transferManager.RecoverableAsync()).Where(state => state.SyncFolderId == null).ToList();
         if (states.Count == 0)
         {
             return;
@@ -4831,7 +4842,7 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task FailInterruptedTransfersAsync()
     {
-        var states = await _transferManager.RecoverableAsync();
+        var states = (await _transferManager.RecoverableAsync()).Where(state => state.SyncFolderId == null).ToList();
         foreach (var state in states)
         {
             await _transferManager.FailAsync(state, new InvalidOperationException("Marcada como falha pelo usuário."), CancellationToken.None);
@@ -4849,7 +4860,7 @@ public sealed class AppController : IAsyncDisposable
         IReadOnlyList<TransferState>? selectedStates,
         bool silent)
     {
-        var states = selectedStates ?? await _transferManager.RecoverableAsync();
+        var states = (selectedStates ?? await _transferManager.RecoverableAsync()).Where(state => state.SyncFolderId == null).ToList();
         if (states.Count == 0)
         {
             if (!silent)
@@ -5015,6 +5026,7 @@ public sealed class AppController : IAsyncDisposable
             var recoverable = await _transferManager.RecoverableAsync();
             var repairable = recoverable
                 .Where(state =>
+                    state.SyncFolderId == null &&
                     state.TransferType.Equals(TransferTypes.Upload, StringComparison.OrdinalIgnoreCase) &&
                     orphanThreadIds.Contains(state.ThreadId) &&
                     !_transferOperations.ContainsKey(state.TransferId) &&

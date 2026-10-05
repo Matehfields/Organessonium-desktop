@@ -1,0 +1,450 @@
+using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Organessonium.Models;
+using Windows.Storage;
+using Windows.Storage.FileProperties;
+
+namespace Organessonium.Services.Sync;
+
+internal static class SyncJson
+{
+    internal static readonly JsonSerializerOptions Options = new(JsonOptions.Web)
+    { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
+}
+
+public interface ICloudSyncRepository
+{
+    Task<SyncCloudSnapshot> ReadAsync(SyncFolderBinding folder, CancellationToken token);
+    Task<FileMetadata> UploadAsync(SyncFolderBinding folder, SyncLocalFile local, string fileId,
+        CancellationToken token, Action<SyncTransferProgress> progress);
+    Task<SyncRevision> CommitAsync(SyncFolderBinding folder, SyncRevision revision,
+        IReadOnlyList<string> expectedHeads, CancellationToken token);
+    Task<FileInfo> DownloadAsync(SyncFolderBinding folder, SyncRevision revision, DirectoryInfo staging,
+        CancellationToken token, Action<SyncTransferProgress> progress);
+}
+
+public sealed class SyncConcurrencyException : IOException
+{
+    public SyncConcurrencyException() : base("A versão remota mudou durante a sincronização. As duas versões foram preservadas.") { }
+}
+
+public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
+{
+    private readonly SettingsStore _store;
+    private readonly AppSettings _settings;
+    private readonly DiscordApiClient _api;
+    private readonly bool _ownsApi;
+    private readonly AppRegistry _registry;
+    private readonly MetadataService _metadata = new();
+    private readonly EncryptionService _encryption;
+    private readonly TransferManager _transfers;
+    private readonly Dictionary<string, JournalCache> _journals = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SemaphoreSlim _journalGate = new(1, 1);
+    private readonly SemaphoreSlim _projectionGate = new(1, 1);
+    private readonly SemaphoreSlim _uploadGate;
+    private readonly Func<HttpClient>? _downloadClients;
+    public event Action<string>? TreeChanged;
+
+    public CloudSyncRepository(SettingsStore store, AppSettings settings, DiscordApiClient? api = null,
+        Func<HttpClient>? downloadClients = null)
+    {
+        _store = store;
+        _settings = settings.Clone();
+        _ownsApi = api == null;
+        _api = api ?? new DiscordApiClient(settings.BotToken);
+        _registry = new AppRegistry(_api, store, settings);
+        _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
+        _transfers = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
+        _uploadGate = new SemaphoreSlim(Math.Clamp(settings.UploadThreads, 1, 16));
+        _downloadClients = downloadClients;
+    }
+
+    public async Task CreateOrLinkAsync(SyncFolderBinding binding, SyncStateStore state, bool link, CancellationToken token)
+    {
+        var entry = await _registry.EnsureSyncRootAsync(binding, state.DeviceId, state.DeviceName, link, token);
+        if (!link)
+        {
+            binding.CloudFolderId = entry.FolderId;
+            binding.CloudPath = PathRules.ChildPath(entry);
+        }
+    }
+
+    public Task<IReadOnlyList<AppEntry>> DiscoverAsync(CancellationToken token) => _registry.DiscoverSyncFoldersAsync(token);
+
+    public async Task<SyncCloudSnapshot> ReadAsync(SyncFolderBinding folder, CancellationToken token)
+    {
+        SyncCloudSnapshot snapshot;
+        await _journalGate.WaitAsync(token);
+        try
+        {
+            var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+            _journals.TryGetValue(folder.SyncFolderId, out var cache);
+            var messages = await _api.GetMessagesAsync(mapping.ThreadId, cache == null ? null : 100, token);
+            if (cache != null && messages.Count == 100 && messages.All(m => Snowflake(m.Id) > cache.Frontier))
+                messages = await _api.GetMessagesAsync(mapping.ThreadId, null, token);
+            cache ??= new JournalCache();
+            foreach (var message in messages.Where(m => Snowflake(m.Id) > cache.Frontier).OrderBy(m => Snowflake(m.Id)))
+            {
+                if (message.Content.StartsWith("syncApplied:", StringComparison.Ordinal))
+                {
+                    cache.Applied[message.Content[12..]] = message.Id;
+                    continue;
+                }
+                var revision = await ReadRevisionAsync(message, token);
+                if (revision != null)
+                {
+                    if (revision.SyncFolderId != folder.SyncFolderId || revision.SyncVersion != 1 || revision.SchemaVersion != 2)
+                        throw new InvalidDataException("Versão ou identidade de sincronização não suportada.");
+                    ValidateRevision(revision);
+                    cache.Revisions[revision.RevisionId] = revision;
+                }
+            }
+            if (messages.Count > 0) cache.Frontier = Math.Max(cache.Frontier, messages.Max(m => Snowflake(m.Id)));
+            _journals[folder.SyncFolderId] = cache;
+            snapshot = Snapshot(cache.Revisions.Values.ToList());
+        }
+        finally { _journalGate.Release(); }
+        foreach (var heads in snapshot.Heads.Values.Where(h => h.Count == 1))
+            await ApplyProjectionAsync(folder, heads[0], snapshot.Revisions.Where(r => heads[0].Parents.Contains(r.RevisionId)).ToList(), token);
+        return snapshot;
+    }
+
+    public static SyncCloudSnapshot Snapshot(IReadOnlyList<SyncRevision> revisions)
+    {
+        var referenced = revisions.SelectMany(r => r.Parents).ToHashSet(StringComparer.Ordinal);
+        var heads = revisions.Where(r => !referenced.Contains(r.RevisionId))
+            .GroupBy(r => r.RelativePath, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<SyncRevision>)g.OrderBy(r => r.RevisionId, StringComparer.Ordinal).ToList(), StringComparer.OrdinalIgnoreCase);
+        return new SyncCloudSnapshot(revisions, heads);
+    }
+
+    public async Task<SyncRevision> CommitAsync(SyncFolderBinding folder, SyncRevision revision,
+        IReadOnlyList<string> expectedHeads, CancellationToken token)
+    {
+        ValidateRevision(revision);
+        var before = await ReadAsync(folder, token);
+        var current = before.Heads.Values.SelectMany(r => r)
+            .Where(r => r.FileId == revision.FileId || r.RelativePath.Equals(revision.RelativePath, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!current.Select(r => r.RevisionId).Order(StringComparer.Ordinal).SequenceEqual(expectedHeads.Order(StringComparer.Ordinal)))
+            throw new SyncConcurrencyException();
+        var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+        await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
+        var json = JsonSerializer.Serialize(revision, SyncJson.Options);
+        DiscordMessageDto message;
+        if (json.Length <= DiscordLimits.MessageContentCharacters)
+            message = await _api.CreateMessageAsync(mapping.ThreadId, json, token);
+        else
+        {
+            var temporary = Directory.CreateTempSubdirectory("organessonium-sync-metadata-");
+            try
+            {
+                var file = new FileInfo(Path.Combine(temporary.FullName, "sync-revision.json"));
+                await File.WriteAllTextAsync(file.FullName, json, Encoding.UTF8, token);
+                message = await _api.SendFileMessageAsync(mapping.ThreadId, "syncRevision:" + revision.RevisionId, file, token);
+            }
+            finally { temporary.Delete(true); }
+        }
+        // A committed journal record is the source of truth even if updating the card index fails.
+        var confirmed = await ReadRevisionAsync(await _api.GetMessageAsync(mapping.ThreadId, message.Id, token), token);
+        if (confirmed?.RevisionId != revision.RevisionId || confirmed.Hash != revision.Hash)
+            throw new InvalidDataException("A revisão enviada não foi confirmada no servidor.");
+        revision.MessageId = message.Id;
+        await _journalGate.WaitAsync(token);
+        try
+        {
+            var cache = _journals[folder.SyncFolderId];
+            cache.Revisions[revision.RevisionId] = revision;
+            // Do not advance the frontier here: a simultaneous commit can have an earlier snowflake.
+        }
+        finally { _journalGate.Release(); }
+        await ApplyProjectionAsync(folder, revision, current, token);
+        // Cleanup only superseded ancestors, keeping the latest two payload revisions and all conflict heads.
+        await CleanupAsync(folder, token);
+        return revision;
+    }
+
+    private async Task ApplyProjectionAsync(SyncFolderBinding folder, SyncRevision revision,
+        IReadOnlyList<SyncRevision> parents, CancellationToken token)
+    {
+        await _projectionGate.WaitAsync(token);
+        try
+        {
+            var cache = _journals[folder.SyncFolderId];
+            if (cache.Applied.ContainsKey(revision.RevisionId)) return;
+            var parentId = await _registry.ProjectSyncRevisionAsync(folder, revision, token);
+            foreach (var prior in parents.Where(r => r.FileId != revision.FileId ||
+                         !r.RelativePath.Equals(revision.RelativePath, StringComparison.OrdinalIgnoreCase)))
+                await _registry.RemoveSyncProjectionAsync(folder, prior, token);
+            var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+            await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
+            var marker = await _api.CreateMessageAsync(mapping.ThreadId, "syncApplied:" + revision.RevisionId, token);
+            cache.Applied[revision.RevisionId] = marker.Id;
+            await _api.ArchiveThreadAsync(mapping.ThreadId, token);
+            TreeChanged?.Invoke(parentId);
+        }
+        finally { _projectionGate.Release(); }
+    }
+
+    public async Task<FileMetadata> UploadAsync(SyncFolderBinding folder, SyncLocalFile local, string fileId,
+        CancellationToken token, Action<SyncTransferProgress> progress)
+    {
+        var sourcePath = SyncPaths.Resolve(folder.LocalPath, local.RelativePath);
+        var staging = Directory.CreateDirectory(Path.Combine(_store.DataDirectory.FullName, "SyncStaging", SafeKey(folder.SyncFolderId)));
+        var safeFile = SafeKey(fileId);
+        var snapshot = new FileInfo(Path.Combine(staging.FullName, safeFile + ".source"));
+        // Hold a read-only shared handle while copying: concurrent writers cannot produce mixed chunks.
+        await using (var source = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true))
+        {
+            if (source.Length != local.Size || File.GetLastWriteTimeUtc(sourcePath).Ticks != local.WriteTicks)
+                throw new IOException("O arquivo mudou antes do envio; será verificado novamente.");
+            await using var destination = new FileStream(snapshot.FullName, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true);
+            await source.CopyToAsync(destination, token);
+        }
+        if (await HashAsync(snapshot.FullName, token) != local.Hash)
+            throw new IOException("O conteúdo mudou durante a preparação; nada foi publicado.");
+        var pending = await _transfers.RecoverableAsync(token);
+        var transfer = pending.FirstOrDefault(t => t.SyncFolderId == folder.SyncFolderId && t.FileId == fileId && t.SyncHash == local.Hash);
+        var count = ArchiveSplitter.GetPartCount(local.Size, EncryptionService.MaximumPlaintextPayloadBytes);
+        if (transfer == null)
+        {
+            transfer = await _transfers.CreateUploadAsync(snapshot, folder.CloudPath, folder.CloudFolderId,
+                AppEntry.File(Path.GetFileName(sourcePath), "", "", local.Size, "/").MimeType,
+                EncryptionService.MaximumPlaintextPayloadBytes, count, token);
+            transfer.FileId = fileId;
+            transfer.FileName = Path.GetFileName(sourcePath);
+            transfer.SyncFolderId = folder.SyncFolderId;
+            transfer.SyncHash = local.Hash;
+            transfer.Encryption = _encryption.CreateFileEncryption(_settings.EncryptionMode);
+            await _transfers.SaveAsync(transfer, token);
+        }
+        var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count);
+        var uploader = new ForumUploader(_api, _settings.AppsForumId);
+        try
+        {
+            var result = await uploader.UploadResumableGeneratedAsync(transfer.FileName, count, async index =>
+            {
+                var offset = (long)index * EncryptionService.MaximumPlaintextPayloadBytes;
+                var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, Math.Max(0, local.Size - offset));
+                var part = new FileInfo(Path.Combine(staging.FullName, safeFile + "-" + index + ".bin"));
+                await _encryption.EncryptFileRangeAsync(snapshot, offset, length, part, encryption.WithChunkIndex(index), token);
+                return new PreparedUploadPart(part, length);
+            }, transfer.ThreadId, transfer.BatchId, transfer.UploadedChunks.ToDictionary(c => c.Index, c => c.MessageId),
+                completed => progress(new(transfer.TransferId, local.RelativePath, "upload", completed * 90d / count, "uploading")),
+                async chunk =>
+                {
+                    transfer.ThreadId = chunk.ThreadId;
+                    transfer.BatchId = chunk.BatchId;
+                    await _transfers.MarkUploadChunkAsync(transfer, chunk.Index, chunk.MessageId, chunk.SizeBytes, token);
+                }, token, _ => { progress(new(transfer.TransferId, local.RelativePath, "upload", 0, "waiting")); return Task.CompletedTask; },
+                maxParallelParts: Math.Clamp(_settings.UploadThreads, 1, 16), uploadGate: _uploadGate, encryptedPayload: encryption,
+                cleanupPart: file => { if (file.Exists) file.Delete(); });
+            if (result.ChunkMessageIds.Count != count || result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace))
+                throw new InvalidDataException("O upload não confirmou todos os chunks.");
+            var payload = new FileMetadata
+            {
+                FileId = fileId, ThreadId = result.ThreadId, Name = transfer.FileName, SizeBytes = local.Size,
+                MimeType = transfer.MimeType, UploadedAt = DateTime.UtcNow.ToString("O"), BatchId = result.BatchId,
+                Chunks = result.ChunkMessageIds.ToList(), Encryption = transfer.Encryption?.Clone()
+            };
+            if (_settings.PreviewEnabled)
+                payload.Preview = await UploadThumbnailAsync(snapshot, payload, staging, token);
+            await uploader.ArchiveThreadAsync(result.ThreadId, token);
+            return payload;
+        }
+        catch (Exception ex)
+        {
+            await _transfers.PauseAsync(transfer, ex, CancellationToken.None);
+            progress(new(transfer.TransferId, local.RelativePath, "upload", 0, "paused"));
+            throw;
+        }
+    }
+
+    public async Task<FileInfo> DownloadAsync(SyncFolderBinding folder, SyncRevision revision, DirectoryInfo staging,
+        CancellationToken token, Action<SyncTransferProgress> progress)
+    {
+        var payload = revision.Payload ?? throw new InvalidDataException("Revisão sem payload.");
+        var entry = _metadata.ToAppEntry(new MetadataEnvelope("", payload)) ?? throw new InvalidDataException("Payload inválido.");
+        entry.Name = "content"; // Neither the metadata name nor a remote path controls the staging filename.
+        var cache = Directory.CreateDirectory(Path.Combine(_store.DataDirectory.FullName, "SyncDownloads",
+            SafeKey(folder.SyncFolderId + "/" + revision.FileId + "/" + revision.Hash)));
+        var transfer = (await _transfers.RecoverableAsync(token)).FirstOrDefault(t => t.TransferType == TransferTypes.Download &&
+            t.SyncFolderId == folder.SyncFolderId && t.FileId == revision.FileId && t.SyncHash == revision.Hash && t.ThreadId == payload.ThreadId)
+            ?? await _transfers.CreateDownloadAsync(entry, cache, token);
+        transfer.DestinationPath = cache.FullName;
+        transfer.SyncFolderId = folder.SyncFolderId;
+        transfer.SyncHash = revision.Hash;
+        await _transfers.SaveAsync(transfer, token);
+        try
+        {
+            var downloader = new ForumDownloader(_api, _settings, _encryption, _downloadClients);
+            var file = await downloader.DownloadAndAssembleAsync(entry, cache, transfer, _transfers, _ => { }, token,
+                p => progress(new(transfer.TransferId, revision.RelativePath, "download", p.TotalBytes > 0 ? 100d * p.DownloadedBytes / p.TotalBytes : 0, "downloading")));
+            if (file.Length != revision.SizeBytes || await HashAsync(file.FullName, token) != revision.Hash)
+                throw new InvalidDataException("O download não passou na validação de tamanho/SHA-256.");
+            var candidate = new FileInfo(Path.Combine(staging.FullName, "content"));
+            await using (var input = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true))
+            await using (var output = new FileStream(candidate.FullName, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
+                await input.CopyToAsync(output, token);
+            await _transfers.CompleteAsync(transfer, _settings.KeepTransferHistory, token);
+            cache.Delete(true);
+            progress(new(transfer.TransferId, revision.RelativePath, "download", 100, "completed"));
+            return candidate;
+        }
+        catch (Exception ex)
+        {
+            await _transfers.PauseAsync(transfer, ex, CancellationToken.None);
+            progress(new(transfer.TransferId, revision.RelativePath, "download", 0, "paused"));
+            throw;
+        }
+    }
+
+    public async Task CompleteUploadAsync(SyncFolderBinding folder, string fileId, string hash, CancellationToken token,
+        Action<SyncTransferProgress>? progress = null)
+    {
+        var pending = (await _transfers.RecoverableAsync(token)).Where(t => t.TransferType == TransferTypes.Upload &&
+            t.SyncFolderId == folder.SyncFolderId && t.FileId == fileId).ToList();
+        foreach (var transfer in pending.Where(t => t.SyncHash == hash))
+        {
+            await _transfers.CompleteAsync(transfer, _settings.KeepTransferHistory, token);
+            progress?.Invoke(new(transfer.TransferId, transfer.FileName, "upload", 100, "completed"));
+            if (File.Exists(transfer.SourcePath)) File.Delete(transfer.SourcePath);
+        }
+        if (pending.All(t => t.SyncHash == hash)) return;
+        var referenced = (await ReadAsync(folder, token)).Revisions.Select(r => r.Payload?.ThreadId).ToHashSet();
+        foreach (var obsolete in pending.Where(t => t.SyncHash != hash))
+        {
+            if (!string.IsNullOrWhiteSpace(obsolete.ThreadId) && !referenced.Contains(obsolete.ThreadId))
+                await _api.DeleteChannelAsync(obsolete.ThreadId, token);
+            await _transfers.CancelAsync(obsolete, _settings.KeepTransferHistory, false, token);
+        }
+    }
+
+    private async Task CleanupAsync(SyncFolderBinding folder, CancellationToken token)
+    {
+        var snapshot = await ReadAsync(folder, token);
+        var heads = snapshot.Heads.Values.SelectMany(h => h).ToList();
+        var protectedIds = heads.Select(h => h.RevisionId).Concat(heads.SelectMany(h => h.Parents)).ToHashSet();
+        // No cross-device lock is assumed. Never delete a conflict head or its immediate base.
+        var candidates = snapshot.Revisions.Where(r => !protectedIds.Contains(r.RevisionId)).ToList();
+        if (candidates.Count == 0) return;
+        var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+        var retainedThreads = snapshot.Revisions.Except(candidates).Select(r => r.Payload?.ThreadId).Where(t => t != null).ToHashSet();
+        foreach (var revision in candidates)
+        {
+            token.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(revision.MessageId)) continue;
+            // Remove the obsolete journal first. A failed payload cleanup leaves an orphan, not data loss.
+            await _api.DeleteMessageAsync(mapping.ThreadId, revision.MessageId, token);
+            await _journalGate.WaitAsync(token);
+            try { _journals[folder.SyncFolderId].Revisions.Remove(revision.RevisionId); }
+            finally { _journalGate.Release(); }
+            var thread = revision.Payload?.ThreadId;
+            if (!string.IsNullOrWhiteSpace(thread) && !retainedThreads.Contains(thread))
+                await _api.DeleteChannelAsync(thread, token);
+        }
+        var applied = _journals[folder.SyncFolderId].Applied;
+        foreach (var marker in applied.Where(p => !protectedIds.Contains(p.Key)).ToList())
+        {
+            await _api.DeleteMessageAsync(mapping.ThreadId, marker.Value, token);
+            applied.Remove(marker.Key);
+        }
+    }
+
+    private async Task<SyncRevision?> ReadRevisionAsync(DiscordMessageDto message, CancellationToken token)
+    {
+        string json;
+        if (message.Content.TrimStart().StartsWith('{')) json = message.Content;
+        else if (message.Content.StartsWith("syncRevision:", StringComparison.Ordinal))
+        {
+            var attachment = message.Attachments.SingleOrDefault(a => a.FileName == "sync-revision.json");
+            if (attachment == null || attachment.Size > MetadataService.MaxMetadataBytes)
+                throw new InvalidDataException("Anexo da revisão ausente ou grande demais.");
+            json = Encoding.UTF8.GetString(await _api.DownloadAttachmentBytesAsync(attachment, token));
+        }
+        else return null;
+        using var document = JsonDocument.Parse(json);
+        if (!document.RootElement.TryGetProperty("entryType", out var type) || type.GetString() != "syncRevision") return null;
+        var result = JsonSerializer.Deserialize<SyncRevision>(json, SyncJson.Options) ?? throw new InvalidDataException("Revisão inválida.");
+        result.MessageId = message.Id;
+        return result;
+    }
+
+    private async Task<PreviewMetadata?> UploadThumbnailAsync(FileInfo source, FileMetadata payload, DirectoryInfo directory, CancellationToken token)
+    {
+        if (!payload.MimeType.StartsWith("image/") && !payload.MimeType.StartsWith("video/")) return null;
+        var safeFile = SafeKey(payload.FileId);
+        var thumbnail = new FileInfo(Path.Combine(directory.FullName, safeFile + "-preview.jpg"));
+        try
+        {
+            // Shell thumbnail is native and does not initialize WPF/WebView2.
+            var extension = Path.GetExtension(Path.GetFileName(payload.Name));
+            if (extension.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+            var named = new FileInfo(Path.Combine(directory.FullName, safeFile + extension));
+            File.Move(source.FullName, named.FullName, true);
+            try
+            {
+                var storage = await StorageFile.GetFileFromPathAsync(named.FullName);
+                using var image = await storage.GetThumbnailAsync(ThumbnailMode.SingleItem, 320, ThumbnailOptions.ResizeThumbnail).AsTask(token);
+                if (image == null || image.Type != ThumbnailType.Image || image.Size == 0) return null;
+                await using var input = image.AsStreamForRead();
+                await using var output = thumbnail.Create();
+                await input.CopyToAsync(output, token);
+            }
+            finally { File.Move(named.FullName, source.FullName, true); }
+            var context = new EncryptedPayloadContext(payload.FileId, payload.Encryption!, EncryptedPayloadRoles.Preview, 0, 1);
+            using var encrypted = await _encryption.StageFilesAsync([thumbnail], payload.FileId, payload.Encryption!, EncryptedPayloadRoles.Preview, token);
+            await _api.UnarchiveThreadAsync(payload.ThreadId, token);
+            var message = await _api.SendFileMessageAsync(payload.ThreadId, EncryptedPayloadProtocol.Message(context, 1), encrypted.Files[0], token);
+            return new PreviewMetadata { ThumbnailMessageId = message.Id };
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; } // A missing thumbnail never invalidates the original upload.
+        finally { if (thumbnail.Exists) thumbnail.Delete(); }
+    }
+
+    internal static async Task<string> HashAsync(string path, CancellationToken token)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true);
+        return Convert.ToHexString(await SHA256.HashDataAsync(stream, token)).ToLowerInvariant();
+    }
+
+    private static void ValidateRevision(SyncRevision revision)
+    {
+        SyncPaths.Relative(revision.RelativePath);
+        if (revision.SyncVersion != 1 || revision.SchemaVersion != 2 || revision.EntryType != "syncRevision" ||
+            !SafeIdentity(revision.FileId) || !SafeIdentity(revision.SyncFolderId) || !SafeIdentity(revision.DeviceId) ||
+            !Guid.TryParseExact(revision.RevisionId, "N", out _) || revision.Revision < 1 ||
+            revision.Parents == null || revision.Parents.Count > 256 || revision.Parents.Contains(revision.RevisionId) ||
+            revision.Parents.Distinct().Count() != revision.Parents.Count || revision.Parents.Any(p => !Guid.TryParseExact(p, "N", out _)) ||
+            revision.State is not ("active" or "deleted") ||
+            revision.Kind is not ("file" or "directory") || revision.SizeBytes < 0 ||
+            !DateTimeOffset.TryParse(revision.ModifiedUtc, out var modified) || modified.Offset != TimeSpan.Zero ||
+            (revision.IsDeleted && (!DateTimeOffset.TryParse(revision.DeletedUtc, out var deleted) || deleted.Offset != TimeSpan.Zero)) ||
+            (!revision.IsDeleted && revision.Kind == "file" && (revision.Hash?.Length != 64 || revision.Hash.Any(c => !Uri.IsHexDigit(c)) || revision.Payload?.FileId != revision.FileId ||
+                revision.Payload.SizeBytes != revision.SizeBytes || revision.Payload.Chunks?.Count is not > 0)))
+            throw new InvalidDataException("Metadata de sincronização inválido; os arquivos locais foram preservados.");
+    }
+
+    private static bool SafeIdentity(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
+        value.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
+    private static string SafeKey(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+    private static ulong Snowflake(string id) => ulong.TryParse(id, out var value) ? value : 0;
+    private sealed class JournalCache
+    {
+        public ulong Frontier;
+        public Dictionary<string, SyncRevision> Revisions { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, string> Applied { get; } = new(StringComparer.Ordinal);
+    }
+
+    public void Dispose()
+    {
+        if (_ownsApi) _api.Dispose();
+        _uploadGate.Dispose();
+        _journalGate.Dispose();
+        _projectionGate.Dispose();
+    }
+}

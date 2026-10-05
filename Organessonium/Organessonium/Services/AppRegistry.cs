@@ -322,6 +322,13 @@ public sealed partial class AppRegistry
             var children = byParent.TryGetValue(current.FolderId, out var found)
                 ? found
                 : [];
+            if (_mappings.TryGetValue(current.FolderId, out var indexed))
+            {
+                var indexedMessages = await _discord.GetMessagesInParallelAsync(indexed.ThreadId, _settings.SearchWorkers, cancellationToken);
+                var indexedMetadata = await _metadata.ReadEnvelopesInParallelAsync(indexedMessages, _settings.SearchWorkers, cancellationToken);
+                children = children.Concat(_metadata.ToFolderEntries(indexedMetadata, current.FolderId, current.Path, MappingSnapshot()))
+                    .GroupBy(EntryIdentity, StringComparer.OrdinalIgnoreCase).Select(group => group.Last()).ToList();
+            }
             foreach (var child in children)
             {
                 child.Path = current.Path;
@@ -1259,7 +1266,8 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken)
     {
         var groups = parentEntries
-            .Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId))
+            .Where(entry => entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId) &&
+                            entry.Sync == null && entry.SyncDevice == null)
             .GroupBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase)
             .Where(group => group.Count() > 1)
             .ToList();

@@ -13,6 +13,14 @@ public abstract class MetadataEntry
     [JsonPropertyName("trash")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public TrashMetadata? Trash { get; set; }
+
+    [JsonPropertyName("sync")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SyncMetadata? Sync { get; set; }
+
+    [JsonPropertyName("syncDevice")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SyncDeviceMetadata? SyncDevice { get; set; }
 }
 
 public sealed class TrashMetadata

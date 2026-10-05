@@ -55,8 +55,11 @@ public partial class MainWindow : Window
     private const int DropEffectCopy = 1;
     private const short CfHdrop = 15;
 
-    public MainWindow()
+    public MainWindow() : this(null) { }
+
+    internal MainWindow(SettingsStore? store)
     {
+        _store = store!;
         InitializeComponent();
         ContentRendered += OnContentRendered;
         Closing += OnClosing;
@@ -80,7 +83,7 @@ public partial class MainWindow : Window
 
         var startupState = await Task.Run(() =>
         {
-            var store = new SettingsStore();
+            var store = _store ?? new SettingsStore();
             return (Store: store, Settings: store.Load());
         });
         _store = startupState.Store;
@@ -336,6 +339,7 @@ public partial class MainWindow : Window
 
         e.Cancel = true;
         _shutdownInProgress = true;
+        if (Application.Current is App app && app.KeepBackgroundOnClose) Hide();
         SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
         RemoveShellDropSupport();
         try
@@ -352,8 +356,10 @@ public partial class MainWindow : Window
         }
         finally
         {
+            WebView.Dispose();
             Closing -= OnClosing;
             Close();
+            if (Application.Current is App desktopApp) desktopApp.WindowReleased(this);
         }
     }
 
@@ -391,6 +397,7 @@ public partial class MainWindow : Window
     }
     private void OnWebViewProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
     {
+        if (_shutdownInProgress) return;
         AppLogger.Error(
             "WebView.ProcessFailed",
             new InvalidOperationException("WebView2 process failed: " + e.ProcessFailedKind));

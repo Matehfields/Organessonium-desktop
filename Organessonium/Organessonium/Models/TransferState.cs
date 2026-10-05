@@ -33,6 +33,13 @@ public static class TransferTypes
 
 public sealed class TransferState
 {
+    [JsonPropertyName("syncFolderId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SyncFolderId { get; set; }
+
+    [JsonPropertyName("syncHash")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SyncHash { get; set; }
     [JsonPropertyName("transferId")]
     public string TransferId { get; set; } = Guid.NewGuid().ToString("N");
 

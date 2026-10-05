@@ -73,6 +73,14 @@ public sealed class AppEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public TrashMetadata? Trash { get; set; }
 
+    [JsonPropertyName("sync")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SyncMetadata? Sync { get; set; }
+
+    [JsonPropertyName("syncDevice")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SyncDeviceMetadata? SyncDevice { get; set; }
+
     public static AppEntry File(string name, string threadId, string uploadedAt, long sizeBytes, string? path)
     {
         return new AppEntry

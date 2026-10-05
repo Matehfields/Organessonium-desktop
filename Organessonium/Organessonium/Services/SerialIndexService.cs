@@ -729,6 +729,8 @@ public sealed class SerialIndexService
             Path = source.Path,
             FolderColor = source.FolderColor,
             DeviceType = source.DeviceType,
+            Sync = source.Sync,
+            SyncDevice = source.SyncDevice,
             Favorite = source.Favorite,
             Type = source.Type,
             MimeType = source.MimeType,
