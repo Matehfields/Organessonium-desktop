@@ -1,6 +1,6 @@
 # Organessonium Development Compatibility / Migration
 
-Inventário técnico do desktop C# durante desenvolvimento. Não é autorização para remover funcionalidades. Código atual é a referência; nenhum item abaixo foi removido nesta tarefa. Ao adicionar fallback/parser/alias temporário, registrar ID, motivo, comportamento, condição e procedimento de remoção aqui.
+Inventário técnico compartilhado do desktop C# e do cliente Flutter durante desenvolvimento. Não é autorização para remover funcionalidades. Código atual é a referência; nenhum item abaixo foi removido nesta tarefa. Ao adicionar fallback/parser/alias temporário, registrar ID, motivo, comportamento, condição e procedimento de remoção aqui.
 
 ## Compatibilidades atuais
 
@@ -15,6 +15,8 @@ Introduzido por: Encrypted metadata V1.
 Motivo: Abrir dados de desenvolvimento anteriores.
 
 Código relacionado: MetadataCodec.Decode; MetadataService.ReadJsonPayloadAsync/ReadEnvelopeAsync.
+
+Flutter: MetadataCodec.decode e MetadataService.readJsonMessage leem JSON legado e escrevem somente envelope V1, sem migração na leitura.
 
 Comportamento atual: Leitura automática; escrita remota nova somente cifrada; migração apenas ao modificar e salvar.
 
@@ -36,6 +38,8 @@ Motivo: Ler seriais existentes sem republicar ao abrir.
 
 Código relacionado: SerialMetadataTransport.Decode; SerialIndexService.ReadCachedFolderAsync/LoadFolderAsync/LoadStandaloneSerialAsync.
 
+Flutter: SerialMetadataTransport.decode e FolderSerialRepository conservam bytes/hash de OSER legado sem converter ao abrir; SerialIndexService reutiliza bytes quando o conteúdo não mudou.
+
 Comportamento atual: OSER bruto é lido; novas gravações usam folderSerialData cifrado. Conteúdo inalterado conserva transporte/digest anterior.
 
 Pode ser removido quando: Seriais antigos da conta e dos caches tiverem sido substituídos ou descartados deliberadamente.
@@ -55,6 +59,8 @@ Introduzido por: Anterior à tarefa.
 Motivo: V1 não traz dispositivos/encryption; v2 traz dispositivos; v4 experimental traz tamanho individual.
 
 Código relacionado: FolderSerialCodec.DecodeFolder/ReadEncryption; CurrentVersion e PublishedVersion.
+
+Flutter: FolderSerialCodec lê v1-v4 e publica v3. V3 não carrega tamanho individual; mutações incrementais recebem metadados completos conhecidos para ajustar os agregados.
 
 Comportamento atual: Publicação interna v3; leitura v1-v4. Versões futuras desconhecidas falham.
 
@@ -76,6 +82,8 @@ Motivo: Dados anteriores não expressavam completamente a hierarquia.
 
 Código relacionado: MetadataService.ToFolderEntries/NormalizeParentId/NormalizeFolderParentId; SerialIndexService.MaterializeEntries; AppRegistry.NormalizeFolderId.
 
+Flutter: MetadataEntry e materialização dos seriais conservam normalização do pai legado; metadados novos mantêm schemaVersion 2.
+
 Comportamento atual: Thread de índice define associação direta; raiz normalizada; favoritos podem preservar pai original.
 
 Pode ser removido quando: Todos os metadados/seriais necessários tiverem relação explícita correta.
@@ -95,6 +103,8 @@ Introduzido por: Anterior à tarefa.
 Motivo: Galerias/dados produzidos antes dos índices hierárquicos atuais.
 
 Código relacionado: AppRegistry.LoadFileDetailsAsync/ReadStandaloneMetadataEntriesAsync/SetFavoriteAsync; MetadataService.ReadEnvelopeAsync.
+
+Flutter: DiscordRestStorageService._readTrashMetadata conserva a localização alternativa names para referências antigas e valida identidade. Alterações preservam extensões do JSON remoto e não fazem fallback em falhas criptográficas.
 
 Comportamento atual: Lê names ou índice do pai e valida identidade; favorito pode editar o registro names existente, agora cifrado.
 
@@ -116,6 +126,8 @@ Motivo: Localizar seriais antigos pelos IDs técnicos e digest.
 
 Código relacionado: SerialMessageEnvelope.TryParse/Encode/FolderNameForMessage; SerialIndexService.
 
+Flutter: A REST autentica a legenda antes de SerialMessageEnvelope.tryParse. Publicações novas omitem folderName e cifram a legenda; o checksum cobre o anexo transportado completo.
+
 Comportamento atual: Caption antigo é aceito; caption publicado é cifrado, sem nome redundante fora do anexo.
 
 Pode ser removido quando: Captions plaintext antigos não forem mais necessários.
@@ -135,6 +147,8 @@ Introduzido por: Anterior à tarefa.
 Motivo: Dispositivos existentes podem depender apenas de synchronized/favorites no canal serial.
 
 Código relacionado: AppRegistry.LoadSynchronizedDevicesAsync/RebuildSynchronizedSerialsAsync/LoadSynchronizedDevicesFromSerialAsync; SerialIndexService.LoadStandaloneSerialAsync.
+
+Flutter: A árvore synchronized e os índices existentes passam pelo mesmo transporte autenticado; não se inventa migração por nome de post.
 
 Comportamento atual: Preserva galerias e índices globais; evita publicar synchronized vazio por ausência de metadados antigos.
 
@@ -156,6 +170,8 @@ Motivo: Não recriptografar conteúdo antigo nem misturar chunks no meio de uma 
 
 Código relacionado: ForumDownloader (entry.Encryption ausente); AppController.UploadSingleAsync preserveLegacyTransfer; VideoChunkIndex/DiscordVideoChunkProvider.
 
+Flutter: Download e streaming conservam payloads sem encryption e ORGAESGC v1; a mudança do envelope de metadados não recriptografa partes existentes.
+
 Comportamento atual: Leitura mantém caminho plaintext de conteúdo; retomada antiga pode completar conteúdo com mesmo layout. Metadados/rótulos novos são cifrados.
 
 Pode ser removido quando: Não houver payloads plaintext necessários nem checkpoints antigos recuperáveis.
@@ -175,6 +191,8 @@ Introduzido por: Leitores anteriores; payloadReference cifrado nesta tarefa.
 Motivo: Ler mensagens antigas sem alterar os bytes ORGAESGC.
 
 Código relacionado: MetadataService.DecodePayloadReference; ForumDownloader.GetPayloadMessagesAsync/GetPayloadMessageAsync/DecodeReference; EncryptedPayloadProtocol.TryParse.
+
+Flutter: A REST autentica payloadReference e entrega o content original aos leitores de partes. Rótulos plaintext anteriores permanecem legíveis.
 
 Comportamento atual: Mensagem nova encapsula o rótulo em JSON cifrado; texto antigo segue para parsers atuais.
 
@@ -196,6 +214,8 @@ Motivo: Metadados antigos não traziam IDs explícitos de todas as mensagens.
 
 Código relacionado: ForumDownloader.CollectPartsAsync/TryReadPartInfo/ResolveMessagePartsAsync e overload DownloadAndAssembleAsync(threadId,...).
 
+Flutter: A descoberta histórica por batch/partes permanece no backend; novas labels são cifradas sem mudar identidade e ordenação das partes.
+
 Comportamento atual: Pode reconstruir lote antigo; metadados cifrados de conteúdo exigem contexto e referências apropriadas.
 
 Pode ser removido quando: Todos os arquivos necessários tiverem chunks explícitos validados.
@@ -216,6 +236,8 @@ Motivo: Dados de outras versões de desenvolvimento usam marcadores diferentes.
 
 Código relacionado: ForumDownloader: DartPreviewPrefix, DartVideoPreviewPrefix, IsPreviewMessage, CollectPreviewPartsAsync.
 
+Flutter: Os leitores de labels e a hidratação de previews mantêm os aliases existentes após autenticação, sem escrever novos prefixos legados.
+
 Comportamento atual: Lê marcadores anteriores; transportes novos podem cifrar seus rótulos antes da mesma interpretação.
 
 Pode ser removido quando: Nenhum arquivo necessário depender dessas mensagens.
@@ -235,6 +257,8 @@ Introduzido por: Anterior à tarefa.
 Motivo: Previews antigos cabiam em uma mensagem ou cache antigo só guardava o primeiro ID.
 
 Código relacionado: MetadataService.CreatePreviewMetadata; SettingsStore.ReadCachedEntries; AppEntry campos de preview; ForumDownloader.
+
+Flutter: MetadataService.fileMetadataFromFile normaliza o vídeo single-message para chunks; metadados existentes e histórico continuam legíveis.
 
 Comportamento atual: Reconstrói lista quando há ID único; novo metadata usa preview.video480p.chunks e tamanho quando conhecidos.
 
@@ -275,6 +299,8 @@ Introduzido por: Diário anterior; transporte V1 agora.
 Motivo: Manter pastas sincronizadas e checkpoints existentes.
 
 Código relacionado: CloudSyncRepository.ReadAsync/ReadRevisionAsync/ReadRevisionDocument; MetadataService.ReadJsonAsync.
+
+Flutter: O codec entende JSON autenticado, mas o cliente móvel usa backup de galeria e não implementa o diário de sincronização de diretórios do desktop. Nenhum protocolo de revisão novo foi criado.
 
 Comportamento atual: Revisões antigas são decodificadas como legado; marcador textual é lido; novas revisões/confirmações são cifradas.
 
@@ -336,6 +362,8 @@ Motivo: Model/clone/binário ainda preservam esse campo, mas a derivação atual
 
 Código relacionado: EncryptionMetadata.KeyId/Clone; FolderSerialCodec.ReadEncryption/WriteEncryption; MetadataService.
 
+Flutter: EncryptionMetadata aceita custom sem keyId e usa a master ativa. Um keyId explícito ainda exige a chave histórica correspondente; não há tentativa silenciosa com outra chave.
+
 Comportamento atual: Campo é preservado quando existe; sem decisão de remover slot binário.
 
 Pode ser removido quando: Semântica histórica e consumidores externos forem conhecidos.
@@ -396,6 +424,8 @@ Motivo: Compatibilidade entre instalações e acesso a conteúdo existente.
 
 Código relacionado: DefaultEncryptionKeyProvider.GetMasterKey; CustomEncryptionKeyProvider.ConfigureFromPassphrase/ImportAsync/ExportAsync; MetadataCodec.
 
+Flutter: StandardMasterKeyProvider conserva o bootstrap exato. Novas masters usam PBKDF2 do desktop; mestres antigos derivados por Argon2id permanecem armazenados. OEK1 é escrito/importado; ORGKEY antigo continua somente na importação, sem rederivação.
+
 Comportamento atual: Metadata reutiliza os mesmos provedores com domínio HKDF distinto. Standard não oferece segredo exclusivo; OEK1 contém M.
 
 Pode ser removido quando: Nova política de chave e recuperação estiver definida e dados dependentes tiverem plano de migração.
@@ -403,6 +433,24 @@ Pode ser removido quando: Nova política de chave e recuperação estiver defini
 Impacto da remoção: Trocar/remover M quebra arquivos e metadados standard/custom antigos.
 
 Procedimento para remoção: Não alterar constantes ou KDF implicitamente; versionar seleção/bootstrap/recovery, garantir exportação autorizada e acesso a dados anteriores antes de substituir.
+
+### INDEX-LEGACY-001
+
+Status: ativo no Flutter
+
+Descrição: Manifesto agregado folderIndex schemaVersion 1 publicado por versões móveis anteriores.
+
+Motivo: Preservar a localização de pastas existentes sem migrar ao abrir.
+
+Código relacionado: DiscordRestStorageService._readFolderIndex/_mutateFolderIndex; FolderIndexManifest.fromJson.
+
+Comportamento atual: Leitura legada; uma alteração efetiva publica mappings v2 cifrados antes de retirar o manifesto. Não escreve um novo manifesto v1 e não transforma a navegação em varredura global de arquivos.
+
+Pode ser removido quando: Todos os servidores dependentes tiverem mappings v2 confirmados.
+
+Impacto da remoção: Índices móveis antigos deixam de localizar seus threads.
+
+Procedimento para remoção: Confirmar a conversão dos mappings sem remover payloads/seriais; retirar somente o parser e o ramo de conversão explícita, manter erros criptográficos e testes de mappings v2.
 
 ## Fronteiras e itens que não são dívida automaticamente
 
