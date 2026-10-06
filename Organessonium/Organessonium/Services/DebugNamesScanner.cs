@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -10,7 +11,7 @@ public sealed class DebugNamesScanner
     private readonly DiscordApiClient _discord;
     private readonly SettingsStore _store;
     private readonly AppSettings _settings;
-    private readonly MetadataService _metadata = new();
+    private readonly MetadataService _metadata;
     private readonly int _parallelWorkers;
 
     public enum Verdict { Accepted, Skipped }
@@ -38,6 +39,7 @@ public sealed class DebugNamesScanner
         _discord = discord;
         _store = store;
         _settings = settings;
+        _metadata = new MetadataService(MetadataCodec.ForStore(store), discord.DownloadAttachmentBytesAsync);
         _parallelWorkers = Math.Clamp(settings.SearchWorkers, 1, 8);
     }
 
@@ -340,7 +342,7 @@ public sealed class DebugNamesScanner
 
         sb.AppendLine("--- IGNORADAS POR MOTIVO (inline motivo | anexo motivo) ---");
         foreach (var group in skipped
-                     .GroupBy(r => NormalizeReasonGroup(r.Reason))
+                     .GroupBy(r => r.Source.Length == 0 ? "não reconhecido" : "tipo reconhecido")
                      .OrderByDescending(g => g.Count()))
         {
             sb.AppendLine($"{group.Count(),4}  {group.Key}");
@@ -351,14 +353,14 @@ public sealed class DebugNamesScanner
         sb.AppendLine("id | authorBot | schema | entryType | motivo | cache | content | anexos");
         foreach (var r in skipped.OrderBy(r => r.Id))
         {
-            sb.AppendLine($"{r.Id} | bot={r.AuthorIsBot} | schema={r.SchemaVersion} | entryType={r.EntryType} | {r.Reason} | {r.CacheStatus} | {r.ContentPreview} | anexos=[{r.AttachmentNames}]");
+            sb.AppendLine($"{r.Id} | bot={r.AuthorIsBot} | schema={r.SchemaVersion} | conteúdo omitido");
         }
 
         sb.AppendLine();
         sb.AppendLine("--- DETALHE DE CADA MENSAGEM ACEITA (id | tipo | nome) ---");
         foreach (var r in accepted.OrderBy(r => r.Id))
         {
-            sb.AppendLine($"{r.Id} | {r.EntryType} | {r.EntryName} | {r.CacheStatus}");
+            sb.AppendLine($"{r.Id} | schema={r.SchemaVersion} | conteúdo omitido");
         }
 
         sb.AppendLine();
@@ -370,35 +372,16 @@ public sealed class DebugNamesScanner
         sb.AppendLine($"no banco mas ausentes no scan atual: {inCacheNotInScan.Count}");
         foreach (var id in inCacheNotInScan)
         {
-            var mapping = cached[id];
-            sb.AppendLine($"  {id} | {mapping.FolderId} -> {mapping.ThreadId}");
+            sb.AppendLine($"  {id}");
         }
 
         sb.AppendLine($"no scan atual mas ausentes no banco: {inScanNotInCache.Count}");
         foreach (var id in inScanNotInCache)
         {
-            var result = accepted.First(r => r.Id == id);
-            sb.AppendLine($"  {id} | {result.EntryType} | {result.EntryName}");
+            sb.AppendLine($"  {id}");
         }
 
         return sb.ToString();
-    }
-
-    private static string NormalizeReasonGroup(string reason)
-    {
-        var inline = reason;
-        var anexo = "";
-        var separator = reason.IndexOf(" | anexo: ", StringComparison.Ordinal);
-        if (separator >= 0)
-        {
-            inline = reason[..separator];
-            anexo = reason[(separator + 10)..];
-        }
-
-        var inlineGroup = inline.StartsWith("inline:", StringComparison.Ordinal)
-            ? inline[7..]
-            : inline;
-        return $"{inlineGroup} | {anexo}".Trim();
     }
 
     private static string Preview(string value, int max)

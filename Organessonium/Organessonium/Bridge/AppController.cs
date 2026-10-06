@@ -2340,7 +2340,7 @@ public sealed partial class AppController : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var settings = _store.Load();
-        var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
+        var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
         var registry = Registry();
         var entrySnapshot = allEntries.ToList();
         var uploadedEntries = new ConcurrentDictionary<int, AppEntry>();
@@ -3004,8 +3004,8 @@ public sealed partial class AppController : IAsyncDisposable
                     previewMessageId = await uploader.UploadPreviewFileToThreadAsync(
                         threadId,
                         previewEncryption == null
-                            ? "PREVIEW|" + StripExtension(name)
-                            : EncryptedPayloadProtocol.Message(previewEncryption, 1),
+                            ? PayloadReference("PREVIEW|" + StripExtension(name))
+                            : PayloadMessage(previewEncryption, 1),
                         encryptedPreview?.Files[0] ?? generated,
                         cancellationToken,
                         onRateLimitWait: onRateLimitWait);
@@ -3354,8 +3354,8 @@ public sealed partial class AppController : IAsyncDisposable
             var messageId = await uploader.UploadPreviewFileToThreadAsync(
                 threadId,
                 previewEncryption == null
-                    ? "PREVIEW|" + StripExtension(originalName)
-                    : EncryptedPayloadProtocol.Message(previewEncryption, 1),
+                    ? PayloadReference("PREVIEW|" + StripExtension(originalName))
+                    : PayloadMessage(previewEncryption, 1),
                 encryptedThumbnail?.Files[0] ?? thumbnail,
                 cancellationToken,
                 onRateLimitWait: onRateLimitWait);
@@ -4073,7 +4073,7 @@ public sealed partial class AppController : IAsyncDisposable
                     encryption,
                     EncryptedPayloadRoles.Original);
                 var encryptedPayload = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.Original, 0);
-                var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
+                var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
                 var canReuseThread = !string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal);
                 ForumUploadResult uploadResult;
                 try
@@ -4296,7 +4296,7 @@ public sealed partial class AppController : IAsyncDisposable
                 EncryptedPayloadRoles.MarkdownImage);
             message = await api.SendFileMessageAsync(
                 threadId,
-                EncryptedPayloadProtocol.Message(context, 1),
+                PayloadMessage(context, 1),
                 staged.Files[0]);
         }
         finally
@@ -4877,7 +4877,7 @@ public sealed partial class AppController : IAsyncDisposable
         var settings = _store.Load();
         var registry = Registry();
         var all = CurrentLocalEntries();
-        var uploader = new ForumUploader(RequireApi(), settings.AppsForumId);
+        var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
         var throttle = new UiThrottle();
         var resumed = 0;
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

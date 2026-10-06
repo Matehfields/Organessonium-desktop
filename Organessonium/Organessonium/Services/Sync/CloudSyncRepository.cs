@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 using Windows.Storage;
 using Windows.Storage.FileProperties;
 
@@ -38,7 +39,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
     private readonly DiscordApiClient _api;
     private readonly bool _ownsApi;
     private readonly AppRegistry _registry;
-    private readonly MetadataService _metadata = new();
+    private readonly MetadataService _metadata;
     private readonly EncryptionService _encryption;
     private readonly TransferManager _transfers;
     private readonly Dictionary<string, JournalCache> _journals = new(StringComparer.OrdinalIgnoreCase);
@@ -55,6 +56,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         _settings = settings.Clone();
         _ownsApi = api == null;
         _api = api ?? new DiscordApiClient(settings.BotToken);
+        _metadata = new MetadataService(MetadataCodec.ForStore(store), _api.DownloadAttachmentBytesAsync);
         _registry = new AppRegistry(_api, store, settings);
         _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
         _transfers = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
@@ -93,7 +95,15 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                     cache.Applied[message.Content[12..]] = message.Id;
                     continue;
                 }
-                var revision = await ReadRevisionAsync(message, token);
+                using var record = await _metadata.ReadJsonAsync(message, token);
+                if (record?.RootElement.TryGetProperty("entryType", out var type) == true && type.GetString() == "syncApplied")
+                {
+                    if (!record.RootElement.TryGetProperty("revisionId", out var id) || !Guid.TryParseExact(id.GetString(), "N", out _))
+                        throw new MetadataCodecException(MetadataError.MissingField);
+                    cache.Applied[id.GetString()!] = message.Id;
+                    continue;
+                }
+                var revision = ReadRevisionDocument(record, message.Id);
                 if (revision != null)
                 {
                     if (revision.SyncFolderId != folder.SyncFolderId || revision.SyncVersion != 1 || revision.SchemaVersion != 2)
@@ -132,7 +142,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             throw new SyncConcurrencyException();
         var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
         await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
-        var json = JsonSerializer.Serialize(revision, SyncJson.Options);
+        var json = _metadata.EncodeJson(JsonSerializer.Serialize(revision, SyncJson.Options));
         DiscordMessageDto message;
         if (json.Length <= DiscordLimits.MessageContentCharacters)
             message = await _api.CreateMessageAsync(mapping.ThreadId, json, token);
@@ -142,8 +152,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             try
             {
                 var file = new FileInfo(Path.Combine(temporary.FullName, "sync-revision.json"));
-                await File.WriteAllTextAsync(file.FullName, json, Encoding.UTF8, token);
-                message = await _api.SendFileMessageAsync(mapping.ThreadId, "syncRevision:" + revision.RevisionId, file, token);
+                await File.WriteAllTextAsync(file.FullName, json, MetadataCryptoParameters.Utf8, token);
+                message = await _api.SendFileMessageAsync(mapping.ThreadId, "metadata", file, token);
             }
             finally { temporary.Delete(true); }
         }
@@ -180,7 +190,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                 await _registry.RemoveSyncProjectionAsync(folder, prior, token);
             var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
             await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
-            var marker = await _api.CreateMessageAsync(mapping.ThreadId, "syncApplied:" + revision.RevisionId, token);
+            var marker = await _api.CreateMessageAsync(mapping.ThreadId, _metadata.EncodeJson(JsonSerializer.Serialize(new
+                { schemaVersion = 1, entryType = "syncApplied", revisionId = revision.RevisionId }, JsonOptions.Web)), token);
             cache.Applied[revision.RevisionId] = marker.Id;
             await _api.ArchiveThreadAsync(mapping.ThreadId, token);
             TreeChanged?.Invoke(parentId);
@@ -221,7 +232,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             await _transfers.SaveAsync(transfer, token);
         }
         var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count);
-        var uploader = new ForumUploader(_api, _settings.AppsForumId);
+        var uploader = new ForumUploader(_api, _settings.AppsForumId, MetadataCodec.ForStore(_store));
         try
         {
             var result = await uploader.UploadResumableGeneratedAsync(transfer.FileName, count, async index =>
@@ -355,20 +366,16 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
 
     private async Task<SyncRevision?> ReadRevisionAsync(DiscordMessageDto message, CancellationToken token)
     {
-        string json;
-        if (message.Content.TrimStart().StartsWith('{')) json = message.Content;
-        else if (message.Content.StartsWith("syncRevision:", StringComparison.Ordinal))
-        {
-            var attachment = message.Attachments.SingleOrDefault(a => a.FileName == "sync-revision.json");
-            if (attachment == null || attachment.Size > MetadataService.MaxMetadataBytes)
-                throw new InvalidDataException("Anexo da revisão ausente ou grande demais.");
-            json = Encoding.UTF8.GetString(await _api.DownloadAttachmentBytesAsync(attachment, token));
-        }
-        else return null;
-        using var document = JsonDocument.Parse(json);
+        using var document = await _metadata.ReadJsonAsync(message, token);
+        return ReadRevisionDocument(document, message.Id);
+    }
+
+    private static SyncRevision? ReadRevisionDocument(JsonDocument? document, string messageId)
+    {
+        if (document == null) return null;
         if (!document.RootElement.TryGetProperty("entryType", out var type) || type.GetString() != "syncRevision") return null;
-        var result = JsonSerializer.Deserialize<SyncRevision>(json, SyncJson.Options) ?? throw new InvalidDataException("Revisão inválida.");
-        result.MessageId = message.Id;
+        var result = document.RootElement.Deserialize<SyncRevision>(SyncJson.Options) ?? throw new InvalidDataException("Revisão inválida.");
+        result.MessageId = messageId;
         return result;
     }
 
@@ -397,7 +404,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             var context = new EncryptedPayloadContext(payload.FileId, payload.Encryption!, EncryptedPayloadRoles.Preview, 0, 1);
             using var encrypted = await _encryption.StageFilesAsync([thumbnail], payload.FileId, payload.Encryption!, EncryptedPayloadRoles.Preview, token);
             await _api.UnarchiveThreadAsync(payload.ThreadId, token);
-            var message = await _api.SendFileMessageAsync(payload.ThreadId, EncryptedPayloadProtocol.Message(context, 1), encrypted.Files[0], token);
+            var message = await _api.SendFileMessageAsync(payload.ThreadId, _metadata.EncodePayloadReference(EncryptedPayloadProtocol.Message(context, 1)), encrypted.Files[0], token);
             return new PreviewMetadata { ThumbnailMessageId = message.Id };
         }
         catch (OperationCanceledException) { throw; }

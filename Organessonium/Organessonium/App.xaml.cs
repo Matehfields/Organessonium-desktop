@@ -115,7 +115,7 @@ public partial class App : Application
             }
 
             using var discord = new DiscordApiClient(settings.BotToken);
-            var audit = new ServerMetadataAudit(discord, settings);
+            var audit = new ServerMetadataAudit(discord, settings, Services.MetadataEncryption.MetadataCodec.ForStore(store));
             Task.Run(() => audit.WriteReportAsync(reportPath)).GetAwaiter().GetResult();
             Shutdown(0);
         }
@@ -136,7 +136,7 @@ public partial class App : Application
             using var discord = new DiscordApiClient(settings.BotToken);
             Task.Run(async () =>
             {
-                var audit = new ServerMetadataAudit(discord, settings);
+                var audit = new ServerMetadataAudit(discord, settings, Services.MetadataEncryption.MetadataCodec.ForStore(store));
                 var before = await audit.WriteReportAsync(reportPath);
                 if (before.UnreadableCount > 0 || before.MissingSerialReferences > 0)
                 {

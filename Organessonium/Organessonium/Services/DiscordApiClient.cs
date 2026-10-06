@@ -332,10 +332,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string messageId,
         string content,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool clearAttachments = false)
     {
         DiscordLimits.ValidateMessage(content);
-        var payload = JsonSerializer.Serialize(new { content }, JsonOptions.Web);
+        var payload = clearAttachments
+            ? JsonSerializer.Serialize(new { content, attachments = Array.Empty<object>() }, JsonOptions.Web)
+            : JsonSerializer.Serialize(new { content }, JsonOptions.Web);
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Patch, $"channels/{channelId}/messages/{messageId}");

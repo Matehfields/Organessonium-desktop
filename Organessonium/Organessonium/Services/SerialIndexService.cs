@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -15,6 +16,8 @@ public sealed class SerialIndexService
     private readonly AppSettings _settings;
     private readonly DirectoryInfo _cacheDirectory;
     private readonly FolderSerialCodec _codec = new();
+    private readonly IMetadataCodec _metadataCodec;
+    private readonly SerialMetadataTransport _transport;
     private readonly ConcurrentDictionary<string, FolderSerial> _loadedFolders = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _verifiedRemoteSerialIds = new(StringComparer.OrdinalIgnoreCase);
 
@@ -22,18 +25,21 @@ public sealed class SerialIndexService
         DiscordApiClient discord,
         SettingsStore store,
         AppSettings settings)
-        : this(discord, settings, store.SerialCacheDirectory)
+        : this(discord, settings, store.SerialCacheDirectory, MetadataCodec.ForStore(store))
     {
     }
 
     public SerialIndexService(
         DiscordApiClient discord,
         AppSettings settings,
-        DirectoryInfo cacheDirectory)
+        DirectoryInfo cacheDirectory,
+        IMetadataCodec? metadataCodec = null)
     {
         _discord = discord;
         _settings = settings;
         _cacheDirectory = cacheDirectory;
+        _metadataCodec = metadataCodec ?? MetadataCodec.Standard();
+        _transport = new SerialMetadataTransport(_metadataCodec);
     }
 
     public Task<FolderSerial?> LoadCachedFolderAsync(string folderId, CancellationToken cancellationToken = default)
@@ -88,10 +94,11 @@ public sealed class SerialIndexService
             if (!string.IsNullOrWhiteSpace(mapping.SerialSha256) &&
                 !hash.Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase))
             {
+                if (!bytes.AsSpan().StartsWith("OSER"u8)) throw new MetadataCodecException(MetadataError.AuthenticationFailed);
                 throw new InvalidDataException("A validação SHA-256 do serial falhou.");
             }
 
-            var serial = _codec.DecodeFolder(bytes);
+            var serial = _codec.DecodeFolder(_transport.Decode(bytes));
             if (!serial.FolderId.Equals(mapping.FolderId, StringComparison.OrdinalIgnoreCase))
             {
                 throw new FormatException("O ID do serial não corresponde ao conteúdo.");
@@ -113,6 +120,7 @@ public sealed class SerialIndexService
             AppLogger.Error("Serial.LoadFolder", ex, mapping.FolderId);
             return null;
         }
+        catch (MetadataCodecException) { throw; }
         catch (Exception ex)
         {
             AppLogger.Error("Serial.LoadFolder", ex, mapping.FolderId);
@@ -143,7 +151,7 @@ public sealed class SerialIndexService
             Math.Clamp(_settings.SearchWorkers, 1, 8),
             cancellationToken);
         var candidates = messages
-            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
+            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope, _metadataCodec) &&
                               envelope.FolderId.Equals(normalizedId, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(message => ulong.TryParse(message.Id, out var id) ? id : 0)
             .ToList();
@@ -160,7 +168,7 @@ public sealed class SerialIndexService
         {
             var attachment = message.Attachments.FirstOrDefault(candidate =>
                 candidate.FileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase));
-            if (attachment == null || !SerialMessageEnvelope.TryParse(message.Content, out var envelope))
+            if (attachment == null || !SerialMessageEnvelope.TryParse(message.Content, out var envelope, _metadataCodec))
             {
                 continue;
             }
@@ -171,10 +179,11 @@ public sealed class SerialIndexService
                 var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
                 if (!hash.Equals(envelope.Sha256, StringComparison.OrdinalIgnoreCase))
                 {
+                    if (_metadataCodec.IsEncrypted(message.Content)) throw new MetadataCodecException(MetadataError.AuthenticationFailed);
                     continue;
                 }
 
-                var serial = _codec.DecodeFolder(bytes);
+                var serial = _codec.DecodeFolder(_transport.Decode(bytes));
                 if (!serial.FolderId.Equals(normalizedId, StringComparison.OrdinalIgnoreCase) || serial.Kind != expectedKind)
                 {
                     continue;
@@ -188,6 +197,7 @@ public sealed class SerialIndexService
             {
                 throw;
             }
+            catch (MetadataCodecException) { throw; }
             catch (Exception ex)
             {
                 AppLogger.Error("Serial.LoadStandalone", ex, normalizedId);
@@ -207,14 +217,13 @@ public sealed class SerialIndexService
             return null;
         }
 
-        var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
-        var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        var rawBytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
         var messages = await _discord.GetMessagesInParallelAsync(
             _settings.SerialChannelId,
             Math.Clamp(_settings.SearchWorkers, 1, 8),
             cancellationToken);
         var existing = messages
-            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope) &&
+            .Where(message => SerialMessageEnvelope.TryParse(message.Content, out var envelope, _metadataCodec) &&
                               envelope.FolderId.Equals(serial.FolderId, StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (serial.Children.Count == 0 && serial.Kind != FolderSerialKind.Favorites &&
@@ -230,9 +239,14 @@ public sealed class SerialIndexService
 
         var current = existing.FirstOrDefault(message => message.Id == preferredMessageId)
             ?? existing.OrderByDescending(message => ulong.TryParse(message.Id, out var id) ? id : 0).FirstOrDefault();
-        var unchanged = current != null &&
-            SerialMessageEnvelope.TryParse(current.Content, out var currentEnvelope) &&
-            currentEnvelope.Sha256.Equals(hash, StringComparison.OrdinalIgnoreCase);
+        var previous = await ReadCachedFolderAsync(serial.FolderId, cancellationToken);
+        var cachedHash = await CachedSerialSha256Async(serial.FolderId, cancellationToken);
+        var unchanged = current != null && previous != null &&
+            SerialMessageEnvelope.TryParse(current.Content, out var currentEnvelope, _metadataCodec) &&
+            currentEnvelope.Sha256.Equals(cachedHash, StringComparison.OrdinalIgnoreCase) &&
+            FolderSerialCodec.SameContent(previous, _codec.DecodeFolder(rawBytes));
+        byte[]? bytes = null;
+        var hash = cachedHash ?? "";
 
         string preservedMessageId;
         if (unchanged)
@@ -241,11 +255,12 @@ public sealed class SerialIndexService
         }
         else
         {
+            bytes = _transport.Encode(rawBytes);
+            hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
             var temporary = await WriteTemporarySerialAsync(serial.FolderId, bytes, cancellationToken);
             try
             {
-                var folderName = SerialMessageEnvelope.FolderNameForMessage(serial.FolderId, serial.FolderName, hash);
-                var envelope = SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash);
+                var envelope = _metadataCodec.Encode(SerialMessageEnvelope.Encode(serial.FolderId, "", hash));
                 var sent = current == null
                     ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
                     : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, current.Id, envelope, temporary, cancellationToken);
@@ -253,12 +268,12 @@ public sealed class SerialIndexService
             }
             finally
             {
-                try { temporary.Delete(); } catch { }
+                try { temporary.Directory?.Delete(true); } catch { }
             }
         }
 
-        await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
-        _loadedFolders[serial.FolderId] = serial;
+        if (bytes != null) await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
+        _loadedFolders[serial.FolderId] = _codec.DecodeFolder(rawBytes);
         foreach (var duplicate in existing.Where(message => message.Id != preservedMessageId))
         {
             await TryDeleteRemoteSerialAsync(duplicate.Id, preservedMessageId, cancellationToken);
@@ -325,8 +340,7 @@ public sealed class SerialIndexService
         var bytes = _codec.EncodeFolder(serial, FolderSerialCodec.PublishedVersion);
         var requiresRemoteUpload = remoteMissing ||
             previous == null ||
-            !Convert.ToHexString(SHA256.HashData(_codec.EncodeFolder(previous, FolderSerialCodec.PublishedVersion)))
-                .Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(await CachedSerialSha256Async(serial.FolderId, cancellationToken), mapping.SerialSha256, StringComparison.OrdinalIgnoreCase);
         if (previous != null &&
             FolderSerialCodec.SameContent(previous, _codec.DecodeFolder(bytes)) &&
             !requiresRemoteUpload)
@@ -334,11 +348,13 @@ public sealed class SerialIndexService
             return mapping;
         }
 
+        var serialForCache = _codec.DecodeFolder(bytes);
+        bytes = _transport.Encode(bytes);
         var hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
-        _loadedFolders[serial.FolderId] = _codec.DecodeFolder(bytes);
         if (string.IsNullOrWhiteSpace(_settings.SerialChannelId))
         {
+            await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
+            _loadedFolders[serial.FolderId] = serialForCache;
             _verifiedRemoteSerialIds.TryRemove(serial.FolderId, out _);
             return mapping with { SerialMessageId = "", SerialSha256 = "" };
         }
@@ -346,17 +362,18 @@ public sealed class SerialIndexService
         var temporary = await WriteTemporarySerialAsync(serial.FolderId, bytes, cancellationToken);
         try
         {
-            var folderName = SerialMessageEnvelope.FolderNameForMessage(serial.FolderId, serial.FolderName, hash);
-            var envelope = SerialMessageEnvelope.Encode(serial.FolderId, folderName, hash);
+            var envelope = _metadataCodec.Encode(SerialMessageEnvelope.Encode(serial.FolderId, "", hash));
             var message = remoteMissing
                 ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
                 : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, mapping.SerialMessageId, envelope, temporary, cancellationToken);
             _verifiedRemoteSerialIds[serial.FolderId] = message.Id;
+            await WriteCachedAsync(serial.FolderId, bytes, cancellationToken);
+            _loadedFolders[serial.FolderId] = serialForCache;
             return mapping with { SerialMessageId = message.Id, SerialSha256 = hash };
         }
         finally
         {
-            try { temporary.Delete(); } catch { }
+            try { temporary.Directory?.Delete(true); } catch { }
         }
     }
 
@@ -522,7 +539,7 @@ public sealed class SerialIndexService
         {
             if (message.Author?.Bot != true ||
                 !message.Attachments.Any(attachment => attachment.FileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) ||
-                !SerialMessageEnvelope.TryParse(message.Content, out var envelope))
+                !SerialMessageEnvelope.TryParse(message.Content, out var envelope, _metadataCodec))
             {
                 continue;
             }
@@ -629,7 +646,7 @@ public sealed class SerialIndexService
 
         try
         {
-            var serial = _codec.DecodeFolder(await File.ReadAllBytesAsync(file.FullName, cancellationToken));
+            var serial = _codec.DecodeFolder(_transport.Decode(await File.ReadAllBytesAsync(file.FullName, cancellationToken)));
             if (!serial.FolderId.Equals(folderId, StringComparison.OrdinalIgnoreCase))
             {
                 return null;
@@ -638,6 +655,7 @@ public sealed class SerialIndexService
             _loadedFolders[folderId] = serial;
             return serial;
         }
+        catch (MetadataCodecException) { throw; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException)
         {
             AppLogger.Error("Serial.CacheRead", ex, folderId);
@@ -665,9 +683,8 @@ public sealed class SerialIndexService
     private async Task<FileInfo> WriteTemporarySerialAsync(string folderId, byte[] bytes, CancellationToken cancellationToken)
     {
         _cacheDirectory.Create();
-        var file = new FileInfo(Path.Combine(
-            _cacheDirectory.FullName,
-            "upload_" + CacheToken(folderId) + "_" + Guid.NewGuid().ToString("N") + ".bin"));
+        var directory = _cacheDirectory.CreateSubdirectory("upload_" + Guid.NewGuid().ToString("N"));
+        var file = new FileInfo(Path.Combine(directory.FullName, "serial.bin"));
         await File.WriteAllBytesAsync(file.FullName, bytes, cancellationToken);
         return file;
     }
@@ -769,13 +786,14 @@ public sealed record SerialMessageEnvelope(
     public const string EntryType = "folderSerial";
     private const int MaxDiscordContentLength = DiscordLimits.MessageContentCharacters;
 
-    public static bool TryParse(string? content, out SerialMessageEnvelope envelope)
+    public static bool TryParse(string? content, out SerialMessageEnvelope envelope, IMetadataCodec? codec = null)
     {
         envelope = new SerialMessageEnvelope("", "", "");
         if (string.IsNullOrWhiteSpace(content)) return false;
+        if (!content.TrimStart().StartsWith('{')) return false;
         try
         {
-            using var document = JsonDocument.Parse(content);
+            using var document = JsonDocument.Parse((codec ?? MetadataCodec.Standard()).Decode(content));
             var root = document.RootElement;
             if (!root.TryGetProperty("schema", out var schema) ||
                 schema.GetInt32() != SchemaVersion ||

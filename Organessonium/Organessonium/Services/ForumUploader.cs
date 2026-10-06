@@ -1,6 +1,7 @@
 using System.IO;
 using System.Diagnostics;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -8,11 +9,13 @@ public sealed class ForumUploader
 {
     private readonly DiscordApiClient _discord;
     private readonly string _forumId;
+    private readonly MetadataService _metadata;
 
-    public ForumUploader(DiscordApiClient discord, string forumId)
+    public ForumUploader(DiscordApiClient discord, string forumId, IMetadataCodec? codec = null)
     {
         _discord = discord;
         _forumId = forumId;
+        _metadata = new MetadataService(codec);
     }
 
     public async Task<ForumUploadResult> UploadAsync(
@@ -102,10 +105,10 @@ public sealed class ForumUploader
             var firstWasPending = string.IsNullOrWhiteSpace(chunkMessages[0]);
             var post = await InUploadSlotAsync(() => _discord.CreateForumPostWithFileDetailedAsync(
                 _forumId,
-                encryptedPayload == null ? StripExtension(archiveFileName) : EncryptedThreadTitle(encryptedPayload.FileId),
+                EncryptedThreadTitle(),
                 encryptedPayload == null
                     ? PartContent(batchId, 1, parts.Count)
-                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), parts.Count),
+                    : PayloadMessage(encryptedPayload.WithChunkIndex(0), parts.Count),
                 first,
                 cancellationToken,
                 onRateLimitWait,
@@ -156,7 +159,7 @@ public sealed class ForumUploader
                             threadId,
                             encryptedPayload == null
                                 ? PartContent(batchId, index + 1, parts.Count)
-                                : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), parts.Count),
+                                : PayloadMessage(encryptedPayload.WithChunkIndex(index), parts.Count),
                             part,
                             cancellationToken,
                             onRateLimitWait,
@@ -281,10 +284,10 @@ public sealed class ForumUploader
                     first = await preparePart(0);
                     return await _discord.CreateForumPostWithFileDetailedAsync(
                         _forumId,
-                        encryptedPayload == null ? StripExtension(archiveFileName) : EncryptedThreadTitle(encryptedPayload.FileId),
+                        EncryptedThreadTitle(),
                         encryptedPayload == null
                             ? PartContent(batchId, 1, totalParts)
-                            : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(0), totalParts),
+                            : PayloadMessage(encryptedPayload.WithChunkIndex(0), totalParts),
                         first!,
                         cancellationToken,
                         onRateLimitWait,
@@ -349,7 +352,7 @@ public sealed class ForumUploader
                                 threadId,
                                 encryptedPayload == null
                                     ? PartContent(batchId, index + 1, totalParts)
-                                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(index), totalParts),
+                                    : PayloadMessage(encryptedPayload.WithChunkIndex(index), totalParts),
                                 prepared!,
                                 cancellationToken,
                                 onRateLimitWait,
@@ -408,7 +411,7 @@ public sealed class ForumUploader
                 threadId,
                 encryptedPayload == null
                     ? PartContent(batchId, i + 1, parts.Count)
-                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
+                    : PayloadMessage(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
                 onRateLimitWait,
@@ -477,7 +480,7 @@ public sealed class ForumUploader
                 threadId,
                 encryptedPayload == null
                     ? PreviewPartContent(kind, batchId, i + 1, parts.Count)
-                    : EncryptedPayloadProtocol.Message(encryptedPayload.WithChunkIndex(i), parts.Count),
+                    : PayloadMessage(encryptedPayload.WithChunkIndex(i), parts.Count),
                 parts[i],
                 cancellationToken,
                 onRateLimitWait,
@@ -489,31 +492,27 @@ public sealed class ForumUploader
         return chunkMessages;
     }
 
-    private static string StripExtension(string name)
+    private static string EncryptedThreadTitle()
     {
-        var without = System.IO.Path.GetFileNameWithoutExtension(name);
-        return string.IsNullOrWhiteSpace(without) ? name : without;
+        return "payload-" + Guid.NewGuid().ToString("N");
     }
 
-    private static string EncryptedThreadTitle(string fileId)
-    {
-        var value = string.IsNullOrWhiteSpace(fileId) ? "payload" : fileId[..Math.Min(16, fileId.Length)];
-        return "payload-" + value;
-    }
+    private string PayloadMessage(EncryptedPayloadContext context, int count) =>
+        _metadata.EncodePayloadReference(EncryptedPayloadProtocol.Message(context, count));
 
     private static string NewBatchId()
     {
         return Guid.NewGuid().ToString("N")[..10];
     }
 
-    private static string PartContent(string batchId, int part, int total)
+    private string PartContent(string batchId, int part, int total)
     {
-        return $"\U0001F4E6 batch:{batchId} Parte {part}/{total}";
+        return _metadata.EncodePayloadReference($"\U0001F4E6 batch:{batchId} Parte {part}/{total}");
     }
 
-    private static string PreviewPartContent(string kind, string batchId, int part, int total)
+    private string PreviewPartContent(string kind, string batchId, int part, int total)
     {
-        return $"ORG_PREVIEW|{kind}|batch:{batchId}|Parte {part}/{total}";
+        return _metadata.EncodePayloadReference($"ORG_PREVIEW|{kind}|batch:{batchId}|Parte {part}/{total}");
     }
 }
 

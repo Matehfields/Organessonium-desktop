@@ -18,4 +18,9 @@
     <ProjectReference Include="..\..\Organessonium\Organessonium\Organessonium.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\metadata-v1-vector.json" Link="metadata-v1-vector.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\metadata-v1-interop.cjs" Link="metadata-v1-interop.cjs" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

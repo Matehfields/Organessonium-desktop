@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Text.RegularExpressions;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -48,14 +49,34 @@ public sealed class ForumDownloader
     private readonly AppSettings _settings;
     private readonly EncryptionService _encryption;
     private readonly Func<HttpClient> _downloadClientFactory;
+    private readonly MetadataService _metadata;
 
     public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption, Func<HttpClient>? downloadClientFactory = null)
     {
         _discord = discord;
         _settings = settings;
         _encryption = encryption;
+        _metadata = new MetadataService(MetadataCodec.ForEncryption(encryption));
         _downloadClientFactory = downloadClientFactory ?? (() => NetworkConfig.Current.CreateClient());
     }
+
+    private DiscordMessageDto DecodeReference(DiscordMessageDto message)
+    {
+        message.Content = _metadata.DecodePayloadReference(message.Content);
+        return message;
+    }
+
+    private async Task<IReadOnlyList<DiscordMessageDto>> GetPayloadMessagesAsync(string threadId, int? limit,
+        CancellationToken cancellationToken, bool waitForTransientNetwork = false)
+    {
+        var messages = await _discord.GetMessagesAsync(threadId, limit, cancellationToken, waitForTransientNetwork: waitForTransientNetwork);
+        foreach (var message in messages) DecodeReference(message);
+        return messages;
+    }
+
+    private async Task<DiscordMessageDto> GetPayloadMessageAsync(string threadId, string messageId,
+        CancellationToken cancellationToken, bool waitForTransientNetwork = false) =>
+        DecodeReference(await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: waitForTransientNetwork));
 
     public async Task<FileInfo> DownloadAndAssembleAsync(
         string threadId,
@@ -584,7 +605,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
+        var message = await GetPayloadMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
         var attachment = message.Attachments.FirstOrDefault();
         if (attachment == null)
         {
@@ -610,7 +631,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var message = await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
+        var message = await GetPayloadMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
         var attachment = message.Attachments.FirstOrDefault();
         if (attachment == null)
         {
@@ -647,7 +668,7 @@ public sealed class ForumDownloader
             return null;
         }
 
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
+        var messages = await GetPayloadMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         return messages
             .Where(message => message.Content.StartsWith(contentPrefix, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(message => Snowflake(message.Id))
@@ -762,7 +783,7 @@ public sealed class ForumDownloader
 
     public async Task<string?> GetFirstAttachmentUrlAsync(string threadId, CancellationToken cancellationToken = default)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, 100, cancellationToken, waitForTransientNetwork: true);
+        var messages = await GetPayloadMessagesAsync(threadId, 100, cancellationToken, waitForTransientNetwork: true);
         return messages
             .OrderBy(m => Snowflake(m.Id))
             .Where(message => !IsPreviewMessage(message.Content))
@@ -804,7 +825,7 @@ public sealed class ForumDownloader
                 : await CollectPreviewPartsAsync(entry.ThreadId, "video-480", cancellationToken);
             if (parts.Count == 0 && entry.Encryption == null)
             {
-                var messages = await _discord.GetMessagesAsync(entry.ThreadId, null, cancellationToken);
+                var messages = await GetPayloadMessagesAsync(entry.ThreadId, null, cancellationToken);
                 var marked = messages.FirstOrDefault(m => m.Content.StartsWith(DartVideoPreviewPrefix, StringComparison.OrdinalIgnoreCase));
                 if (marked?.Attachments.FirstOrDefault() is { } attachment)
                     parts.Add(new Part(0, attachment.Url, attachment.FileName, attachment.Size, marked.Id));
@@ -825,7 +846,7 @@ public sealed class ForumDownloader
     }
     private async Task<List<Part>> CollectPartsAsync(string threadId, CancellationToken cancellationToken, string? preferredBatchId = null)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
+        var messages = await GetPayloadMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         var candidates = new Dictionary<string, PartBatch>(StringComparer.OrdinalIgnoreCase);
         var hasPreferredBatch = !string.IsNullOrWhiteSpace(preferredBatchId);
         foreach (var message in messages.OrderByDescending(m => Snowflake(m.Id)))
@@ -888,7 +909,7 @@ public sealed class ForumDownloader
 
     private async Task<List<Part>> CollectPreviewPartsAsync(string threadId, string kind, CancellationToken cancellationToken)
     {
-        var messages = await _discord.GetMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
+        var messages = await GetPayloadMessagesAsync(threadId, null, cancellationToken, waitForTransientNetwork: true);
         var candidates = new Dictionary<string, PartBatch>(StringComparer.OrdinalIgnoreCase);
         foreach (var message in messages.OrderByDescending(message => Snowflake(message.Id)))
         {
@@ -936,8 +957,9 @@ public sealed class ForumDownloader
         {
             try
             {
-                return await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
+                return await GetPayloadMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
             }
+            catch (MetadataCodecException) { throw; }
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < 4)
             {
                 last = ex;
@@ -970,6 +992,7 @@ public sealed class ForumDownloader
             messageIds,
             cancellationToken,
             onPartResolved);
+        foreach (var payloadMessage in messages.Values) DecodeReference(payloadMessage);
         var resolved = new Part[messageIds.Count];
         for (var index = 0; index < messageIds.Count; index++)
         {

@@ -1,0 +1,21 @@
+{
+  "plaintext": "{\"schemaVersion\":2,\"entryType\":\"folder\",\"folderId\":\"test-folder\",\"name\":\"Fotos café 📷\",\"createdAt\":\"2026-10-06T12:00:00Z\",\"parentFolderId\":\"root\",\"fav\":true}",
+  "masterHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "saltHex": "202122232425262728292a2b2c2d2e2f",
+  "nonceHex": "303132333435363738393a3b",
+  "keyHex": "5a806c768419e6d565fe129fe960ff0def7b9ff144722054ff7e87d1992a4fbf",
+  "aad": "organessonium-metadata\n1\ntrue\nAES-256-GCM\nHKDF-SHA256\nstandard\nICEiIyQlJicoKSorLC0uLw==\nMDEyMzQ1Njc4OTo7\nYBrO6AjFjVYl4RTTKXLRFQ==",
+  "envelope": {
+    "format": "organessonium-metadata",
+    "version": 1,
+    "encrypted": true,
+    "algorithm": "AES-256-GCM",
+    "kdf": "HKDF-SHA256",
+    "keyMode": "standard",
+    "salt": "ICEiIyQlJicoKSorLC0uLw==",
+    "nonce": "MDEyMzQ1Njc4OTo7",
+    "keyCheck": "YBrO6AjFjVYl4RTTKXLRFQ==",
+    "ciphertext": "yYbZ5T6WPbBjFMC1mh+21Ng5eirPrT4xEfwF1dcRoJpPe7b+AdEOYsLkFKwQ35wkjjI9YwWHvKLvoeDBHMkcOZLakrwErZZjV1s4PWj0U+wYvGmco427uW7PTL6TAax83PS2X8GJ2RvrP+5O52MDk4Fbh+bKe4qoGctc0gFoB8x32ia6GN1EO5HmMbSWKQtgpkqGL54H9+rwjRplmc00saU=",
+    "tag": "p0rSazS/tPCYuiGeQskzTQ=="
+  }
+}

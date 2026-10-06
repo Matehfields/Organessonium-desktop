@@ -8,6 +8,7 @@ using Microsoft.Data.Sqlite;
 using Organessonium.Models;
 using Organessonium.Services;
 using Organessonium.Services.Sync;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.NetworkTests;
 
@@ -96,6 +97,12 @@ internal static partial class Program
             RequireSync(!File.Exists(SyncPaths.Resolve(b.LocalPath, "src/grande.dat")) &&
                 (await deviceRegistry.RefreshFolderAsync(folderId, a.CloudPath + "/src")).Count == 0 &&
                 !server.DeletedChannels.Contains(revision.Payload!.ThreadId), "tombstone não atualizou cards ou apagou a última cópia de recuperação");
+            RequireSync(server.PublishedContents.All(content => content == "" || content == "metadata" || MetadataCodec.Standard().IsEncrypted(content)),
+                "uma publicação nova deixou campos em plaintext");
+            RequireSync(server.PublishedMetadataAttachments.All(content => MetadataCodec.Standard().IsEncrypted(content)),
+                "um metadata/serial foi publicado como anexo em plaintext");
+            RequireSync(server.PublishedTitles.All(title => !title.Contains("Projetos") && !title.Contains("grande.dat") && !title.Contains(a.SyncFolderId)),
+                "título do post revelou organização ou nome");
             return TestOutcome.Pass();
         }
         finally { SqliteConnection.ClearAllPools(); temporary.Delete(true); }
@@ -110,7 +117,11 @@ internal static partial class Program
         private ulong _next = 930000000000000000;
         public int PayloadPosts { get; private set; }
         public bool RejectNextFileProjection;
+        public bool RejectNextMetadataUpdate;
         public List<string> DeletedChannels { get; } = [];
+        public List<string> PublishedContents { get; } = [];
+        public List<string> PublishedMetadataAttachments { get; } = [];
+        public List<string> PublishedTitles { get; } = [];
         public SyncDiscordFixture()
         {
             _channels["names"] = []; _channels["serial"] = []; _channels["root-thread"] = [];
@@ -125,6 +136,13 @@ internal static partial class Program
             var message = new DiscordMessageDto { Id = (++_next).ToString(), Content = content };
             _channels[channel][message.Id] = message; return message;
         }
+        public DiscordMessageDto SeedLegacyMetadata(string json)
+        {
+            var message = Add("root-thread", "");
+            Attach(message, "metadata.json", Encoding.UTF8.GetBytes(json));
+            return message;
+        }
+
         private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK)
         { Content = new StringContent(JsonSerializer.Serialize(value, JsonOptions.Web), Encoding.UTF8, "application/json") };
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
@@ -179,16 +197,25 @@ internal static partial class Program
                 var content = payload.TryGetProperty("content", out var value) ? value.GetString() ?? "" : "";
                 lock (_gate)
                 {
-                    if (RejectNextFileProjection && content.Contains("\"entryType\":\"file\"", StringComparison.Ordinal))
+                    if (RejectNextMetadataUpdate && request.Method == HttpMethod.Patch)
+                    { RejectNextMetadataUpdate = false; return new(HttpStatusCode.Forbidden); }
+                    var inspected = content.TrimStart().StartsWith('{') ? MetadataCodec.Standard().Decode(content) : content;
+                    if (RejectNextFileProjection && inspected.Contains("\"entryType\":\"file\"", StringComparison.Ordinal))
                     { RejectNextFileProjection = false; return new(HttpStatusCode.Forbidden); }
+                    PublishedContents.Add(content);
+                    if (bytes != null && filename is "metadata.json" or "sync-revision.json" or "serial.bin")
+                        PublishedMetadataAttachments.Add(Encoding.UTF8.GetString(bytes));
                     if (forum)
                     {
+                        PublishedTitles.Add(document.RootElement.GetProperty("name").GetString()!);
                         var thread = (++_next).ToString(); _channels[thread] = []; _parents[thread] = channel;
                         var message = Add(thread, content); Attach(message, filename, bytes);
                         if (channel == "files") PayloadPosts++;
                         return Json(new { id = thread, message });
                     }
                     var result = request.Method == HttpMethod.Post ? Add(channel, content) : new DiscordMessageDto { Id = parts[2], Content = content };
+                    if (request.Method == HttpMethod.Patch && !payload.TryGetProperty("attachments", out _) &&
+                        _channels[channel].TryGetValue(parts[2], out var previous)) result.Attachments = previous.Attachments;
                     Attach(result, filename, bytes); _channels[channel][result.Id] = result;
                     return Json(result);
                 }

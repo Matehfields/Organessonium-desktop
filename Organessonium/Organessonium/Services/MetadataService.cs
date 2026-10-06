@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -18,22 +19,44 @@ public sealed class MetadataService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    private static readonly JsonSerializerOptions AttachmentJsonOptions = new(JsonOptions.WebIndented)
+    private readonly IMetadataCodec _metadataCodec;
+    private readonly Func<DiscordAttachmentDto, CancellationToken, Task<byte[]>> _downloadAttachment;
+
+    public MetadataService(IMetadataCodec? codec = null,
+        Func<DiscordAttachmentDto, CancellationToken, Task<byte[]>>? downloadAttachment = null)
     {
-        WriteIndented = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
+        _metadataCodec = codec ?? MetadataCodec.Standard();
+        _downloadAttachment = downloadAttachment ?? DownloadAttachmentAsync;
+    }
+
+    public string EncodeJson(string json) => _metadataCodec.Encode(json);
+    public string DecodeJson(string json) => _metadataCodec.Decode(json);
+    public string EncodePayloadReference(string content) => EncodeJson(JsonSerializer.Serialize(new
+        { schemaVersion = 1, entryType = "payloadReference", content }, JsonOptions.Web));
+
+    public string DecodePayloadReference(string stored)
+    {
+        if (!stored.TrimStart().StartsWith('{')) return stored;
+        using var document = JsonDocument.Parse(DecodeJson(stored));
+        var root = document.RootElement;
+        if (root.TryGetProperty("entryType", out var type) && type.GetString() == "payloadReference" &&
+            root.TryGetProperty("schemaVersion", out var version) && version.ValueKind == JsonValueKind.Number && version.GetInt32() == 1 &&
+            root.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String)
+            return content.GetString()!;
+        if (_metadataCodec.IsEncrypted(stored)) throw new MetadataCodecException(MetadataError.InvalidFormat);
+        return stored;
+    }
 
     public async Task<MetadataWritePayload> CreateWritePayloadAsync(AppEntry entry, CancellationToken cancellationToken = default)
     {
         var metadata = CreateMetadata(entry);
-        var compactJson = SerializeMetadata(metadata, CompactJsonOptions);
+        var compactJson = EncodeJson(SerializeMetadata(metadata, CompactJsonOptions));
         if (compactJson.Length <= InlineContentLimit)
         {
             return new MetadataWritePayload(compactJson, null);
         }
 
-        return new MetadataWritePayload("", await CreateMetadataFileAsync(metadata, entry.Name, cancellationToken));
+        return new MetadataWritePayload("", await CreateEncodedFileAsync(compactJson, cancellationToken));
     }
 
     public async Task<string> SendEntryAsync(
@@ -125,20 +148,17 @@ public sealed class MetadataService
                     entry.MetadataMessageId,
                     payload.Content,
                     cancellationToken,
-                    onRateLimitWait);
+                    onRateLimitWait,
+                    clearAttachments: true);
                 entry.MetadataMessageId = updated.Id;
                 return updated.Id;
             }
 
-            if (!string.IsNullOrWhiteSpace(entry.MetadataMessageId))
-            {
-                await discord.DeleteMessageAsync(channelId, entry.MetadataMessageId, cancellationToken);
-                entry.MetadataMessageId = "";
-            }
-
             var message = payload.Attachment == null
                 ? await discord.CreateMessageAsync(channelId, payload.Content, cancellationToken, onRateLimitWait)
-                : await SendMetadataFileAsync(discord, channelId, payload.Attachment, cancellationToken, onRateLimitWait);
+                : string.IsNullOrWhiteSpace(entry.MetadataMessageId)
+                    ? await SendMetadataFileAsync(discord, channelId, payload.Attachment, cancellationToken, onRateLimitWait)
+                    : await discord.ReplaceFileMessageAsync(channelId, entry.MetadataMessageId, "metadata", payload.Attachment, cancellationToken);
             entry.MetadataMessageId = message.Id;
             return message.Id;
         }
@@ -159,7 +179,7 @@ public sealed class MetadataService
             SerialSha256 = string.IsNullOrWhiteSpace(mapping.SerialSha256) ? null : mapping.SerialSha256
         };
         Validate(metadata);
-        return SerializeMetadata(metadata, CompactJsonOptions);
+        return EncodeJson(SerializeMetadata(metadata, CompactJsonOptions));
     }
 
     public string SerializeFolderIndexHeader(string folderId, string parentFolderId, string name)
@@ -172,7 +192,7 @@ public sealed class MetadataService
             Name = name
         };
         Validate(metadata);
-        return SerializeMetadata(metadata, CompactJsonOptions);
+        return EncodeJson(SerializeMetadata(metadata, CompactJsonOptions));
     }
 
     public async Task<IReadOnlyList<FolderIndexMapping>> ReadFolderIndexMappingsInParallelAsync(
@@ -238,99 +258,119 @@ public sealed class MetadataService
     public async Task<FileInfo> CreateMetadataFileAsync(AppEntry entry, CancellationToken cancellationToken = default)
     {
         var metadata = CreateMetadata(entry);
-        return await CreateMetadataFileAsync(metadata, entry.Name, cancellationToken);
+        return await CreateEncodedFileAsync(EncodeJson(SerializeMetadata(metadata, CompactJsonOptions)), cancellationToken);
     }
 
-    private static async Task<FileInfo> CreateMetadataFileAsync(
-        MetadataEntry metadata,
-        string details,
+    private static async Task<FileInfo> CreateEncodedFileAsync(
+        string json,
         CancellationToken cancellationToken)
     {
-        var json = SerializeMetadata(metadata, AttachmentJsonOptions);
         var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
         if (bytes > MaxMetadataBytes)
         {
-            AppLogger.Error("Metadata.TooLarge", new InvalidOperationException($"{bytes} bytes"), details);
-            throw new InvalidOperationException("metadata.json ficou grande demais para ser enviado como anexo.");
+            throw new MetadataCodecException(MetadataError.TooLarge);
         }
 
         var dir = Directory.CreateTempSubdirectory("organessonium_metadata_");
         var file = new FileInfo(Path.Combine(dir.FullName, FileName));
-        await File.WriteAllTextAsync(file.FullName, json, cancellationToken);
-        file.Refresh();
-        return file;
+        try
+        {
+            await File.WriteAllTextAsync(file.FullName, json, MetadataCryptoParameters.Utf8, cancellationToken);
+            file.Refresh();
+            return file;
+        }
+        catch { dir.Delete(true); throw; }
     }
 
     public async Task<MetadataEnvelope?> ReadEnvelopeAsync(
         DiscordMessageDto message,
         CancellationToken cancellationToken = default)
     {
-        var inline = TryReadInlineEnvelope(message);
-        if (inline != null)
-        {
-            return inline;
-        }
-
-        var attachment = message.Attachments.FirstOrDefault(IsMetadataAttachment);
-        if (attachment == null)
-        {
-            return null;
-        }
-
-        if (attachment.Size > MaxMetadataBytes)
-        {
-            AppLogger.Error("Metadata.ReadTooLarge", new InvalidOperationException($"{attachment.Size} bytes"), message.Id);
-            return null;
-        }
-
+        var payload = await ReadJsonPayloadAsync(message, cancellationToken);
+        if (payload == null) return null;
         try
         {
-            using var http = NetworkConfig.Current.CreateClient();
-            using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            using var document = JsonDocument.Parse(payload.Value.Json);
             var metadata = ParseMetadata(document.RootElement);
             if (metadata == null)
             {
+                if (payload.Value.Encrypted)
+                {
+                    if (!document.RootElement.TryGetProperty("entryType", out var type) || type.ValueKind != JsonValueKind.String)
+                        throw new MetadataCodecException(MetadataError.MissingField);
+                    if (type.GetString() is "file" or "folder" or "folderIndex" or "folderIndexHeader")
+                    {
+                        if (!document.RootElement.TryGetProperty("schemaVersion", out _)) throw new MetadataCodecException(MetadataError.MissingField);
+                        throw new MetadataCodecException(MetadataError.UnsupportedVersion);
+                    }
+                    if (type.GetString() is not ("syncRevision" or "syncApplied" or "folderSerial" or "folderSerialData" or "payloadReference"))
+                        throw new MetadataCodecException(MetadataError.UnsupportedVersion);
+                }
                 return null;
             }
 
             Validate(metadata);
             return new MetadataEnvelope(message.Id, metadata);
         }
-        catch (Exception ex)
+        catch (MetadataCodecException) { throw; }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         {
-            AppLogger.Error("Metadata.ReadInvalid", ex, message.Id);
+            if (payload.Value.Encrypted) throw new MetadataCodecException(MetadataError.MissingField);
             return null;
         }
     }
 
-    private static MetadataEnvelope? TryReadInlineEnvelope(DiscordMessageDto message)
+    public async Task<JsonDocument?> ReadJsonAsync(DiscordMessageDto message, CancellationToken cancellationToken = default)
     {
-        var content = message.Content?.Trim();
-        if (string.IsNullOrWhiteSpace(content) || !content.StartsWith("{", StringComparison.Ordinal))
-        {
-            return null;
-        }
+        var payload = await ReadJsonPayloadAsync(message, cancellationToken);
+        return payload == null ? null : JsonDocument.Parse(payload.Value.Json);
+    }
 
-        try
+    private async Task<(string Json, bool Encrypted)?> ReadJsonPayloadAsync(DiscordMessageDto message, CancellationToken token)
+    {
+        var content = message.Content?.Trim() ?? "";
+        if (content.StartsWith('{'))
         {
-            using var document = JsonDocument.Parse(content);
-            var metadata = ParseMetadata(document.RootElement);
-            if (metadata == null)
+            try
             {
-                return null;
+                using var outer = JsonDocument.Parse(content);
+                var encrypted = _metadataCodec.IsEncrypted(content);
+                var decoded = DecodeJson(content);
+                if (encrypted || outer.RootElement.TryGetProperty("schemaVersion", out _) || outer.RootElement.TryGetProperty("schema", out _))
+                    return (decoded, encrypted);
             }
+            catch (JsonException)
+            {
+                if (content.Contains(MetadataCryptoParameters.Format, StringComparison.Ordinal) || content.Contains("\"encrypted\"", StringComparison.Ordinal))
+                    throw new MetadataCodecException(MetadataError.InvalidFormat);
+            }
+        }
+        var attachment = message.Attachments.FirstOrDefault(a => IsMetadataAttachment(a) || a.FileName == "sync-revision.json");
+        if (attachment == null) return null;
+        if (attachment.Size > MaxMetadataBytes) throw new MetadataCodecException(MetadataError.TooLarge);
+        var bytes = await _downloadAttachment(attachment, token);
+        if (bytes.Length > MaxMetadataBytes) throw new MetadataCodecException(MetadataError.TooLarge);
+        string stored;
+        try { stored = MetadataCryptoParameters.Utf8.GetString(bytes); }
+        catch (System.Text.DecoderFallbackException) { throw new MetadataCodecException(MetadataError.InvalidFormat); }
+        return (DecodeJson(stored), _metadataCodec.IsEncrypted(stored));
+    }
 
-            Validate(metadata);
-            return new MetadataEnvelope(message.Id, metadata);
-        }
-        catch (Exception ex)
+    private static async Task<byte[]> DownloadAttachmentAsync(DiscordAttachmentDto attachment, CancellationToken token)
+    {
+        using var http = NetworkConfig.Current.CreateClient();
+        using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, token);
+        response.EnsureSuccessStatusCode();
+        await using var stream = await response.Content.ReadAsStreamAsync(token);
+        using var output = new MemoryStream();
+        var buffer = new byte[64 * 1024];
+        int count;
+        while ((count = await stream.ReadAsync(buffer, token)) > 0)
         {
-            AppLogger.Error("Metadata.ReadInlineInvalid", ex, message.Id);
-            return null;
+            if (output.Length + count > MaxMetadataBytes) throw new MetadataCodecException(MetadataError.TooLarge);
+            await output.WriteAsync(buffer.AsMemory(0, count), token);
         }
+        return output.ToArray();
     }
 
     public async Task<IReadOnlyList<MetadataEnvelope>> ReadEnvelopesInParallelAsync(

@@ -26,6 +26,9 @@ public sealed class EncryptionService
 
     public bool HasCustomKey => _customKeyProvider.HasStoredKey;
 
+    internal byte[] CopyMasterKeyForMetadata(string mode) => (mode == EncryptionModes.Custom
+        ? _customKeyProvider.GetMasterKey() : _defaultKeyProvider.GetMasterKey()).ToArray();
+
     public void ClearCustomKey()
     {
         _customKeyProvider.ClearCachedKey();

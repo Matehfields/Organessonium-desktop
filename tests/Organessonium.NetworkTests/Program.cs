@@ -14,6 +14,11 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("metadataV1RoundTripAndErrors", MetadataV1RoundTripAndErrorsAsync),
+        ("metadataLegacyAndEncryptedWrites", MetadataLegacyAndEncryptedWritesAsync),
+        ("metadataV1Interoperability", MetadataV1InteroperabilityAsync),
+        ("metadataEncryptedSerialCache", MetadataEncryptedSerialCacheAsync),
+        ("metadataAtomicLegacyUpdate", MetadataAtomicLegacyUpdateAsync),
         ("twoComputerSyncLifecycle", TwoComputerSyncLifecycleAsync),
         ("syncFailuresPreserveFiles", SyncFailuresPreserveFilesAsync),
         ("syncScannerPathsAndPersistence", SyncScannerPathsAndPersistenceAsync),
@@ -723,8 +728,10 @@ internal static partial class Program
             Content = payload.Content
         });
         var restored = envelope == null ? null : service.ToAppEntry(envelope);
-        var valid = payload.Content.Contains("\"deviceType\":\"phone\"", StringComparison.Ordinal) &&
-                    payload.Content.Contains("\"fav\":true", StringComparison.Ordinal) &&
+        var decoded = service.DecodeJson(payload.Content);
+        var valid = !payload.Content.Contains("\"deviceType\"", StringComparison.Ordinal) &&
+                    decoded.Contains("\"deviceType\":\"phone\"", StringComparison.Ordinal) &&
+                    decoded.Contains("\"fav\":true", StringComparison.Ordinal) &&
                     restored?.DeviceType == "phone" &&
                     restored.Favorite;
         return valid

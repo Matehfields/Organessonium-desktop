@@ -1,337 +1,298 @@
-# Reprodução progressiva de vídeo
+# Encrypted metadata V1: protocolo do Organessônium
 
-Este documento descreve a implementação desktop C# + WebView2, seus contratos de dados e os requisitos para uma implementação equivalente em Flutter. Não representa mudanças já realizadas no aplicativo mobile.
+## 1. Visão geral e arquitetura
 
-## 1. Objetivo e separação dos fluxos
+Este protocolo protege as novas publicações de metadados no desktop C# WPF/WebView2. Não modifica AES, chaves de arquivo, chunks ou bytes de payload já existentes.
 
-O player lê um arquivo virtual composto pelos attachments do Discord. Somente os chunks necessários e uma janela pequena de antecipação ficam em RAM. Abrir um vídeo não reconstrói o arquivo inteiro e não cria mídia temporária no SSD. Não existe servidor HTTP, listener, porta local, regra de firewall ou conversão de vídeo durante a reprodução.
+`IMetadataCodec` recebe JSON e devolve envelope JSON, ou identifica e decodifica um envelope recebido. `MetadataCodec` roteia leitura legada e versões; `EncryptedMetadataCodecV1` implementa criptografia; `MetadataEncryptedEnvelope`, `MetadataCryptoParameters` e `MetadataCodecException` definem estrutura, constantes e erros. `SerialMetadataTransport` protege OSER sem mudar seu layout interno. Negócio e UI não manipulam AES.
 
-O download tradicional continua reconstruindo **todos** os chunks no disco escolhido pelo usuário. Seus temporários, checkpoints e cancelamento são independentes do player. O cache de thumbnails e de prévias de arquivos que não são vídeos continua existindo.
+Cobertura das novas escritas:
 
-O faststart pertence ao **upload**: um MP4 elegível é preparado antes da divisão e da criptografia. Essa preparação pode criar um único arquivo temporário completo, posteriormente removido. Não é o cache do streaming e não altera vídeos já armazenados no servidor.
+- Arquivos e pastas: nome, MIME, tamanho, datas, IDs, relações, favorito, previews, chunks, criptografia de conteúdo, lixeira e extensões de sincronização.
+- Mappings de `names` e cabeçalhos de `folders`: todo o JSON.
+- Seriais: envelope de mensagem e bytes OSER encapsulados.
+- Sincronização: revisões e confirmações de projeção.
+- Rótulos de payloads: inclusive referências de imagens Markdown e previews.
+- Novos títulos de posts: identificadores aleatórios opacos, não derivados de nomes ou IDs internos.
 
-## 2. Arquitetura e responsabilidades
+Visíveis: discriminador/versão/algoritmo/KDF, modo de seleção da chave, salt, nonce, verificador de chave, ciphertext/tag e seu comprimento. Discord continua vendo canais, IDs externos de mensagens/posts/attachments, horários de publicação, tamanhos e agrupamentos. Nomes técnicos como `metadata.json`, `serial.bin`, `payload.bin` e sequência/papel codificados no header binário dos chunks não são uma árvore privada legível. Não existe proteção contra análise de tráfego.
 
-```text
-Discord REST: mensagens, IDs, tamanhos e URLs dos attachments
-    |
-ForumDownloader.OpenVideoChunksAsync
-    |
-DiscordVideoChunkProvider <--- CDN + EncryptionService
-    |
-VideoChunkIndex: prefixos dos tamanhos plaintext reais
-    |
-VideoStreamSession: leituras assíncronas, RAM, deduplicação e cancelamento
-    |
-PreviewResourceRegistry: recurso virtual opaco e faixas limitadas
-    |
-WebView2PreviewAdapter: WebResourceRequested, sem TCP
-    |
-web/app.js: player existente, eventos, buffering, seek e retomada
+Leitura: localizar mensagem ou anexo pelos canais configurados, reconhecer envelope, autenticar/descriptografar, interpretar JSON, validar schema interno, consumir no índice/sincronizador/preview. Escrita: validar objeto, serializar JSON, UTF-8, cifrar, montar envelope, enviar inline/anexo. Dados legados não são regravados por simples leitura. Modificações efetivas usam V1; não existe encoder legado de publicação.
 
-Mp4FastStart -> upload/chunks/encryption -> Discord
-VideoPlaybackTracker -> settings do SQLite local
-ForumDownloader.DownloadAndAssembleAsync -> download completo no disco
-```
+## 2. JSON anterior à criptografia
 
-Os arquivos C# ficam em `Organessonium/Organessonium`:
+JSON RFC 8259, objeto na raiz, UTF-8 sem BOM, sem normalização Unicode. Propriedades são case-sensitive. Strings podem conter acentos, emoji, caracteres compostos/decompostos e escapes JSON válidos. Nenhum segredo mestre entra nesse objeto.
 
-| Componente | Responsabilidade |
+A serialização C# usa System.Text.Json, nomes explícitos de propriedades, JSON compacto e UnsafeRelaxedJsonEscaping. Campos opcionais nulos de metadados comuns são omitidos; `fav: false` é omitido. Objetos opcionais inexistentes ficam ausentes. Não inventar preview ou campos de arquivo em pasta. Arrays necessários, como `chunks` e `parents`, seguem o contrato do tipo; o codec não apaga valores, arrays vazios ou null recebidos em JSON genérico.
+
+Datas comuns: `yyyy-MM-ddTHH:mm:ssZ`. Sincronização também aceita frações UTC no formato ISO 8601; escreve datas UTC. OSER usa milissegundos Unix. Inteiros são decimais JSON, não strings; tamanhos/revisões podem exigir 64 bits. Não converter IDs Discord para números: são strings. Booleanos são `true`/`false`. Arrays mantêm ordem, principalmente os IDs dos chunks.
+
+Ordem das propriedades e whitespace não importam ao leitor. O ciphertext, porém, depende dos bytes exatos do JSON de entrada. Não há canonicalização JSON nem reserialização durante autenticação. Para reproduzir o vetor, use literalmente o JSON da seção 11, sem newline final. Um JSON semanticamente igual com outra ordem/escaping pode gerar outro ciphertext e continuar interoperável.
+
+### Metadados comuns: schemaVersion 2
+
+| entryType | Propriedades |
 | --- | --- |
-| `Services/VideoChunkIndex.cs` | Prefix sums, busca binária, `IVirtualFile` e contrato do provider |
-| `Services/DiscordVideoChunkProvider.cs` | Um attachment por leitura de chunk, renovação da URL, retry e autenticação |
-| `Services/VideoStreamSession.cs` | Sessão cancelável por vídeo/qualidade, cache e tarefas compartilhadas |
-| `Services/VideoNetworkPriority.cs` | Prioridade cooperativa sobre a cópia do download tradicional |
-| `Services/PreviewResourceRegistry.cs` | Registro/revogação de URLs, validação de Range e respostas limitadas |
-| `Services/AvailableMemoryStream.cs` | Bytes já disponíveis para o WebView2, liberados após consumo ou fechamento |
-| `Services/VirtualFileStream.cs` | Vista limitada dos arquivos de prévia não relacionados ao streaming de vídeo |
-| `Bridge/WebView2PreviewAdapter.cs` | Única camada nova dependente de WebView2 |
-| `Services/Mp4FastStart.cs` | Parser e realocação conservadora de `moov`, sem FFmpeg |
-| `Services/VideoPlaybackProgress.cs` | Registro local por `fileId`, throttle e conclusão |
-| `Bridge/AppController.cs` | Integração dos fluxos existentes, sessões, qualidade, logout e upload |
-| `Models/AppSettings.cs`, `Services/SettingsStore.cs` | Configuração persistente de antecipação |
-| `Models/TransferState.cs` | Checkpoint local `fastStartApplied` para retomar upload |
-| `MainWindow.xaml.cs` | Anexa e remove o adaptador junto ao ciclo de vida da WebView |
-| `web/app.js`, `web/bridge.js`, `web/index.html`, `web/style.css` | Interface, mensagens de reprodução e slider |
+| file | schemaVersion, entryType, fileId, threadId, name, mimeType, sizeBytes, uploadedAt, batchId, parentFolderId opcional, chunks, preview opcional, encryption opcional, fav opcional, trash/sync opcionais |
+| folder | schemaVersion, entryType, folderId, name, createdAt, parentFolderId, folderColor, deviceType/fav/trash/sync/syncDevice opcionais; threadId somente quando aplicável |
+| folderIndex | schemaVersion, entryType, folderId, threadId, serialMessageId/serialSha256 opcionais |
+| folderIndexHeader | schemaVersion, entryType, folderId, parentFolderId, name |
 
-O núcleo não conhece DOM, controles WPF nem WebView2. `IVirtualFile` expõe `Length` e `ReadAsync(offset, destination, cancellationToken)`. O provider fornece bytes de um único chunk. A interface JavaScript não recebe token do Discord, chave de criptografia ou URL privada de attachment para reproduzir vídeo.
+`preview`: `thumbnailMessageId` opcional; `video480p: { sizeBytes, chunks }` quando existe. `encryption` de conteúdo: `version: 1, mode: standard|custom, salt` em Base64URL sem padding; `keyId` opcional antigo. Isso é distinto do envelope de metadados.
 
-## 3. Metadados e localização dos payloads
+`trash`: `originalParentFolderId, deletedAt`. `syncDevice`: `version: 1, deviceId, deviceName`. `sync`: `version: 1, syncFolderId, relativePath, hash, modifiedUtc, revision, revisionId, deviceId, deviceName, state, deletedUtc, canonicalFolderId`, somente os campos aplicáveis. Raízes/aliases não precisam dos campos de arquivo. Caminhos relativos usam `/`; SHA-256 é hexadecimal; IDs são strings.
 
-O formato remoto permanece o existente, sem novos campos obrigatórios:
+### Outros objetos internos cifrados
 
-- `fileId`: identidade persistente do arquivo, preservada em rename e move.
-- `threadId`: post do fórum `files` com os payloads, não o post do índice da pasta.
-- `chunks`: IDs das mensagens que contêm os chunks originais.
-- `sizeBytes`: comprimento do arquivo original em plaintext.
-- `preview.video480p.chunks` e `preview.video480p.sizeBytes`: mensagens e comprimento da versão 480p, quando existente.
-- `encryption.version`, `mode`, `salt`: contexto para autenticar/descriptografar os payloads. Ausência de `encryption` mantém o caminho legado não criptografado.
-- `parentFolderId`, `namesMessageId` e os seriais continuam localizando os detalhes na arquitetura de índices existente. O serial não passa a transportar bytes de vídeo.
+- Caption de serial: `{ "schema":1, "entryType":"folderSerial", "folderId":"...", "sha256":"..." }`. O hash cobre o anexo cifrado completo. `folderName` legado é lido, mas novos captions dispensam esse campo.
+- Dados de serial: `{ "schemaVersion":1, "entryType":"folderSerialData", "data":"BASE64_PADDED_OSER" }`.
+- Rótulo de payload: `{ "schemaVersion":1, "entryType":"payloadReference", "content":"..." }`. content contém o rótulo atual, por exemplo `file:<id> role:original chunk:1/2 encryption:v1`; o rótulo é privado, não o conteúdo externo da mensagem.
+- Confirmação: `{ "schemaVersion":1, "entryType":"syncApplied", "revisionId":"..." }`.
+- Revisão: schemaVersion 2, entryType syncRevision, syncVersion 1, syncFolderId, fileId, relativePath, kind, sizeBytes, hash, modifiedUtc, revision, revisionId, parents, deviceId, deviceName, state, deletedUtc opcional e payload FileMetadata quando aplicável. MessageId é local e não é serializado.
 
-O controller carrega os detalhes pelo `AppRegistry` antes de abrir a sessão. `ForumDownloader` resolve as mensagens, confere ordem e contexto dos payloads usando o protocolo existente e coleta `messageId`, nome, URL e tamanho de cada attachment. Essa resolução pode exigir várias chamadas REST antes do primeiro chunk, mas não baixa os payloads inteiros.
+Schemas internos são separados da versão do envelope. Cifrar um schema não o transforma em outra versão.
 
-Para conteúdo legado sem lista explícita de chunks, a coleta existente identifica um lote completo no post. Uma referência criptografada sem chunks explícitos é recusada; não se tenta adivinhar quais blobs pertencem ao arquivo. A versão 480p e o original sempre usam listas separadas.
+## 3. Envelope completo
 
-## 4. Arquivo virtual e tamanhos variáveis
+Todos os 11 campos são obrigatórios. V1 rejeita campos extras, nomes duplicados, tipos errados e valores fora do protocolo. Ordem externa das propriedades não altera a autenticação.
 
-Não use `offset / limiteAtualDoUpload` para ler arquivos existentes. O limite atual de upload não determina o tamanho dos chunks antigos.
-
-Se `L[i]` for o tamanho plaintext real do chunk `i`:
-
-```text
-S[0] = 0
-S[i + 1] = S[i] + L[i]
-Length = soma(L)
-chunk(offset) = maior i tal que S[i] <= offset
-offsetInterno = offset - S[i]
-take = min(bytesAindaSolicitados, L[i] - offsetInterno)
-```
-
-`VideoChunkIndex` usa soma verificada de inteiros de 64 bits e busca binária. Os índices são internos, baseados em zero. Um offset exatamente em `S[i]` pertence ao chunk `i`. Uma leitura na fronteira copia o final de uma parte e continua no início da próxima.
-
-Exemplos em MiB para chunks não criptografados:
-
-| Tamanhos reais | Offset | Chunk | Offset interno |
-| --- | --- | --- | --- |
-| 20, 20, 12 | 0 | 0 | 0 |
-| 20, 20, 12 | 25 | 1 | 5 |
-| 10, 10, 7 | 20 | 2 | 0 |
-| 10, 20, 3 | 25 | 1 | 15 |
-
-Em payloads criptografados v1, `L[i] = attachment.size - 70`. O envelope contém header de 54 bytes e tag GCM de 16 bytes. A autenticação confirma o tamanho plaintext antes de expor os bytes. Quando `sizeBytes > 0`, a soma precisa coincidir com o metadata; referência incompleta ou divergência é apresentada como erro, sem entregar bytes deslocados.
-
-## 5. Criptografia compartilhada
-
-O streaming reutiliza `EncryptionService.DecryptBytes`, sem alterar a criptografia dos arquivos existentes. Cada attachment criptografado é recebido completamente em RAM antes de autenticar sua tag AES-GCM. Só o plaintext autenticado pode entrar no cache e ser copiado para o player. O ciphertext é zerado após essa etapa.
-
-Contrato do envelope v1, com inteiros big-endian:
-
-| Offset | Tamanho | Campo |
-| --- | --- | --- |
-| 0 | 8 | Magic ASCII `ORGAESGC` |
-| 8 | 1 | Versão, `1` |
-| 9 | 1 | Papel: `1` original, `2` thumbnail/imagem, `3` vídeo 480p |
-| 10 | 4 | Número do chunk baseado em um |
-| 14 | 4 | Total de chunks |
-| 18 | 8 | Tamanho plaintext |
-| 26 | 16 | Salt do arquivo |
-| 42 | 12 | Nonce GCM |
-| 54 | variável | Ciphertext |
-| fim menos 16 | 16 | Tag GCM |
-
-O header inteiro é AAD. A chave de arquivo tem 32 bytes, derivada com HKDF-SHA256 da master key do modo configurado e do salt. O `info` é `UTF8("organessonium/file-key/v1") + byte zero + uint32BE(tamanho UTF8 do fileId.Trim()) + UTF8(fileId.Trim())`. O salt do metadata é Base64URL sem padding. Nenhuma chave real é documentada, publicada ou adicionada ao metadata.
-
-A futura implementação deve reutilizar o mecanismo de master key compatível já existente em cada plataforma. DPAPI é persistência local do Windows, não parte do protocolo remoto. Não substituir o contexto por somente nome de arquivo, tamanho, URL ou índice.
-
-As mensagens criptografadas seguem `file:<fileId> role:<papel> chunk:<n>/<total> encryption:v1`. O papel textual do vídeo reduzido é `video480p`. Validar versão, salt, papel, número, total, comprimento e tag. Falha de autenticação não gera plaintext parcialmente utilizável.
-
-## 6. Sessão, cache e cancelamento
-
-Cada vídeo/qualidade ativa tem `VideoStreamSession`, provider, CTS de vida, cache `index -> byte[]`, mapa de downloads em andamento e uma geração de prefetch cancelável. Aberturas ainda sem URL também são canceladas ao fechar ou sair.
-
-O cache é protegido por lock curto. Nenhum lock é mantido durante rede. Duas leituras do mesmo chunk compartilham a mesma tarefa. O cancelamento de um consumidor não cancela um download necessário a outro consumidor. Um chunk especulativo promovido a leitura necessária deixa de ser cancelado como simples prefetch.
-
-Há no máximo duas transferências CDN e duas leituras de faixa simultâneas por sessão. A janela conserva o chunk atual, o anterior e os próximos `N`, além de chunks fixados por leituras ativas. Antes de reproduzir, o primeiro chunk permanece reutilizável mesmo se o Chromium sondar o final do MP4. A troca de região remove chunks fora da janela e cancela antecipações antigas.
-
-O cache plaintext tem teto de 192 MiB. Chunks individuais acima de 64 MiB são recusados pelo player, com orientação para usar o download completo; esse teto não muda o limite do uploader. Além do cache, podem existir até duas operações com ciphertext/plaintext em trânsito e até 2 MiB de respostas do adaptador. A RAM total do processo também inclui WebView2, decodificação, outras transferências e o coletor .NET; o teto do cache não é um teto do Working Set. Com anexos atuais de até 20 MiB, o conjunto em trânsito é pequeno e independente do tamanho total do vídeo. Mesmo anexos legados maiores aceitos pelo guard não fazem a RAM crescer com a duração do arquivo.
-
-Ao fechar: cancelar abertura, cancelar vida da sessão e prefetch, revogar a URL, descartar respostas e cache, fechar o provider e aguardar tarefas/leituras no `DisposeAsync`. A memória deixa de ter referências de sessão; a devolução física ao sistema depende do GC. O logout suspende gravações tardias de progresso antes de apagar os dados locais. A recuperação/fechamento da WebView remove o adaptador antigo.
-
-## 7. Configuração e buffering
-
-Configurações > Prévias contém **Chunks de vídeo antecipados**, persistido como `videoPrefetchChunks` em `settings`:
-
-- Padrão: `1`.
-- Intervalo: `0` a `6`, validado em interface, controller, store e sessão.
-- `0`: somente chunks pedidos pelo player; não desativa leitura na fronteira nem download completo.
-- O valor vale para sessões novas. Não redimensiona uma sessão já aberta.
-- `VideoPreviewQuality` continua escolhendo 480p ou original quando as referências existem.
-
-Abrir a prévia solicita imediatamente o chunk zero. Não faz prefetch de cinco ou dez partes. O prefetch começa quando os eventos do player sinalizam reprodução e avança sequencialmente até `N` à frente. Uma leitura necessária tem precedência sobre o início de nova antecipação. Pausar ou iniciar seek cancela a geração antiga. O Chromium ainda pode pedir bytes para metadados ou buffering mesmo com prefetch zero: isso é demanda do player, não antecipação do serviço.
-
-Estados internos: `Opening`, `Idle`, `Playing`, `Seeking`, `Buffering`, `Error`, `Closed`. Os eventos `waiting`/`stalled` mostram a indicação de carregamento existente; `playing`, `canplay` e `seeked` a retiram. Os controles, o fullscreen, o volume, a qualidade e o layout do player foram preservados. Falha definitiva apresenta o fallback existente, com o download convencional disponível.
-
-## 8. Seek e entrega ao WebView2
-
-O player transforma tempo em byte ranges usando as tabelas do container. C# não aproxima tempo por percentual do tamanho do arquivo. Ao solicitar uma região distante, `VideoChunkIndex` localiza diretamente a parte correspondente. Não se baixam todas as partes intermediárias. O prefetch anterior é cancelado; demanda ainda compartilhada por outro leitor pode concluir normalmente.
-
-A URL `https://media.organessonium.local/preview/<GUID>` é virtual e opaca. `WebResourceRequested` intercepta o host; não é um servidor HTTPS real nem uma URL pública de attachment. O registro não permite resolver caminhos arbitrários, host externo, query, porta alternativa ou token inválido.
-
-O WebView2 requer conteúdo disponível ao concluir o deferral. Um stream que espera rede dentro do `Read` pode ser drenado inteiro antes de o `<video>` começar. Por isso cada GET de vídeo entrega **no máximo 512 KiB já disponíveis em RAM**, com `206` e intervalo real em `Content-Range`. O Chromium solicita a próxima faixa quando precisa. Há no máximo quatro respostas vivas por recurso, e seus buffers são liberados no EOF ou na revogação, pois o runtime não garante fechar o Stream .NET.
-
-| Pedido | Resposta |
+| Campo | Tipo e significado |
 | --- | --- |
-| `GET bytes=a-b` | `206`, de `a` até `min(b, Length-1, a+512KiB-1)` |
-| `GET bytes=a-` | `206`, até 512 KiB a partir de `a` |
-| `GET bytes=-n` | `206`, a partir de `max(0, Length-n)`, também limitado |
-| GET de vídeo sem Range | Equivalente à primeira faixa a partir de zero, `206` limitado |
-| HEAD sem Range | `200`, comprimento integral e nenhum corpo |
-| HEAD com Range | `206`, cabeçalhos do intervalo, nenhum corpo |
-| Range inválido, múltiplo ou fora do arquivo | `416`, `Content-Range: bytes */Length` |
-| Token desconhecido/revogado | `404`; pedido em andamento cancelado pode receber `410` |
-| Método diferente de GET/HEAD | `405` |
-| Falha definitiva ao obter bytes | `503` e erro do player |
+| format | string exata organessonium-metadata |
+| version | inteiro 1 |
+| encrypted | boolean true |
+| algorithm | string exata AES-256-GCM |
+| kdf | string exata HKDF-SHA256 |
+| keyMode | standard ou custom, case-sensitive |
+| salt | Base64 padrão canônico de 16 bytes aleatórios |
+| nonce | Base64 padrão canônico de 12 bytes aleatórios |
+| keyCheck | Base64 padrão canônico de 16 bytes, definido na seção 5 |
+| ciphertext | Base64 padrão dos bytes cifrados |
+| tag | Base64 padrão canônico de 16 bytes |
 
-`Content-Length` sempre descreve o corpo entregue; `Accept-Ranges: bytes` e `Cache-Control: no-store` evitam tratar a mídia como cache persistente do app. Intervalos são inclusivos. Este adapter parcial serve o player, não substitui a operação Baixar. As respostas de imagens/PDF/áudio existentes continuam podendo ser integrais, mas agora também usam o host virtual em vez do servidor localhost.
+O envelope válido da seção 11 é também o exemplo completo. Sem fileId, entryType, nome, threadId, caminho, hash plaintext, timestamps de arquivo ou chave mestre fora do ciphertext.
 
-Referências de integração: [CreateWebResourceResponse](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2environment.createwebresourceresponse), [contrato da resposta WebView2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2webresourceresponse), [conteúdo local e streams](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/working-with-local-content).
+## 4. AES e AAD
 
-## 9. Discord, URLs e falhas de rede
+AES-256-GCM, chave de 32 bytes, nonce de 12 bytes, tag de 16 bytes. C#: `AesGcm(key, 16)`, Encrypt/Decrypt, com RandomNumberGenerator para salt e nonce em cada Encode.
 
-O provider baixa um attachment completo por chunk, usando `ResponseHeadersRead`, cliente com proxy configurado e timeout de 60 segundos. Comprimento HTTP, leitura incompleta e bytes excedentes são conferidos. Não monta um arquivo local para descriptografar.
-
-Em `403` ou `404`, reler a mensagem por `threadId` e `messageId`, localizar o attachment pelo nome e exigir o mesmo tamanho. Atualizar somente a URL em memória. Mensagem removida, attachment trocado ou índice incompleto não podem ser corrigidos inventando bytes.
-
-Cada chunk tem no máximo quatro tentativas, com backoff cancelável da `NetworkRetryPolicy`; renovação também consome tentativa. Uma falha transitória mantém o player em buffering. Falha definitiva de demanda notifica o controller. Falha de prefetch não encerra a sessão: quando o player precisar da parte, a leitura pode tentar novamente. Não há logs de cada tentativa normal.
-
-As chamadas REST usam `DiscordApiClient` e o `DiscordRequestLimiter` existente: alvo global de 45 requisições por segundo, headers por bucket/rota, pausas de HTTP 429 e `retry_after`. Downloads CDN não passam pela cota REST. Limites de uploads continuam centralizados em `DiscordLimits.cs`, inclusive os 20 MiB por attachment e o desconto do envelope. Não foi criada uma constante alternativa para dividir uploads.
-
-## 10. Vídeos antigos e containers
-
-Vídeos já armazenados não são reprocessados, migrados ou reenviados. Chunks de tamanhos antigos, atuais ou misturados usam o mesmo índice por tamanho real.
-
-MP4 com `moov` no final continua utilizável: o player pede o final por Range, lê os metadados e busca somente as partes relacionadas à posição escolhida. Não é necessário reconstruir tudo para acessar `moov`. A abertura pode esperar chunks do início e do final; não há garantia de latência idêntica à de um MP4 faststart.
-
-Reprodução depende dos containers/codecs suportados pelo Chromium/WebView2 instalado. O arquivo virtual não adiciona codecs nem transcodifica MKV/MOV/WebM. Um formato não reproduzível conserva o fallback e o download completo. Arquivos com metadados incompletos ou maiores que o orçamento por chunk produzem erro explícito, não uma falsa reprodução bem-sucedida.
-
-## 11. Faststart nos uploads novos
-
-`Mp4FastStart.PrepareAsync` inspeciona `.mp4` antes de chunking/encryption. O original do usuário nunca é editado. Se `moov` já precede o primeiro `mdat`, não há cópia nem remux.
-
-Para MP4 convencional elegível:
-
-1. Ler somente headers das boxes de nível superior, com inteiros de 32/64 bits e limites verificados.
-2. Exigir `ftyp` inicial, um `moov` e ao menos um `mdat`.
-3. Ler `moov` em RAM, limitado a 32 MiB.
-4. Colocar `moov` antes do primeiro `mdat`, preservando a ordem das demais boxes.
-5. Percorrer containers conhecidos e corrigir cada `stco`/`co64` de acordo com a realocação do `mdat` que contém a amostra.
-6. Copiar as demais boxes literalmente, em blocos de 128 KiB, para um temporário de upload.
-7. Conferir tamanho final, dividir usando os limites existentes, criptografar e publicar pelo uploader atual.
-8. Remover o temporário no fim, na falha ou no cancelamento.
-
-Para cada offset de amostra `O` dentro de um `mdat` antigo `B`:
+AAD é UTF-8 desta sequência, com LF (byte 0A) entre linhas e SEM LF final:
 
 ```text
-O' = O + novoOffset(B) - antigoOffset(B)
+organessonium-metadata
+1
+true
+AES-256-GCM
+HKDF-SHA256
+<keyMode>
+<salt Base64 exatamente como no envelope>
+<nonce Base64 exatamente como no envelope>
+<keyCheck Base64 exatamente como no envelope>
 ```
 
-Isso também cobre múltiplos `mdat` com deslocamentos diferentes. Bytes de `mdat`, descritores dos codecs, áudio, vídeo, resolução e duração não são recodificados. O arquivo baixado de um upload preparado contém o container faststart; não terá o mesmo hash de arquivo completo que a origem, embora os payloads de mídia permaneçam iguais.
+Não é o JSON do envelope. Não usar CRLF, BOM, espaços adicionais, ordem de objeto, bytes decodificados do salt/nonce ou nomes de propriedades nesse AAD. Valores fixos também são validados antes do AES. Cabeçalho modificado, nonce, ciphertext ou tag alterados nunca entregam plaintext.
 
-O parser é conservador: aceita somente as boxes superiores suportadas, aninhamento até 32 níveis e até 100.000 boxes superiores. Recusa moov comprimido, estrutura fragmentada/auxiliar identificada, tabelas truncadas, offsets fora de `mdat`, tamanho inválido, moov acima do orçamento ou estendido até EOF. `stco` que exigiria promoção para 64 bits também faz fallback, em vez de alterar o tamanho da árvore de boxes sem segurança. Nenhum FFmpeg ou novo pacote .NET foi adicionado para esse recurso.
+## 5. Chaves e KDF
 
-Estrutura não suportada, arquivo corrompido ou falha de preparação registra `Video.FastStart` e mantém o upload do original. Faststart é uma otimização, não requisito para armazenar vídeo. Cancelamento explícito é propagado. O transcoder Windows existente continua gerando a prévia 480p quando aplicável; seu MP4 gerado também passa pelo preparador antes do upload.
+Entrada secreta `M`: exatamente 32 bytes da master key do modo indicado. Seleção independe do modo atualmente usado para escrever: ler envelope standard seleciona M standard; ler custom seleciona M custom. Não usar token, IDs do Discord, nome de arquivo ou fileId como chave de metadados.
 
-`TransferState.fastStartApplied` é somente local. O `sourcePath` continua apontando para a origem, não para o temporário. Na retomada, o preparador refaz a mesma realocação antes de continuar os chunks. Se um checkpoint faststart não puder ser reproduzido, a retomada falha sem combinar chunks de dois layouts. Transferências antigas que já enviaram partes sem faststart continuam naquele layout.
+`standard` reutiliza o provedor padrão existente. Seu bootstrap é embutido no app; não é um segredo exclusivo do usuário. Pode ser recuperado por alguém que tenha o aplicativo/código. AES não corrige essa limitação. Para confidencialidade baseada em segredo do usuário, usar custom.
 
-## 12. Progresso local e retomada
+`custom` reutiliza a master key existente, persistida no Windows com DPAPI CurrentUser. DPAPI NÃO faz parte do protocolo remoto. Os 32 bytes recuperados/exportados são a entrada M que outra plataforma precisa importar para seu armazenamento seguro. Não publicar M nesta especificação nem no envelope.
 
-O registro usa `fileId`, nunca somente o nome. A chave SQLite é `videoProgress:<fileId>` na tabela `settings`; não existe tabela nova nem campo remoto. Exemplo do JSON persistido pelo serializer do registro:
+Quando a configuração inicial deriva M de senha: PBKDF2-HMAC-SHA256, senha em UTF-8 sem BOM/normalização/trim, salt aleatório de 16 bytes, 600000 iterações, saída de 32 bytes. A validação rejeita senha inteiramente em branco; os demais caracteres são preservados. Esse salt e as iterações ficam no armazenamento de chave local, não são o salt do envelope. Cada configuração gera outro salt: digitar a mesma senha em dois dispositivos NÃO garante a mesma M. Para sincronizar, importar a mesma chave de recuperação. Uma chave importada já é M, sem repetir PBKDF2; o armazenamento registra iterações 0 nesse caso.
+
+Recuperação existente OEK1: ASCII OEK1 (4 bytes), versão 1 (byte), comprimento 32 (byte), M (32 bytes), HMAC-SHA256(M, primeiros 38 bytes) (32 bytes), total 70 bytes. Arquivo sensível. Sua verificação é integridade, não confidencialidade; ele contém M e deve permanecer fora do backend e de logs.
+
+Chave por operação:
+
+```text
+K = HKDF-SHA256(ikm=M, salt=envelopeSaltRaw16,
+                info=UTF8("organessonium/metadata-key/v1"), length=32)
+```
+
+RFC 5869 completo, Extract e Expand. Para estes comprimentos:
+PRK = HMAC-SHA256(key=salt, message=M).
+K = HMAC-SHA256(key=PRK, message=UTF8(info) || byte 01).
+O info não tem NUL, prefixo de comprimento ou newline. Não usar o info da chave de conteúdo dos arquivos.
+
+```text
+keyCheckRaw = primeiros 16 bytes de
+  HMAC-SHA256(key=K, message=UTF8("organessonium/metadata-key-check/v1"))
+```
+
+Comparar keyCheck em tempo constante antes do AES; incluí-lo também no AAD. Ele não contém M/K nem substitui a tag. Divergência sugere chave diferente ou cabeçalho alterado; não permite provar qual das duas causas ocorreu. Não é um identificador persistente de usuário: muda com o salt.
+
+HKDF não possui iterações PBKDF2. Todos os parâmetros novos ficam em MetadataCryptoParameters; o PBKDF2 existente permanece centralizado no provedor de chave personalizada.
+
+## 6. Representação, transporte e OSER
+
+Salt, nonce, keyCheck, ciphertext e tag usam Base64 padrão RFC 4648, alfabeto A-Z/a-z/0-9/+/, padding = obrigatório quando aplicável. Rejeitar espaços, quebras de linha, caracteres URL-safe, padding ausente/excedente e bits não canônicos. Isso não altera o Base64URL do salt de conteúdo, que está DENTRO do plaintext cifrado.
+
+Sem concatenação ciphertext+tag no envelope: são campos separados. AES recebe arrays de bytes. O envelope é JSON UTF-8 sem BOM. Metadados comuns até 2000 caracteres vão inline; maiores usam metadata.json. Revisões grandes usam sync-revision.json e caption técnico metadata. Seriais usam serial.bin com JSON UTF-8 cifrado, não OSER visível. Não inferir formato pelo sufixo do arquivo.
+
+Orçamento máximo do envelope: DiscordLimits.AttachmentBytes, atualmente 20 MiB. O limite conservador de plaintext é (MaxEnvelopeBytes - 1024) * 3 / 4; o tamanho final também é validado. O envelope cresce por Base64. Não há multipart de metadados acima disso; rejeitar antes de substituir dados. O tamanho dos arquivos/chunks de conteúdo não mudou.
+
+Dentro de folderSerialData, data é Base64 padrão de OSER v3 existente. Tudo abaixo continua privado:
+
+- Inteiros little-endian; strings = uint32 comprimento dos bytes + UTF-8 sem BOM.
+- Cabeçalho: ASCII OSER, uint16 versão 3, uint8 kind (0 Folder, 1 Favorites), int64 generatedAt Unix-ms, strings folderId, parentFolderId, folderName.
+- Agregado: seis int64 na ordem totalItems, fileCount, folderCount, totalBytes, imageCount, videoCount; uint32 typeCount; para cada tipo em ordem ordinal, string extensão + int64 quantidade.
+- uint32 childCount; filhos na ordem publicada.
+- Filho: uint8 flags; strings id, namesMessageId, parentFolderId, name, threadId, mimeType; int64 uploadedAt Unix-ms; string previewMessageId; contexto encryption; string folderColor.
+- flags: bit0 pasta, bit1 favorito, bit2 phone, bit3 pc.
+- encryption: uint16 0 se ausente; caso contrário uint16 1, uint8 modo (0 standard, 1 custom), string salt de conteúdo, e string keyId somente para custom.
+- V3 não contém sizeBytes por filho; usa agregado. V4 acrescenta int64 sizeBytes depois de folderColor, somente para leitura de dados experimentais existentes. V1 não contém bits de dispositivo nem encryption; V2 contém dispositivo mas não encryption.
+- Rejeitar truncamento, versão desconhecida, kind inválido e bytes restantes ao fim.
+
+SHA-256 do caption/mapping cobre o anexo serial CIFRADO completo, em hexadecimal lowercase. O cache novo conserva exatamente os bytes desse anexo. Para decidir se houve mudança, comparar o conteúdo OSER decodificado, ignorando generatedAt, e conferir o digest do transporte conhecido; não comparar um ciphertext novo de nonce aleatório com o anterior. Assim, leitura/reconciliação sem mudança não republica um serial nem converte um serial legado.
+
+## 7. Processo de escrita
+
+1. Validar os campos do objeto de negócio.
+2. Serializar uma vez para JSON interno.
+3. Converter para UTF-8 estrito e validar orçamento.
+4. Resolver uma cópia temporária da master key pelo modo selecionado.
+5. Gerar salt16 e nonce12 com CSPRNG.
+6. Derivar K com HKDF; calcular keyCheck.
+7. Construir AAD como especificado.
+8. Cifrar JSON UTF-8 com AES-GCM e obter tag.
+9. Converter componentes para Base64 canônico, montar e serializar envelope.
+10. Validar tamanho final; publicar inline ou anexo.
+11. Liberar AES e zerar arrays temporários de chave/plaintext quando possível.
+
+Não há temporário de metadata plaintext. Arquivos temporários de metadata/serial/revisão contêm só ciphertext/envelope. São removidos após envio/falha. Cache operacional local é uma decisão separada.
+
+## 8. Processo de leitura
+
+1. Ler conteúdo da mensagem; quando não houver metadata inline reconhecível, buscar o anexo técnico.
+2. Limitar tamanho antes e durante leitura.
+3. Interpretar objeto JSON e identificar declaração de envelope.
+4. Validar format e version; versão desconhecida é erro, não legado.
+5. Validar campos, tipos, algoritmo/KDF/modo e Base64 canônico.
+6. Resolver M pelo keyMode, derivar K, comparar keyCheck.
+7. Reconstruir AAD e executar AES-GCM Decrypt.
+8. Somente após autenticação, decodificar UTF-8 estrito e interpretar JSON.
+9. Validar schema e campos do negócio; então materializar arquivo/pasta/serial/revisão.
+10. Liberar AES e arrays temporários.
+
+Não aceitar plaintext parcialmente autenticado. JSON interno inválido também falha. Falha de decodificação nunca significa pasta vazia.
+
+## 9. Detecção de versões e erros
+
+Envelope se declara pelo format exato, ou por campos encrypted/ciphertext que exigem validação de envelope. A decisão não depende apenas de encrypted=true. Faltar/mudar format não permite downgrade. Só JSON sem declaração de criptografia pode seguir leitura legada; o negócio ainda valida seu schema. Metadados comuns legados suportados continuam sendo schemaVersion 2, não qualquer formato histórico.
+
+Binary serial começando OSER entra no leitor legado v1-v4. Serial novo é JSON do envelope V1, que depois revela folderSerialData. Rótulos textuais e marcadores syncApplied antigos são lidos somente pelos componentes correspondentes.
+
+MetadataError diferencia InvalidFormat, UnsupportedVersion, InvalidBase64, KeyUnavailable, KeyMismatch, AuthenticationFailed, InvalidPlaintextJson, MissingField e TooLarge. GCM não distingue matematicamente toda adulteração de toda chave errada; keyCheck fornece a classificação preliminar indicada acima. Mensagens ao usuário não exibem stack trace ou plaintext. Nenhum erro de envelope reconhecido faz fallback para outro anexo plaintext.
+
+## 10. Flutter interoperability
+
+Implementar o mesmo router, envelope, bytes e AAD antes de a lógica de negócio consumir metadados. Usar AES-GCM interoperável com nonce96 e tag128; algumas bibliotecas retornam um SecretBox contendo ciphertext, nonce e MAC separados. Não colocar MAC no ciphertext do envelope.
+
+HKDF deve incluir Extract. Entrada M/salt/info são bytes, não suas strings hex/Base64. PBKDF2 só cria M na configuração de chave; não rodar PBKDF2 com o salt de cada envelope. Guardar M no armazenamento seguro da plataforma, não copiar DPAPI. Chaves de recuperação devem transportar os mesmos 32 bytes.
+
+Pseudocódigo:
+
+```text
+encode(jsonUtf8, M, mode):
+    salt = secureRandom(16); nonce = secureRandom(12)
+    K = HKDF_SHA256(M, salt, UTF8("organessonium/metadata-key/v1"), 32)
+    check = HMAC_SHA256(K, UTF8("organessonium/metadata-key-check/v1"))[0:16]
+    header = {fixedFields, keyMode:mode, salt:B64(salt), nonce:B64(nonce), keyCheck:B64(check)}
+    aad = UTF8(joinLF(fixedAADFields, mode, header.salt, header.nonce, header.keyCheck))
+    ciphertext, tag = AES_GCM_encrypt(K, nonce, jsonUtf8, aad, tagBytes=16)
+    return JSON({header, ciphertext:B64(ciphertext), tag:B64(tag)})
+
+decode(envelope, keyResolver):
+    validateVersionAndFields(envelope)
+    salt, nonce, check, ciphertext, tag = strictBase64Fields(envelope)
+    M = keyResolver(envelope.keyMode)
+    K = HKDF_SHA256(M, salt, UTF8("organessonium/metadata-key/v1"), 32)
+    constantTimeCheck(keyCheck(K), check)
+    bytes = AES_GCM_decrypt(K, nonce, ciphertext, tag, reconstructedAAD)
+    return parseJSON(strictUTF8(bytes))
+```
+
+A futura implementação deve ler inline e os anexos técnicos, decodificar seriais antes do OSER, manter caption/digest cifrados, decodificar payloadReference antes dos parsers de partes e preservar os schemas de sincronização. Títulos novos são opacos. Clientes sem esse decoder não conseguem ler publicações V1; não há duplicata pública para mantê-los funcionando.
+
+C# ↔ Node/OpenSSL valida uma segunda implementação agora; NÃO é prova de execução Flutter. O teste futuro obrigatório deve usar o vetor e também nonces aleatórios nos dois sentidos C# ↔ Dart. Não modificar o checkout Flutter para esta implementação desktop.
+
+## 11. Vetor reproduzível
+
+Chave e valores desta seção são exclusivamente de TESTE, públicos e sem relação com dados/chaves reais. Nonce fixo somente neste vetor. Produção nunca oferece parâmetro de nonce fixo.
+
+JSON original, sem newline final:
+
+```json
+{"schemaVersion":2,"entryType":"folder","folderId":"test-folder","name":"Fotos café 📷","createdAt":"2026-10-06T12:00:00Z","parentFolderId":"root","fav":true}
+```
+
+- M hexadecimal: `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`
+- salt hexadecimal: `202122232425262728292a2b2c2d2e2f`
+- nonce hexadecimal: `303132333435363738393a3b`
+- K derivada hexadecimal: `5a806c768419e6d565fe129fe960ff0def7b9ff144722054ff7e87d1992a4fbf`
+- keyCheck Base64: `YBrO6AjFjVYl4RTTKXLRFQ==`
+- tag Base64: `p0rSazS/tPCYuiGeQskzTQ==`
+
+AAD exato:
+
+```text
+organessonium-metadata
+1
+true
+AES-256-GCM
+HKDF-SHA256
+standard
+ICEiIyQlJicoKSorLC0uLw==
+MDEyMzQ1Njc4OTo7
+YBrO6AjFjVYl4RTTKXLRFQ==
+```
+
+Envelope esperado, incluindo ciphertext:
 
 ```json
 {
-  "FileId": "identificador-estavel-do-video",
-  "PositionSeconds": 120.0,
-  "DurationSeconds": 130.0,
-  "LastPlayedUtc": "2026-10-02T15:00:00+00:00",
-  "Completed": false
+  "format": "organessonium-metadata",
+  "version": 1,
+  "encrypted": true,
+  "algorithm": "AES-256-GCM",
+  "kdf": "HKDF-SHA256",
+  "keyMode": "standard",
+  "salt": "ICEiIyQlJicoKSorLC0uLw==",
+  "nonce": "MDEyMzQ1Njc4OTo7",
+  "keyCheck": "YBrO6AjFjVYl4RTTKXLRFQ==",
+  "ciphertext": "yYbZ5T6WPbBjFMC1mh+21Ng5eirPrT4xEfwF1dcRoJpPe7b+AdEOYsLkFKwQ35wkjjI9YwWHvKLvoeDBHMkcOZLakrwErZZjV1s4PWj0U+wYvGmco427uW7PTL6TAax83PS2X8GJ2RvrP+5O52MDk4Fbh+bKe4qoGctc0gFoB8x32ia6GN1EO5HmMbSWKQtgpkqGL54H9+rwjRplmc00saU=",
+  "tag": "p0rSazS/tPCYuiGeQskzTQ=="
 }
 ```
 
-A unidade é segundos com precisão decimal. JavaScript reporta no máximo uma vez por segundo durante `timeupdate`; C# grava no máximo uma vez a cada 10 segundos por arquivo durante fluxo normal. Pausa, fim, seek, fechar, trocar de vídeo e `pagehide` forçam atualização; fechar a sessão/app faz flush do último valor conhecido. Um encerramento abrupto pode perder o intervalo ainda não salvo.
+O arquivo tests/metadata-v1-vector.json contém o mesmo vetor; tests/metadata-v1-interop.cjs é uma implementação independente Node/OpenSSL. Testes comparam os campos esperados e ambos os sentidos com nonces aleatórios, sem abrir janelas.
 
-Ao abrir, `loadedmetadata` restaura automaticamente a posição, sem redesenhar o player. Se a posição atingir 95% da duração, o registro fica `Completed=true` e `PositionSeconds=0`; a próxima abertura começa no início. Se a duração mudar mais que o maior entre 5 segundos e 1%, a posição anterior não é restaurada. Posições não finitas, negativas ou além da faixa segura são ignoradas/limitadas.
+## 12. Segurança, cache, sincronização e compartilhamento
 
-Excluir um arquivo pelo desktop remove seu registro. Exclusão feita por outro cliente pode deixar um registro local sem referência, eliminado na limpeza de 180 dias sem atualização. Rename/move preservam o progresso enquanto `fileId` permanece estável. Entradas sem identidade persistente não ganham identidade pelo nome; devem ser corrigidas no índice antes de prometer retomada entre sessões.
+Protege confidencialidade condicionada ao segredo de M e integridade dos campos cifrados/autenticados. Não protege máquina comprometida, observador com M, key recovery exposta, logs antigos, capturas de UI ou análise de tráfego. Padrão embutido não equivale a um segredo pessoal. Perder a chave custom pode impedir inclusive localizar os chunks; guardar a recuperação com segurança. Não existe reset que restaure dados cifrados sem M.
 
-Logout faz flush, suspende novas atualizações e apaga os dados pela rotina existente; conectar outra configuração reativa o tracker. Falha de SQLite registra `Video.Progress`, mas não impede a reprodução. O progresso não é sincronizado com Discord e não compartilha CTS com download.
+Nonce não pode repetir com a mesma K. Novas operações usam salt e nonce aleatórios; o salt também separa a chave por operação. Não reduzir entropia, gerar nonce por timestamp ou reutilizar ciphertext/tag com header alterado. Tag inválida nunca entrega uma parte recuperável do metadata.
 
-## 13. Download completo em paralelo
+Não é anti-rollback: ciphertext válido antigo continua autenticado. Os mecanismos de revisão/mapping do app resolvem versões, e não o GCM isoladamente.
 
-`DownloadAndAssembleAsync` continua baixando todos os chunks, validando integridade e montando o arquivo, inclusive com `videoPrefetchChunks=0`. O fluxo de download usa seus checkpoints/temporários e seu token de cancelamento. Fechar o player não cancela Baixar; cancelar Baixar não fecha o player. Não há compartilhamento de cache entre esses fluxos, evitando vincular suas vidas e autenticações.
+Cache SQLite, sync_state/sync_issues, estados de transferência e previews mantêm o formato operacional existente, que pode conter nomes/caminhos em claro no disco local. Não há criptografia at-rest completa nesta tarefa; proteger conta/disco Windows. Seriais novos em disco conservam o mesmo envelope cifrado da nuvem; seriais OSER locais antigos são lidos sem migração ao abrir. Memória, objetos de UI e strings gerenciadas contêm dados descriptografados durante uso; limpeza de arrays não garante apagar todas as cópias do runtime.
 
-`VideoNetworkPriority` marca as tentativas CDN de reprodução/prefetch como prioritárias. A cópia do download tradicional cede de forma assíncrona antes de ler seu próximo bloco enquanto houver uma tentativa de vídeo ativa. O lease é liberado antes do backoff. Isso reduz competição, mas não é QoS de rede: uma requisição já em voo e buffers do sistema ainda podem consumir banda. Não altera os controles de upload nem a concorrência global REST.
+Sincronização recebe JSON autenticado antes de comparar revisões/caminhos/hashes. O diário e os marcadores são cifrados; a lógica de conflitos/tombstones não mudou. As limitações existentes de mudanças fora do diário não foram removidas por esta tarefa.
 
-## 14. Implementação equivalente em Flutter
+Não foi encontrado fluxo de compartilhamento por JSON, exportação de biblioteca compartilhada ou tela de compartilhamento neste desktop. Não foi inventado um novo protocolo. A exportação de chave é recuperação, não compartilhamento de arquivo. Uma futura função de compartilhar deve definir entrega autorizada de chave/referências; publicar só ciphertext sem mecanismo de chave não torna um link utilizável. Não publicar M dentro de metadata ou links.
 
-Nenhuma alteração no aplicativo Flutter é necessária para ler o container faststart ou manter o formato remoto existente. Para reproduzir o comportamento novo, implementar um núcleo Dart independente do widget/player:
+Auditoria manual --audit-metadata continua sendo um relatório local explícito e sensível, não um log automático nem temporário de upload. Ele pode conter metadados autenticados; não publicar o relatório. Diagnóstico --debug-names omite nomes, mapeamentos internos e trechos de conteúdo em seu relatório. Exceções do codec contêm somente categoria/mensagem segura, nunca plaintext ou chave.
 
-| Desktop | Equivalente necessário em Dart/plataforma |
-| --- | --- |
-| `VideoChunkIndex` | Prefixos `List<int>` com tamanhos reais e busca binária |
-| `DiscordVideoChunkProvider` | HTTP/cliente Discord existente, renovação e autenticação GCM |
-| `IVirtualFile.ReadAsync` | `Future<Uint8List> read(offset, length, cancel)` |
-| `VideoStreamSession` | Cache por índice, Future compartilhado e geração cancelável de prefetch |
-| WebView2 adapter | Data source nativo do player com leitura por offset; não presumir que aceita Stream Dart |
-| `VideoPlaybackTracker` | Banco/configuração local por `fileId`, segundos, throttle e conclusão |
-| `Mp4FastStart` | Parser/remux anterior a chunking, mantendo bytes e criptografia |
+Atomicidade: metadados são preparados/cifrados antes de PATCH. Anexo↔inline preserva messageId e remove attachments anteriores quando o servidor confirma a substituição. Falha de PATCH conserva o registro anterior. O fluxo de serial/mapping conserva suas confirmações e invalidação de cache em falhas; não existe transação multi-mensagem no Discord. Não apaga milhares de objetos nem recriptografa arquivos.
 
-Pseudocódigo do núcleo, não uma API pronta de plugin:
+Compatibilidades e condições de remoção estão em migration.md. A alteração não reescreve toda a conta: registros e títulos legados continuam legíveis até mudança efetiva ou operação de manutenção explicitamente solicitada.
 
-```dart
-class VirtualVideo {
-  final List<int> lengths;
-  final List<int> starts; // soma dos tamanhos plaintext reais
-  final Map<int, Uint8List> cache = {};
-  final Map<int, Future<Uint8List>> pending = {};
-  final int prefetchChunks; // 0..6, default 1
+### Referências e arquivos
 
-  Future<Uint8List> read(int offset, int count, CancelSignal cancel) async {
-    final output = Uint8List(min(count, totalLength - offset));
-    var copied = 0;
-    while (copied < output.length) {
-      cancel.throwIfCancelled();
-      final i = findChunkByPrefix(offset + copied);
-      cancelObsoletePrefetch(i);
-      final bytes = cache[i] ?? await sharedAuthenticatedDownload(i, cancel);
-      final inside = offset + copied - starts[i];
-      final take = min(output.length - copied, bytes.length - inside);
-      output.setRange(copied, copied + take, bytes, inside);
-      copied += take;
-      evictOutsideBoundedWindow(i);
-    }
-    return output;
-  }
-}
-```
+Algoritmo e derivação: [HKDF RFC 5869](https://www.rfc-editor.org/rfc/rfc5869), [AES-GCM no .NET](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.aesgcm), [Base64 RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html).
 
-No desenvolvimento real, adicionar validação de offsets, fixação durante cópia, teto de RAM, semáforos e cancelamento cooperativo do cliente HTTP. Um Future compartilhado não deve ser abortado enquanto outro leitor ainda depende dele. Criar geração nova em seek e descartar bytes/resultados obsoletos. Não gravar chunks em `.part`, `.cache` ou `.mp4` durante reprodução.
+Criados: Services/MetadataEncryption/*, Bridge/AppController.Metadata.cs, tests/Organessonium.NetworkTests/MetadataEncryptionTests.cs, tests/metadata-v1-vector.json, tests/metadata-v1-interop.cjs, implementation.md e migration.md.
 
-O adaptador do player Android/iOS depende da API disponível e precisa ser validado naquela plataforma. Uma API que só aceite caminho de arquivo e obrigue materialização completa não implementa este requisito; usar data source nativo por faixa/plataforma. Não copiar o host virtual do WebView2 para um servidor HTTP mobile como solução automática.
-
-Preservar `fileId`, listas de message IDs, índices, tamanhos plaintext, papéis, envelope, derivação e autenticação. Não calcular índices pela constante de 20 MiB nem tratar URL CDN como identificador permanente. O limite de anexos continua pertencendo ao upload. Progresso pode seguir o mesmo schema lógico local sem mudar os dados do Discord.
-
-## 15. Logs finais
-
-`AppLogger.Info` e `Debug` continuam sem persistência. Nenhum evento normal de abrir, reproduzir, Range, seek, cache hit/miss, prefetch, fechamento ou coleta de RAM gera arquivo de log. As novas áreas persistidas são `Video.Stream`, `Video.FastStart` e `Video.Progress`, além das exceções não tratadas já existentes.
-
-Os erros adicionados usam mensagens saneadas: não registram tokens, chaves, URLs assinadas, paths locais ou nomes privados de mídia. Falha especulativa recuperável não gera log por chunk. Não foi adicionado framework de logging nem uma opção de debug de produção.
-
-## 16. Validação e reprodução dos testes
-
-O projeto de testes executável é `tests/Organessonium.NetworkTests`. `VideoStreamingTests.cs` cobre leitura em fronteira, último chunk menor, 10/20 MiB e tamanhos misturados, seek distante sem partes intermediárias, cache hit, deduplicação, prefetch 0/3, cancelamento, RAM liberada, limite de respostas, persistência/conclusão/duração/logout, renovação de URL, GCM adulterado e independência do download normal/criptografado.
-
-O teste de faststart cobre `stco`, `co64`, header estendido, bytes de `mdat` preservados, arquivo já preparado e fallback de arquivo inválido. `WebViewVideoTests.cs` abre **o player JavaScript embarcado e o adaptador real** em uma janela WPF, com provider de fixture em RAM e sem servidor. Verifica que a abertura não baixa todas as partes, reprodução com frames decodificados, seek até 120 segundos quando a fixture permite, mesma duração antes/depois de faststart, retomada e configuração na interface. O teste confere SHA-256 dos payloads `mdat`, incluindo áudio e vídeo. A fixture contém partes variáveis e a última menor.
-
-```powershell
-dotnet build Organessonium/Organessonium/Organessonium.csproj -c Release
-$env:ORGANESSONIUM_VIDEO_TEST_FILE = '<caminho de um MP4 de teste com moov no final>'
-dotnet run --project tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj -c Release
-node --check Organessonium/Organessonium/web/app.js
-node --check Organessonium/Organessonium/web/bridge.js
-node --test tests/library-view-isolation.test.js
-```
-
-Sem fixture local, o teste WebView obtém o trailer público de teste da W3C. Isso é infraestrutura de teste, não caminho do app. `ORGANESSONIUM_VIDEO_TEST_OBSERVE_SECONDS` permite até 45 segundos de observação da janela. `ORGANESSONIUM_VIDEO_TEST_EXPORT_DIR`, quando aponta para diretório de QA existente, exporta uma cópia preparada para inspeção externa. Esses arquivos de QA não são criados pelo streaming de produção.
-
-Também verificar manualmente na biblioteca autorizada: abrir vídeo grande; observar o primeiro frame sem reconstrução inteira; pausar/reabrir/app restart; seek para início/meio/final; valores 0, 1 e 6; troca 480p/original; internet lenta/interrompida; CDN expirada; fechar durante prefetch; iniciar/cancelar download em paralelo; formato sem codec; chave personalizada incorreta. Para auditoria externa opcional, comparar tracks/duração/resolução com `ffprobe` ou outro inspetor já disponível. FFmpeg usado para gerar fixture de QA não é dependência nem distribuição do aplicativo.
-
-## 17. Limites da evidência e casos não prometidos
-
-- Testes usam fixtures e HTTP simulado para Discord/criptografia; não certificam todos os arquivos de um servidor real ou uma instalação mobile.
-- O contrato virtual foi validado no WebView2 real instalado. Outros runtimes precisam dos mesmos testes de Range/seek e memória.
-- Codecs não suportados continuam não reproduzíveis. Não há transcodificação automática de streaming.
-- Faststart conservador pode manter o original sem otimização; fragmentado/comprimido, offsets auxiliares e promoção `stco -> co64` não são remuxados.
-- REST para localizar mensagens pode limitar a velocidade de abertura antes da primeira leitura CDN.
-- O guard de 64 MiB por chunk, o cache de 192 MiB e respostas de 512 KiB são limites do player, não mudança do protocolo/upload de 20 MiB.
-- `ProgressiveDownload.cs` e `ResolveProgressivePartsAsync` permanecem como código legado sem chamadas do fluxo atual de prévia de vídeo. Não são o mecanismo ativo descrito aqui.
-- O cache de mídia do app não recebe vídeo durante reprodução. O perfil WebView2 ainda contém os dados normais do runtime; não se promete impedir todos os writes internos do navegador/sistema operacional.
+Integrações: MetadataService, SerialIndexService, AppRegistry, CloudSyncRepository, ForumUploader/ForumDownloader, DiscordApiClient, ServerMetadataAudit, DebugNamesScanner, EncryptionService (somente acesso à master para metadados), AppController, App.xaml.cs, README e projetos/testes relacionados.

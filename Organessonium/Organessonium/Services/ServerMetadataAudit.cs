@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -12,13 +13,18 @@ public sealed class ServerMetadataAudit
 {
     private readonly DiscordApiClient _discord;
     private readonly AppSettings _settings;
-    private readonly MetadataService _metadata = new();
+    private readonly MetadataService _metadata;
+    private readonly IMetadataCodec _metadataCodec;
+    private readonly SerialMetadataTransport _transport;
     private readonly FolderSerialCodec _codec = new();
 
-    public ServerMetadataAudit(DiscordApiClient discord, AppSettings settings)
+    public ServerMetadataAudit(DiscordApiClient discord, AppSettings settings, IMetadataCodec? metadataCodec = null)
     {
         _discord = discord;
         _settings = settings;
+        _metadataCodec = metadataCodec ?? MetadataCodec.Standard();
+        _metadata = new MetadataService(_metadataCodec, discord.DownloadAttachmentBytesAsync);
+        _transport = new SerialMetadataTransport(_metadataCodec);
     }
 
     public async Task<ServerMetadataAuditResult> WriteReportAsync(string reportPath, CancellationToken cancellationToken = default)
@@ -54,6 +60,9 @@ public sealed class ServerMetadataAudit
                 var envelope = await _metadata.ReadEnvelopeAsync(message, cancellationToken);
                 if (envelope == null)
                 {
+                    using var record = await _metadata.ReadJsonAsync(message, cancellationToken);
+                    if (record?.RootElement.TryGetProperty("entryType", out var type) == true &&
+                        type.GetString() is "syncRevision" or "syncApplied") continue;
                     unreadable++;
                     report.AppendLine($"UNREADABLE source={source} messageId={message.Id}");
                     continue;
@@ -95,9 +104,9 @@ public sealed class ServerMetadataAudit
         Console.WriteLine("Audit: scanning serials");
         var serialMessages = await _discord.GetMessagesInParallelAsync(_settings.SerialChannelId, workers, cancellationToken);
         foreach (var message in serialMessages.Where(message => message.Author?.Bot == true &&
-                     SerialMessageEnvelope.TryParse(message.Content, out _)))
+                     SerialMessageEnvelope.TryParse(message.Content, out _, _metadataCodec)))
         {
-            SerialMessageEnvelope.TryParse(message.Content, out var serialEnvelope);
+            SerialMessageEnvelope.TryParse(message.Content, out var serialEnvelope, _metadataCodec);
             try
             {
                 var attachment = message.Attachments.First(attachment =>
@@ -108,6 +117,7 @@ public sealed class ServerMetadataAudit
                 {
                     throw new InvalidDataException("SHA-256 mismatch");
                 }
+                bytes = _transport.Decode(bytes);
                 var serial = _codec.DecodeFolder(bytes);
                 var version = bytes[4] | bytes[5] << 8;
                 report.AppendLine($"SERIAL folderId={serial.FolderId} messageId={message.Id} version={version} children={serial.Children.Count}");

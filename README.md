@@ -21,11 +21,11 @@ Este repositório contém a versão desktop C# WPF + WebView2 do Organessônium.
 - `Services/AppRegistry.Sync.cs` integra computadores e árvores sincronizadas à aba Dispositivos; `Bridge/AppController.Sync.cs` e `web/sync.js` apresentam os comandos, estados e conflitos.
 - `App.Background.cs`, `MainWindow.Sync.cs`, `TrayManager`, `SingleInstanceHost` e `StartupManager` separam o ciclo de vida gráfico da execução em segundo plano.
 
-Um arquivo é identificado por `fileId`; seu metadata associa esse identificador ao `threadId` de payload, aos IDs das mensagens dos chunks, ao nome e MIME originais, a `sizeBytes` em plaintext, ao `parentFolderId` e às referências de prévias. Pastas usam `folderId`; o `parentFolderId` estabelece a árvore. Os IDs são preservados em rename e move. O metadata não é criptografado, pois é o índice necessário para localizar os blobs no Discord.
+Um arquivo é identificado por `fileId`; seu metadata associa esse identificador ao `threadId` de payload, aos IDs das mensagens dos chunks, ao nome e MIME originais, ao tamanho original `sizeBytes`, ao `parentFolderId` e às referências de prévias. Pastas usam `folderId`; o `parentFolderId` estabelece a árvore. Os IDs são preservados em rename e move. Novas publicações de metadados são cifradas integralmente com encrypted metadata V1; o desktop autentica e descriptografa antes de localizar os blobs. JSON antigo em claro continua sendo lido, sem migração ao abrir.
 
 ## Índice serial
 
-Cada pasta, inclusive `root`, possui exatamente um serial `.bin` próprio. O canal de texto `serial` contém uma mensagem do bot para esse serial, com o envelope JSON `folderSerial`, `folderId`, nome opcional e SHA-256 do anexo. O anexo usa a extensão `.bin` e o formato binário versionado `OSER`; ele guarda somente os filhos diretos, seus IDs, relações, MIME, timestamps, referências de preview, cores, favorito e totais dessa pasta.
+Cada pasta, inclusive `root`, possui exatamente um serial `.bin`. O caption `folderSerial` e o anexo são cifrados nas novas gravações. O caption guarda `folderId` e SHA-256 do anexo cifrado; o anexo `serial.bin` contém o envelope JSON V1 em UTF-8, que revela `folderSerialData` com OSER em Base64 após autenticação. Internamente, OSER guarda os filhos diretos, IDs, relações, MIME, datas, previews, cores, favorito e agregados. Captions plaintext e anexos OSER antigos permanecem legíveis.
 
 O serial é o fast-path persistente. Ele é mantido em `OrganessoniumData\Serials` e, depois da primeira leitura, também em memória durante a sessão. O codec lê `OSER` v1 a v4, mas publica v3 para manter o formato binário compartilhado. `sizeBytes` por filho existe somente em v4; o agregado da pasta preserva o total de bytes. Abrir a raiz lê somente o serial da raiz. Abrir `/Fotos` lê somente o serial de `Fotos`; não lê os seriais das subpastas. Se o serial local estiver ausente, o app baixa apenas o anexo indicado pelo mapping daquela pasta, valida o SHA-256 e grava o arquivo localmente por escrita atômica. Antes de reutilizar um serial local durante uma sincronização, o app confirma uma vez por sessão que a mensagem remota indicada pelo mapping ainda existe. Mapping sem `serialMessageId` ou mensagem removida faz o serial ser republicado e o mapping ser atualizado. Os posts do fórum `folders` são arquivados após a leitura e também são reconciliados na inicialização, mantendo os índices antigos fora do limite de posts ativos.
 
@@ -49,15 +49,21 @@ Ao atualizar um serial global existente, o desktop substitui o anexo `.bin` da m
 
 Os seriais de `favorites` e `synchronized` usam o mesmo cache local persistente dos seriais de pastas. Ao abrir essas abas, o desktop mostra primeiro o serial local válido; uma atualização explícita consulta novamente o servidor. Arquivos, Favoritos e Dispositivos mantêm coleções de interface separadas, de modo que cards de uma aba não entram na contagem ou listagem de outra. Leituras concorrentes das abas especiais só publicam a resposta mais recente.
 
-## Metadata publica
+## Metadados e transporte criptografado
 
-No layout desktop atual, o canal de texto `names` é pequeno e contém mappings `folderId -> threadId`; a mensagem do mapping é JSON inline minificado e inclui também a referência do serial atual quando ele existir. O ID da própria mensagem de `names` é mantido no cache local para atualização e remoção direta. Para interoperar com metadados publicados diretamente em `names`, o leitor também aceita metadata de arquivo ou pasta nesse canal quando ele é referenciado por um serial global ou de dispositivo. Ao alterar apenas o favorito de um item desse tipo, o JSON remoto original é carregado e atualizado integralmente para preservar chunks, criptografia, previews e todos os demais campos.
+No layout desktop atual, o canal de texto `names` é pequeno e contém mappings `folderId -> threadId`; a mensagem do mapping é um envelope cifrado cujo JSON interno inclui também a referência do serial atual quando ele existir. O ID da própria mensagem de `names` é mantido no cache local para atualização e remoção direta. Para interoperar com metadados publicados diretamente em `names`, o leitor também aceita metadata de arquivo ou pasta nesse canal quando ele é referenciado por um serial global ou de dispositivo. Ao alterar apenas o favorito de um item desse tipo, o JSON remoto original é carregado e atualizado integralmente para preservar chunks, criptografia, previews e todos os demais campos.
 
-O fórum configurado em `foldersForumId` corresponde ao canal `folders` e contém somente posts `index-*` de índice de pasta. Cada post de índice possui uma primeira mensagem `folderIndexHeader` para identificação e os metadados `file` e `folder` dos filhos diretos. O índice da raiz de uma pasta sincronizada também recebe revisões `syncRevision` e confirmações `syncApplied:<revisionId>`; esses registros não viram cards nem entram nos seriais. O fórum configurado em `appsForumId` corresponde ao canal `files` e contém somente os posts de payload usados por upload. O `threadId` de payload continua pertencendo ao arquivo; o `threadId` de índice de uma pasta é resolvido pelo mapping em `names`.
+O fórum configurado em `foldersForumId` corresponde ao canal `folders` e contém somente posts `index-*` de índice de pasta. Cada post de índice possui uma primeira mensagem `folderIndexHeader` para identificação e os metadados `file` e `folder` dos filhos diretos. O índice da raiz de uma pasta sincronizada também recebe revisões `syncRevision` e confirmações `syncApplied`, cifradas nas novas publicações; o marcador textual antigo `syncApplied:<revisionId>` continua legível. Esses registros não viram cards nem entram nos seriais. O fórum configurado em `appsForumId` corresponde ao canal `files` e contém somente os posts de payload usados por upload. O `threadId` de payload continua pertencendo ao arquivo; o `threadId` de índice de uma pasta é resolvido pelo mapping em `names`.
 
 Regra principal: a presenca de um campo significa que o recurso existe. A ausencia significa que o recurso nao existe ou nao se aplica.
 
-O metadata novo nao deve incluir campos nulos, arrays vazios, objetos vazios, `enabled = false`, campos temporarios da UI, campos de video em imagens, nem campos de arquivo em pastas. Arquivos e pastas são publicados no thread de índice do respectivo pai, não no `names`.
+O metadata novo nao deve incluir campos nulos, arrays vazios, objetos vazios, `enabled = false`, campos temporarios da UI, campos de video em imagens, nem campos de arquivo em pastas. Arquivos e pastas são publicados no thread de índice do respectivo pai, não no `names`. Os exemplos abaixo representam o JSON interno, que é cifrado antes de publicar; não são o conteúdo visível das mensagens novas.
+
+`Services/MetadataEncryption` centraliza o router, envelope, AES-256-GCM, HKDF-SHA256 e erros. O envelope `organessonium-metadata`, versão 1, expõe somente parâmetros técnicos e ciphertext/tag. Usa salt de 16 bytes, nonce aleatório de 12 bytes, tag de 16 bytes, Base64 padrão com padding, UTF-8 sem BOM e AAD definido pela versão. A chave é derivada da master key existente com domínio separado do conteúdo dos arquivos. O modo padrão reutiliza material embutido no app e não é um segredo exclusivo do usuário; confidencialidade baseada em segredo exige chave personalizada. Nenhuma chave vai no envelope.
+
+Arquivos, pastas, mappings, cabeçalhos, seriais, revisões, confirmações e rótulos de payload são protegidos. Novos posts têm títulos aleatórios opacos. Dados legados e títulos antigos não são regravados automaticamente. O backend ainda observa canais/posts, IDs externos, tamanhos, horários e agrupamentos. O cache SQLite, estados de transferência e previews locais continuam operacionais e podem conter dados em claro; seriais novos locais usam os mesmos bytes cifrados da nuvem. Falhas de versão, chave, tag, Base64 ou JSON não viram pasta vazia nem fazem downgrade para plaintext.
+
+`MetadataService` aplica o codec antes de criar inline ou `metadata.json`, e antes de materializar os objetos. Updates usam PATCH da mesma mensagem, inclusive anexo↔inline; removem attachments anteriores na confirmação, sem apagar o metadata antigo antes do envio. Temporários de metadata contêm somente o envelope cifrado. Leituras não causam migração; uma modificação efetiva publica V1. A especificação completa, o vetor público de teste e os requisitos de interoperabilidade estão em [implementation.md](implementation.md); o inventário de compatibilidades está em [migration.md](migration.md).
 
 ### Mapping no `names`
 
@@ -172,7 +178,7 @@ Não há migração nem fallback automático. Para migrar um servidor antigo, cr
 
 ## Payloads criptografados
 
-Todo novo attachment binário do Organessônium passa por `EncryptionService` antes de chegar ao Discord: arquivo original, chunks, miniaturas, prévias de imagem, `video480p` e imagens anexadas em Markdown. O metadata continua público e recebe somente o objeto mínimo `encryption`:
+Todo novo attachment de conteúdo do Organessônium passa por `EncryptionService` antes de chegar ao Discord: arquivo original, chunks, miniaturas, prévias de imagem, `video480p` e imagens anexadas em Markdown. O JSON interno do metadata recebe o objeto mínimo `encryption` abaixo; o objeto completo é protegido pelo codec de metadados, sem cifrar novamente os chunks:
 
 ```json
 "encryption": {
@@ -186,7 +192,7 @@ O `salt` usa exclusivamente Base64URL sem padding, com os caracteres `A-Z`, `a-z
 
 O blob `ORGAESGC` v1 contém magic, versão, papel do payload, índice 1-based e quantidade total do chunk, tamanho plaintext, salt de 16 bytes, nonce GCM de 96 bits, ciphertext e tag de autenticação. O nonce é gerado por CSPRNG para cada payload. A chave por arquivo é derivada por HKDF-SHA-256 a partir da master key, do `fileId` normalizado e do salt do arquivo. O header completo é o AAD do AES-256-GCM, então trocar, truncar ou reordenar payloads invalida a autenticação.
 
-Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1.bin`, `preview.bin`, `video-preview-1.bin` e `image.bin`, sempre com `application/octet-stream`. A mensagem do Discord usa o formato `file:<fileId> role:<role> chunk:<parte>/<total> encryption:v1`. O nome e o MIME originais permanecem somente no metadata do Organessônium.
+Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1.bin`, `preview.bin`, `video-preview-1.bin` e `image.bin`, sempre com `application/octet-stream`. O rótulo interno `file:<fileId> role:<role> chunk:<parte>/<total> encryption:v1` fica dentro de `payloadReference` cifrado nas novas mensagens. O download decodifica esse transporte antes dos parsers existentes; rótulos antigos continuam sendo lidos. Nome, MIME e IDs internos ficam no metadata cifrado.
 
 ### Modos de chave
 
@@ -226,7 +232,7 @@ Uploads novos de MP4 elegível passam por `Mp4FastStart` antes da divisão/cript
 
 O progresso fica no SQLite local, em `settings` sob `videoProgress:<fileId>`, com posição/duração em segundos, UTC da última reprodução e conclusão. O app grava a cada 10 segundos durante fluxo normal e força o último valor em pausa, fechamento, troca ou encerramento normal. Ao reabrir, restaura automaticamente a posição. A partir de 95% da duração, a próxima abertura começa no início; mudança de duração maior que o maior entre 5 segundos e 1% impede restaurar uma posição incompatível. Exclusão permanente remove o registro; registros sem atualização são limpos após 180 dias. Logout apaga o progresso junto aos dados da configuração anterior. Nada disso entra no metadata remoto.
 
-O suporte de codecs permanece dependente do WebView2 instalado; não há transcodificação durante reprodução. A arquitetura, os contratos de Range/criptografia, as limitações do parser, a separação do download e os testes estão detalhados em [implementation.md](implementation.md).
+O suporte de codecs permanece dependente do WebView2 instalado; não há transcodificação durante reprodução. Os contratos de reprodução acima não foram alterados pela cifra dos metadados.
 
 ## Lixeira
 
@@ -256,7 +262,7 @@ A janela principal usa a WebView2 dentro de uma shell WPF. O primeiro frame exib
 
 A barra lateral e a barra superior usam o fundo contínuo da janela. A grade e a lista de arquivos ficam em uma única área de cards levemente mais escura, com cantos arredondados e contraste próprio. Na grade, o tamanho Médio apresenta aproximadamente seis cards por linha em 1920×1080 com a barra lateral aberta; a quantidade de colunas aumenta ou diminui com a largura disponível. As miniaturas quadradas têm margem interna em relação às bordas dos cards, e os tamanhos Pequeno e Grande preservam essa proporção. Os ícones da WebView2 usam a fonte local Material Symbols Rounded do Google, sem depender de uma chamada de rede durante a inicialização. Os thumbnails visíveis são solicitados na ordem dos cards, carregados com concorrência limitada pela configuração `Prévias simultâneas` e entregues à interface de cima para baixo. O rodapé de status anterior não é exibido; mensagens continuam acessíveis pela região `aria-live`, enquanto atividades em segundo plano e transferências usam seus próprios painéis. O resumo lateral fica no rodapé, separa o armazenamento por uma linha e mostra bytes e a quantidade total em formato compacto, como `8,43 GB 312 itens`, depois de receber o agregado completo dos seriais: `AppRegistry.GetLibraryStatisticsAsync` soma os agregados diretos de cada pasta da árvore, e `AppController` entrega o resultado à WebView2. Uma biblioteca vazia é mostrada como `0 B` e `0 itens`. Um ícone animado junto desse resumo permanece visível enquanto alguma leitura ou reconciliação com o servidor está em andamento, inclusive com operações sobrepostas, e desaparece somente depois que todas terminam. Assim, o resumo não trata apenas os filhos da pasta atualmente aberta como a biblioteca inteira. Configurações abre uma tela inteira dentro da janela, com as seções distribuídas em colunas no espaço amplo e uma coluna única em janelas menores. O editor Markdown abre em suas guias locais; sua barra de formatação acompanha a largura útil da área de trabalho e mantém os ícones visíveis no modo compacto.
 
-Para detalhes de arquitetura e compatibilidade entre versoes, veja `Information.md`.
+Para o protocolo de metadados e a dívida de compatibilidade, veja `implementation.md` e `migration.md`.
 
 ## Sincronização de pastas entre computadores
 
@@ -304,7 +310,7 @@ A inicialização é opt-in em Configurações. MSI/execução sem pacote regist
 - Vídeos sincronizados mantêm os bytes originais para preservar o hash; esse upload não aplica faststart nem gera preview 480p. Miniaturas dependem do suporte do Windows Shell. Chunks parciais de downloads abandonados e cópias `.organessonium-recovery` não têm expiração automática.
 - Os testes sem interface validam duas instalações isoladas, conflitos, exclusões, falhas, caminhos, persistência e o protocolo remoto com HTTP simulado. Não substituem validação em dois computadores reais, Discord real, login do Windows, pacote MSIX instalado ou consumo durante horas. A interface não deve ser aberta para testar enquanto o usuário estiver usando o computador.
 
-O contrato detalhado, os arquivos envolvidos e o roteiro de validação estão em [Information.md](Information.md#sincronização-persistente-entre-computadores).
+O diário e as confirmações de sincronização agora usam o mesmo codec antes de serem consumidos pelo worker. O protocolo e as compatibilidades de leitura estão em [implementation.md](implementation.md) e [migration.md](migration.md). A implementação não modifica as regras de conflito/exclusão nem os bytes dos arquivos.
 
 ## Geração de releases para Windows
 

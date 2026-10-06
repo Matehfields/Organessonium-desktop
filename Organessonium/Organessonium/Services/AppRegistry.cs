@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using Organessonium.Models;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
@@ -17,7 +18,7 @@ public sealed partial class AppRegistry
     private readonly DiscordApiClient _discord;
     private readonly SettingsStore _store;
     private readonly AppSettings _settings;
-    private readonly MetadataService _metadata = new();
+    private readonly MetadataService _metadata;
     private readonly SerialIndexService _serials;
     private readonly ConcurrentDictionary<string, FolderIndexMapping> _mappings;
     private readonly ConcurrentDictionary<string, FolderDescriptor> _descriptors = new(StringComparer.OrdinalIgnoreCase);
@@ -38,6 +39,7 @@ public sealed partial class AppRegistry
         _discord = discord;
         _store = store;
         _settings = settings;
+        _metadata = new MetadataService(MetadataCodec.ForStore(store), discord.DownloadAttachmentBytesAsync);
         _serials = new SerialIndexService(discord, store, settings);
         _mappings = new ConcurrentDictionary<string, FolderIndexMapping>(
             store.LoadFolderIndexMappings(),
@@ -128,6 +130,7 @@ public sealed partial class AppRegistry
         {
             throw;
         }
+        catch (MetadataCodecException) { throw; }
         catch (Exception ex)
         {
             AppLogger.Error("Registry.RefreshSynchronized", ex);
@@ -216,6 +219,7 @@ public sealed partial class AppRegistry
             {
                 throw;
             }
+            catch (MetadataCodecException) { throw; }
             catch (Exception ex)
             {
                 AppLogger.Error("Registry.LoadFileDetails", ex, entry.MetadataMessageId);
@@ -844,6 +848,7 @@ public sealed partial class AppRegistry
             {
                 throw;
             }
+            catch (MetadataCodecException) { throw; }
             catch (Exception ex)
             {
                 AppLogger.Error("Registry.BatchSerial", ex, folderId);
@@ -1990,8 +1995,7 @@ public sealed partial class AppRegistry
 
     private static string FolderThreadTitle(string name, string folderId)
     {
-        var suffix = folderId[..Math.Min(12, folderId.Length)];
-        return "index-" + suffix + "-" + (string.IsNullOrWhiteSpace(name) ? "folder" : name);
+        return "index-" + Guid.NewGuid().ToString("N");
     }
 
     private sealed record FolderDescriptor(string FolderId, string ParentFolderId, string Name, string Path);
