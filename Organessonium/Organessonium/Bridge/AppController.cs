@@ -2350,10 +2350,10 @@ public sealed partial class AppController : IAsyncDisposable
         var nextIndex = -1;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
-        var uploadWorkers = Math.Clamp(settings.UploadThreads, 1, 16);
-        var partsPerFile = UploadConcurrencyPlanner.PartsPerFile(uploadWorkers, fileParallelism);
-        using var uploadGate = new AdaptiveUploadGate(uploadWorkers);
-        using var memoryCoordinator = new UploadMemoryCoordinator(uploadWorkers);
+        var uploadWorkers = settings.EffectiveUploadThreads;
+        var partsPerFile = UploadConcurrencyPlanner.PartsPerFile(uploadWorkers, fileParallelism, settings.ForceUploadParallelism);
+        using var uploadGate = new AdaptiveUploadGate(uploadWorkers, adaptive: !settings.ForceUploadParallelism);
+        using var memoryCoordinator = new UploadMemoryCoordinator(uploadWorkers, forceParallelism: settings.ForceUploadParallelism);
         AppLogger.Debug(
             "Upload.Concurrency",
             $"Upload batch configured with {uploadWorkers} network workers, {fileParallelism} parallel files and {partsPerFile} parts per file.");
@@ -2525,7 +2525,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         var name = CleanUploadName(existingTransferState?.FileName ?? file.Name);
         var originalFile = file;
-        var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.UploadThreads, 1, 16);
+        var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.EffectiveUploadThreads, 1, 16);
         var sourceLength = file.Length;
         var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
                                      existingTransferState?.UploadedChunks.Count > 0;
@@ -3098,7 +3098,7 @@ public sealed partial class AppController : IAsyncDisposable
                         onRateLimitWait,
                         cancellationToken,
                         useBatchUi,
-                        settings.UploadThreads,
+                        settings.EffectiveUploadThreads,
                         progressTracker,
                         previewEncryption == null
                             ? null
@@ -4527,6 +4527,7 @@ public sealed partial class AppController : IAsyncDisposable
         settings.Proxy.Password = ArgString(args, 19, settings.Proxy.Password);
         settings.PreviewThreads = Math.Clamp(ArgInt(args, 20, settings.PreviewThreads), 1, 8);
         settings.VideoPrefetchChunks = Math.Clamp(ArgInt(args, 21, settings.VideoPrefetchChunks), 0, VideoStreamSession.MaximumPrefetchChunks);
+        settings.ForceUploadParallelism = ArgBool(args, 22, settings.ForceUploadParallelism);
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var _))
         {
             settings.Proxy.Mode = ProxyMode.Automatic;
@@ -4881,8 +4882,8 @@ public sealed partial class AppController : IAsyncDisposable
         var throttle = new UiThrottle();
         var resumed = 0;
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using var uploadGate = new AdaptiveUploadGate(Math.Clamp(settings.UploadThreads, 1, 16));
-        using var memoryCoordinator = new UploadMemoryCoordinator(Math.Clamp(settings.UploadThreads, 1, 16));
+        using var uploadGate = new AdaptiveUploadGate(settings.EffectiveUploadThreads, adaptive: !settings.ForceUploadParallelism);
+        using var memoryCoordinator = new UploadMemoryCoordinator(settings.EffectiveUploadThreads, forceParallelism: settings.ForceUploadParallelism);
 
         for (var i = 0; i < states.Count; i++)
         {

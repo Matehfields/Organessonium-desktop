@@ -515,6 +515,10 @@
                 <label class="threads-label" for="setting-upload-threads"><span id="setting-upload-threads-label">Partes simultâneas</span> <span id="upload-thr-val" class="setting-val">4</span></label>
                 <input id="setting-upload-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
             </div>
+            <div class="setting-row col setting-copy">
+                <button id="setting-force-upload" class="card-size-btn" type="button" aria-pressed="false" aria-describedby="setting-force-upload-help">Forçar 16 workers</button>
+                <small id="setting-force-upload-help">Mantém até 16 partes em upload, sem ajuste automático por rede ou RAM. Aplica-se aos próximos uploads.</small>
+            </div>
         </section>
         <section class="settings-section">
             <h3 id="settings-encryption-title">Proteção dos arquivos</h3>

@@ -41,6 +41,12 @@ public sealed class AppSettings
     [JsonPropertyName("uploadThreads")]
     public int UploadThreads { get; set; } = 4;
 
+    [JsonPropertyName("forceUploadParallelism")]
+    public bool ForceUploadParallelism { get; set; }
+
+    [JsonIgnore]
+    public int EffectiveUploadThreads => ForceUploadParallelism ? 16 : Math.Clamp(UploadThreads, 1, 16);
+
     [JsonPropertyName("previewThreads")]
     public int PreviewThreads { get; set; } = 4;
 
@@ -120,6 +126,7 @@ public sealed class AppSettings
             Language = Language,
             DownloadThreads = DownloadThreads,
             UploadThreads = UploadThreads,
+            ForceUploadParallelism = ForceUploadParallelism,
             PreviewThreads = PreviewThreads,
             VideoPrefetchChunks = VideoPrefetchChunks,
             DownloadPath = DownloadPath,

@@ -178,11 +178,11 @@ internal static class UploadMemoryPlanner
 
 internal static class UploadConcurrencyPlanner
 {
-    public static int PartsPerFile(int globalWorkers, int activeFiles)
+    public static int PartsPerFile(int globalWorkers, int activeFiles, bool forceParallelism = false)
     {
         globalWorkers = Math.Clamp(globalWorkers, 1, 16);
         activeFiles = Math.Max(1, activeFiles);
-        return Math.Max(1, globalWorkers / activeFiles);
+        return forceParallelism ? globalWorkers : Math.Max(1, globalWorkers / activeFiles);
     }
 }
 
@@ -192,6 +192,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
     private readonly object _sync = new();
     private readonly int _requestedWorkers;
     private readonly UploadBufferStrategy _strategy;
+    private readonly bool _forceParallelism;
     private readonly UploadChunkBufferPool _pool = new();
     private int _activeWorkers;
     private int _allowedWorkers;
@@ -200,14 +201,22 @@ internal sealed class UploadMemoryCoordinator : IDisposable
     private int _rentedMemoryBuffers;
     private bool _disposed;
 
-    public UploadMemoryCoordinator(int requestedWorkers, UploadBufferStrategy strategy = UploadBufferStrategy.Auto)
+    public UploadMemoryCoordinator(int requestedWorkers, UploadBufferStrategy strategy = UploadBufferStrategy.Auto,
+        bool forceParallelism = false)
     {
         _requestedWorkers = Math.Clamp(requestedWorkers, 1, 16);
         _strategy = strategy;
+        _forceParallelism = forceParallelism;
+        if (forceParallelism) _allowedWorkers = _requestedWorkers;
     }
 
     public UploadMemoryPlan SelectPlan(long fileSizeBytes)
     {
+        if (_forceParallelism && _strategy != UploadBufferStrategy.Disk)
+        {
+            return new UploadMemoryPlan(_strategy, true, "Fixed upload parallelism", _requestedWorkers,
+                _requestedWorkers, _requestedWorkers * UploadMemoryPlanner.EstimatedWorkerBytes, default);
+        }
         if (!UploadMemorySnapshot.TryCapture(out var snapshot))
         {
             var unavailable = new UploadMemoryPlan(
@@ -252,7 +261,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             return false;
         }
 
-        RefreshCapacity();
+        if (!_forceParallelism) RefreshCapacity();
         lock (_sync)
         {
             if (_disposed || _allowedWorkers < 1 || _activeWorkers >= _allowedWorkers)
@@ -534,16 +543,18 @@ public sealed class AdaptiveUploadGate : IDisposable
     private readonly object _sync = new();
     private readonly Queue<Waiter> _waiters = new();
     private readonly int _maximumWorkers;
+    private readonly bool _adaptive;
     private int _activeWorkers;
     private int _currentLimit;
     private int _slowSamples;
     private int _healthySamples;
     private bool _disposed;
 
-    public AdaptiveUploadGate(int requestedWorkers)
+    public AdaptiveUploadGate(int requestedWorkers, bool adaptive = true)
     {
         _maximumWorkers = Math.Clamp(requestedWorkers, 1, 16);
         _currentLimit = _maximumWorkers;
+        _adaptive = adaptive;
     }
 
     internal int CurrentLimit
@@ -577,7 +588,7 @@ public sealed class AdaptiveUploadGate : IDisposable
 
     public void ReportCompleted(long bytes, TimeSpan elapsed)
     {
-        if (bytes <= 0 || elapsed <= TimeSpan.Zero)
+        if (!_adaptive || bytes <= 0 || elapsed <= TimeSpan.Zero)
         {
             return;
         }

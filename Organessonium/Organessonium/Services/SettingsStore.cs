@@ -170,6 +170,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.Language = Get(values, "language", settings.Language);
             settings.DownloadThreads = Math.Clamp(GetInt(values, "downloadThreads", settings.DownloadThreads), 1, 16);
             settings.UploadThreads = Math.Clamp(GetInt(values, "uploadThreads", settings.UploadThreads), 1, 16);
+            settings.ForceUploadParallelism = GetBool(values, "forceUploadParallelism", false);
             settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
             settings.VideoPrefetchChunks = Math.Clamp(GetInt(values, "videoPrefetchChunks", 1), 0, VideoStreamSession.MaximumPrefetchChunks);
             settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
@@ -218,6 +219,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "language", settings.Language);
             Upsert(connection, "downloadThreads", Math.Clamp(settings.DownloadThreads, 1, 16).ToString());
             Upsert(connection, "uploadThreads", Math.Clamp(settings.UploadThreads, 1, 16).ToString());
+            Upsert(connection, "forceUploadParallelism", settings.ForceUploadParallelism.ToString());
             Upsert(connection, "previewThreads", Math.Clamp(settings.PreviewThreads, 1, 8).ToString());
             Upsert(connection, "videoPrefetchChunks", Math.Clamp(settings.VideoPrefetchChunks, 0, VideoStreamSession.MaximumPrefetchChunks).ToString());
             Upsert(connection, "downloadPath", settings.DownloadPath);
@@ -593,6 +595,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.Language = Get(values, "language", settings.Language);
         settings.DownloadThreads = Math.Clamp(GetInt(values, "downloadThreads", settings.DownloadThreads), 1, 16);
         settings.UploadThreads = Math.Clamp(GetInt(values, "uploadThreads", settings.UploadThreads), 1, 16);
+        settings.ForceUploadParallelism = GetBool(values, "forceUploadParallelism", false);
         settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
         settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
         settings.TempPath = Get(values, "tempPath", settings.TempPath);

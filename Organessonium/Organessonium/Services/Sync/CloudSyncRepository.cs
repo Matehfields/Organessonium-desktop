@@ -60,7 +60,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         _registry = new AppRegistry(_api, store, settings);
         _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
         _transfers = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
-        _uploadGate = new SemaphoreSlim(Math.Clamp(settings.UploadThreads, 1, 16));
+        _uploadGate = new SemaphoreSlim(settings.EffectiveUploadThreads);
         _downloadClients = downloadClients;
     }
 
@@ -250,7 +250,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                     transfer.BatchId = chunk.BatchId;
                     await _transfers.MarkUploadChunkAsync(transfer, chunk.Index, chunk.MessageId, chunk.SizeBytes, token);
                 }, token, _ => { progress(new(transfer.TransferId, local.RelativePath, "upload", 0, "waiting")); return Task.CompletedTask; },
-                maxParallelParts: Math.Clamp(_settings.UploadThreads, 1, 16), uploadGate: _uploadGate, encryptedPayload: encryption,
+                maxParallelParts: _settings.EffectiveUploadThreads, uploadGate: _uploadGate, encryptedPayload: encryption,
                 cleanupPart: file => { if (file.Exists) file.Delete(); });
             if (result.ChunkMessageIds.Count != count || result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace))
                 throw new InvalidDataException("O upload não confirmou todos os chunks.");

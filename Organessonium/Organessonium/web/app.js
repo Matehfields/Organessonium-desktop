@@ -14,7 +14,7 @@ let historyBack = [], historyForward = [];
 let confirmCb = null;
 let uploadConflictState = null;
 let settings = {
-    cardSize:'medium', downloadThreads:4, uploadThreads:4, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
+    cardSize:'medium', downloadThreads:4, uploadThreads:4, forceUploadParallelism:false, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
     previewEnabled:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
@@ -144,6 +144,7 @@ const I18N = {
         encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
         enablePreviews:'Ativar prévias', simultaneousPreviews:'Prévias simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
+        forceUploadParallelism:'Forçar 16 workers', forceUploadParallelismHelp:'Mantém até 16 partes em upload, sem ajuste automático por rede ou RAM. Aplica-se aos próximos uploads.',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -281,6 +282,7 @@ const I18N = {
         encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
         enablePreviews:'Enable previews', simultaneousPreviews:'Simultaneous previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
+        forceUploadParallelism:'Force 16 workers', forceUploadParallelismHelp:'Keeps up to 16 parts uploading without automatic network or RAM adjustments. Applies to new uploads.',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -571,6 +573,8 @@ function applyI18n() {
     setText('settings-uploads-title', 'uploads');
     setText('setting-upload-files-label', 'simultaneousUploadFiles');
     setText('setting-upload-threads-label', 'simultaneousUploadParts');
+    setText('setting-force-upload', 'forceUploadParallelism');
+    setText('setting-force-upload-help', 'forceUploadParallelismHelp');
     setText('settings-downloads-title', 'downloads');
     setText('setting-dlpath-label', 'downloadFolder');
     setText('setting-tmppath-label', 'tempFolder');
@@ -2837,6 +2841,11 @@ document.addEventListener('DOMContentLoaded', () => {
     $('setting-video-prefetch').addEventListener('input', e => { settings.videoPrefetchChunks=+e.target.value; $('video-prefetch-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-files').addEventListener('input', e => { settings.maxParallelUploads=+e.target.value; $('upload-files-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-threads').addEventListener('input', e => { settings.uploadThreads=+e.target.value; $('upload-thr-val').textContent=e.target.value; queueSettingsSave(); });
+    $('setting-force-upload').addEventListener('click', () => {
+        settings.forceUploadParallelism = !settings.forceUploadParallelism;
+        syncUploadSettings();
+        queueSettingsSave();
+    });
     $('btn-encryption-standard')?.addEventListener('click', () => {
         settings.encryptionMode = 'standard';
         syncEncryptionSettings();
@@ -5612,6 +5621,7 @@ function loadSettings() {
     settings.videoPreviewQuality = settings.videoPreviewQuality === 'original' ? 'original' : 'low';
     settings.cardSize = CARD_SIZES[settings.cardSize] ? settings.cardSize : 'medium';
     settings.uploadThreads = Math.max(1, Math.min(16, Number(settings.uploadThreads) || 4));
+    settings.forceUploadParallelism = settings.forceUploadParallelism === true;
     settings.previewThreads = Math.max(1, Math.min(8, Number(settings.previewThreads) || 4));
     settings.videoPrefetchChunks = Math.max(0, Math.min(6, Number.isFinite(Number(settings.videoPrefetchChunks)) ? Number(settings.videoPrefetchChunks) : 1));
     settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
@@ -5620,7 +5630,7 @@ function loadSettings() {
     applyTheme(settings.theme); applyCardSize(settings.cardSize);
     $('setting-threads').value=settings.downloadThreads; $('thr-val').textContent=settings.downloadThreads;
     $('setting-upload-files').value=settings.maxParallelUploads; $('upload-files-val').textContent=settings.maxParallelUploads;
-    $('setting-upload-threads').value=settings.uploadThreads; $('upload-thr-val').textContent=settings.uploadThreads;
+    syncUploadSettings();
     $('setting-preview-threads').value=settings.previewThreads; $('preview-thr-val').textContent=settings.previewThreads;
     $('setting-video-prefetch').value=settings.videoPrefetchChunks; $('video-prefetch-val').textContent=settings.videoPrefetchChunks;
     $('setting-dlpath').value=settings.downloadPath||''; $('setting-tmppath').value=settings.tempPath||''; $('setting-datapath').value=settings.dataPath||'';
@@ -5634,6 +5644,15 @@ function loadSettings() {
     document.querySelectorAll('.video-quality-btn').forEach(b=>b.classList.toggle('active',b.dataset.videoQuality===(settings.videoPreviewQuality||'low')));
     syncMotionPreference();
     applyI18n();
+}
+function syncUploadSettings() {
+    const forced = settings.forceUploadParallelism === true;
+    const workers = forced ? 16 : settings.uploadThreads;
+    $('setting-upload-threads').value = workers;
+    $('setting-upload-threads').disabled = forced;
+    $('upload-thr-val').textContent = workers;
+    $('setting-force-upload').classList.toggle('active', forced);
+    $('setting-force-upload').setAttribute('aria-pressed', String(forced));
 }
 function syncEncryptionSettings() {
     const customMode = settings.encryptionMode === 'custom';
@@ -5715,7 +5734,8 @@ function saveSettings(showStatus = true) {
         settings.proxy.proxyUsername || '',
         settings.proxy.proxyPassword || '',
         settings.previewThreads,
-        settings.videoPrefetchChunks
+        settings.videoPrefetchChunks,
+        settings.forceUploadParallelism === true
     );
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);

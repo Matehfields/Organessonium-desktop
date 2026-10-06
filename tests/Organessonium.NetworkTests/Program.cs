@@ -71,6 +71,8 @@ internal static partial class Program
         ("uploadMemoryPlannerFallsBackUnderPressure", UploadMemoryPlannerFallsBackUnderPressureAsync),
         ("uploadConcurrencyDistributesPartsPerFile", UploadConcurrencyDistributesPartsPerFileAsync),
         ("adaptiveUploadGateUsesAggregateThroughput", AdaptiveUploadGateUsesAggregateThroughputAsync),
+        ("forcedUploadKeepsSixteenWorkersAndReleasesBuffers", ForcedUploadKeepsSixteenWorkersAndReleasesBuffersAsync),
+        ("webViewForcedUploadSettings", WebViewForcedUploadSettingsAsync),
         ("httpProxyForwardsGet", HttpProxyForwardsGetAsync),
         ("httpProxyAuthAcceptAndReject", HttpProxyAuthAcceptAndRejectAsync),
         ("socks5ProxyForwardsGet", Socks5ProxyForwardsGetAsync),

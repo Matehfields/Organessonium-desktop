@@ -23,6 +23,7 @@ dataPath: args[10],
             maxParallelUploads: args[12],
             previewThreads: args[20],
             videoPrefetchChunks: args[21],
+            forceUploadParallelism: args[22] === true,
             proxy: {
                 proxyMode: args[13],
                 proxyHost: args[14],
