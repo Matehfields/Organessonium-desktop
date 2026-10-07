@@ -148,7 +148,7 @@ const I18N = {
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
-        downloadEta:v => 'Conclusão estimada: ' + v.eta,
+        transferEta:v => 'Tempo restante estimado: ' + v.eta,
         downloads:'Downloads', downloadFolder:'Pasta de downloads',
         tempFolder:'Pasta temporária', dataFolder:'Pasta de dados', dataFolderHelp:'Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.', choose:'Escolher', connection:'Conexão',
         network:'Rede e proxy', proxyMode:'Modo de conexão', proxyModeAuto:'Automático (usar configuração do sistema)',
@@ -286,7 +286,7 @@ const I18N = {
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
-        downloadEta:v => 'Estimated completion: ' + v.eta,
+        transferEta:v => 'Estimated time remaining: ' + v.eta,
         downloads:'Downloads', downloadFolder:'Downloads folder',
         tempFolder:'Temporary folder', dataFolder:'Data folder', dataFolderHelp:'Used on the next startup. Current data is copied without deleting anything.', choose:'Choose', connection:'Connection',
         network:'Network and proxy', proxyMode:'Connection mode', proxyModeAuto:'Automatic (use system settings)',
@@ -2333,6 +2333,7 @@ window._opsUploadBatch = (id, names) => {
             <button type="button" class="op-batch-cancel">${esc(t('cancelUpload'))}</button>
         </div>
         <div class="op-batch-track-line"><div class="op-batch-track"><span id="op-progress-${id}" style="width:0%"></span></div><span class="op-percent" id="op-percent-${id}">0%</span></div>
+        <div class="op-eta hidden" id="op-eta-${id}"></div>
         <div class="op-file-list">${rows}</div>`;
     item.querySelector('.op-batch-cancel').addEventListener('click', e => {
         e.stopPropagation();
@@ -2378,6 +2379,10 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
 window._opsUpdate = (id, status, msg) => {
     const item = $('op-'+id); if (!item) return;
     item.dataset.opStatus = status || 'active';
+    if (['done', 'cancelled', 'error', 'waiting'].includes(status)) {
+        const etaEl = $('op-eta-' + id);
+        if (etaEl) { etaEl.textContent = ''; etaEl.classList.add('hidden'); }
+    }
     const msgEl = $('op-msg-'+id); if (msgEl) msgEl.textContent = msg;
     if (item.classList.contains('op-batch')) {
         if (status === 'done') {
@@ -2439,7 +2444,7 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     const reportedBytes = Math.max(0, Number(transferredBytes) || 0);
     const total = Math.max(0, Number(totalBytes) || 0);
     const reportedActiveSeconds = Number(activeTransferSeconds);
-    const hasActiveClock = Number.isFinite(reportedActiveSeconds) && reportedActiveSeconds >= 0;
+    const hasActiveClock = activeTransferSeconds != null && Number.isFinite(reportedActiveSeconds) && reportedActiveSeconds >= 0;
     let state = transferRateStates.get(id);
     if (!state || state.direction !== direction || state.hasActiveClock !== hasActiveClock) {
         state = {
@@ -2486,8 +2491,8 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     if (etaEl) {
         const remaining = Math.max(0, total - bytes);
         const etaSeconds = state.speed > 0 && remaining > 0 ? remaining / state.speed : 0;
-        etaEl.textContent = direction === 'download' && etaSeconds > 0
-            ? t('downloadEta', { eta:formatTransferEta(etaSeconds) })
+        etaEl.textContent = item.dataset.opStatus === 'active' && etaSeconds > 0
+            ? t('transferEta', { eta:formatTransferEta(etaSeconds) })
             : '';
         etaEl.classList.toggle('hidden', !etaEl.textContent);
     }
