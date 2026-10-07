@@ -145,6 +145,151 @@ internal static partial class Program
         Content = new StringContent("{\"id\":\"456\",\"content\":\"\",\"attachments\":[]}", Encoding.UTF8, "application/json")
     };
 
+    private static HttpResponseMessage BucketResponse(int remaining, double reset, double? epoch = null,
+        DateTimeOffset? date = null)
+    {
+        var response = MessageResponse();
+        response.Headers.Add("X-RateLimit-Bucket", "quota-recovery");
+        response.Headers.Add("X-RateLimit-Limit", "5");
+        response.Headers.Add("X-RateLimit-Remaining", remaining.ToString(CultureInfo.InvariantCulture));
+        response.Headers.Add("X-RateLimit-Reset-After", reset.ToString(CultureInfo.InvariantCulture));
+        if (epoch.HasValue) response.Headers.Add("X-RateLimit-Reset", epoch.Value.ToString(CultureInfo.InvariantCulture));
+        response.Headers.Date = date;
+        return response;
+    }
+
+    private static async Task<TestOutcome> DiscordBucketRefillDoesNotPauseUploadsAsync()
+    {
+        int[] remaining = [4, 3, 2, 2, 1, 0];
+        double[] reset = [1.000, 1.406, 2.016, 2.406, 3.002, 3.500];
+        var calls = 0;
+        using var handler = new LimitsHandler((_, _) =>
+        {
+            var index = Interlocked.Increment(ref calls) - 1;
+            return Task.FromResult(BucketResponse(remaining[index], reset[index]));
+        });
+        using var discord = new DiscordApiClient(Guid.NewGuid().ToString(), new HttpClient(handler));
+        var temporary = Directory.CreateTempSubdirectory("organessonium-quota-refill-");
+        try
+        {
+            var file = new FileInfo(Path.Combine(temporary.FullName, "chunk.bin"));
+            await File.WriteAllBytesAsync(file.FullName, [1, 2, 3]);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(900));
+            for (var i = 0; i < remaining.Length; i++)
+                await discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            return calls == 6 ? TestOutcome.Pass() : TestOutcome.Fail("a sexta parte perdeu a vaga confirmada pelo servidor");
+        }
+        finally { temporary.Delete(true); }
+    }
+
+    private static async Task<TestOutcome> DiscordParallelRepliesPreserveAvailableQuotaAsync()
+    {
+        var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var completed = 0;
+        var epoch = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 20;
+        using var handler = new LimitsHandler(async (_, token) =>
+        {
+            var index = Interlocked.Increment(ref calls);
+            if (index == 1) return BucketResponse(4, 2, epoch);
+            if (index <= 4)
+            {
+                if (index == 4) accepted.TrySetResult();
+                await accepted.Task.WaitAsync(token);
+                // All three were charged, but the older, higher counters arrive last.
+                await Task.Delay((4 - index) * 40, token);
+                Interlocked.Increment(ref completed);
+                return BucketResponse(5 - index, 2, epoch);
+            }
+            if (index == 5 && completed == 3) return BucketResponse(0, 2, epoch);
+            throw new InvalidOperationException("chamada excedeu a cota disponível");
+        });
+        using var discord = new DiscordApiClient(Guid.NewGuid().ToString(), new HttpClient(handler));
+        var temporary = Directory.CreateTempSubdirectory("organessonium-quota-parallel-");
+        try
+        {
+            var file = new FileInfo(Path.Combine(temporary.FullName, "chunk.bin"));
+            await File.WriteAllBytesAsync(file.FullName, [1, 2, 3]);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+            await discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            await Task.WhenAll(Enumerable.Range(0, 3).Select(_ =>
+                discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false)));
+            await discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            using var blocked = new CancellationTokenSource(120);
+            try
+            {
+                await discord.SendFileMessageAsync("123", "", file, blocked.Token, serializeRoute: false);
+                return TestOutcome.Fail("resposta antiga liberou uma parte sem cota");
+            }
+            catch (OperationCanceledException) when (blocked.IsCancellationRequested) { }
+            return calls == 5 ? TestOutcome.Pass() : TestOutcome.Fail("vaga remota foi perdida ou contada duas vezes");
+        }
+        finally { temporary.Delete(true); }
+    }
+
+    private static async Task<TestOutcome> DiscordPendingRetryBlocksFreshQuotaAsync()
+    {
+        var parallelStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var limitedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var readingRetry = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRetry = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var date = DateTimeOffset.UtcNow;
+        using var handler = new LimitsHandler(async (_, _) =>
+        {
+            var index = Interlocked.Increment(ref calls);
+            if (index == 1) return BucketResponse(4, 1, 100, date);
+            if (index == 2)
+            {
+                limitedStarted.TrySetResult();
+                await parallelStarted.Task;
+                var limited = BucketResponse(2, 0.2, 100, date);
+                limited.StatusCode = HttpStatusCode.TooManyRequests;
+                limited.Content = new DeferredRetryContent(readingRetry, releaseRetry);
+                return limited;
+            }
+            if (index == 3)
+            {
+                parallelStarted.TrySetResult();
+                await readingRetry.Task;
+                return BucketResponse(4, 0.2, 101, date.AddSeconds(1));
+            }
+            return BucketResponse(3, 0.2, 102, date.AddSeconds(2));
+        });
+        using var discord = new DiscordApiClient(Guid.NewGuid().ToString(), new HttpClient(handler));
+        var temporary = Directory.CreateTempSubdirectory("organessonium-quota-retry-");
+        try
+        {
+            var file = new FileInfo(Path.Combine(temporary.FullName, "chunk.bin"));
+            await File.WriteAllBytesAsync(file.FullName, [1, 2, 3]);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            var limited = discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            await limitedStarted.Task.WaitAsync(timeout.Token);
+            var fresh = discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            await readingRetry.Task.WaitAsync(timeout.Token);
+            await fresh.WaitAsync(timeout.Token);
+            var next = discord.SendFileMessageAsync("123", "", file, timeout.Token, serializeRoute: false);
+            await Task.Delay(80, timeout.Token);
+            if (calls != 3) return TestOutcome.Fail("headers positivos furaram o 429 enquanto o retry era lido");
+            releaseRetry.TrySetResult();
+            await Task.WhenAll(limited, next).WaitAsync(timeout.Token);
+            return calls == 5 ? TestOutcome.Pass() : TestOutcome.Fail("o bloqueio não retomou as duas partes pendentes");
+        }
+        finally { parallelStarted.TrySetResult(); releaseRetry.TrySetResult(); temporary.Delete(true); }
+    }
+
+    private sealed class DeferredRetryContent(TaskCompletionSource started, TaskCompletionSource released) : HttpContent
+    {
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            started.TrySetResult();
+            await released.Task;
+            await stream.WriteAsync("{\"retry_after\":0.1,\"global\":false}"u8.ToArray());
+        }
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+    }
+
     private sealed class LimitsHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);

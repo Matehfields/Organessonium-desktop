@@ -988,7 +988,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 }
 
                 var (retry, global) = await ResolveRetryAfterAsync(response, cancellationToken);
-                _rateLimiter.Block(routeKey, retry, global);
+                _rateLimiter.Block(reservation, retry, global);
                 response.Dispose();
                 await WaitWithProgressAsync(retry, onRateLimitWait, cancellationToken);
             }
