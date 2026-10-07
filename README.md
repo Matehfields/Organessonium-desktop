@@ -216,6 +216,8 @@ O progresso individual cobre preparação, envio dos chunks originais, geração
 
 ### Download, integridade e compatibilidade
 
+Logs de INFO, DEBUG e WARN, incluindo status da sincronização, não são persistidos. Esses status continuam na interface; os arquivos em `OrganessoniumData\Logs` ficam reservados aos erros já previstos pelo logger. Logs antigos não são removidos automaticamente.
+
 Para payloads criptografados, cada tentativa baixa o ciphertext para um arquivo temporário identificado como tal, valida o envelope e a tag GCM, e só então grava o plaintext. Falhas temporárias de rede durante o download aguardam e repetem a parte até a conexão voltar. Falhas de estrutura ou autenticação descartam os temporários suspeitos e fazem no máximo três downloads completos por payload. Após a terceira falha, o diálogo oferece `Tentar novamente`, iniciando uma nova sequência de três buscas. Após reconstruir o arquivo, o tamanho plaintext é comparado com `sizeBytes` do metadata.
 
 Uma falha de autenticação nunca entrega plaintext. Em modo personalizado, a interface informa que a chave configurada pode estar incorreta. Quando a autenticação passa, mas apenas o tamanho do metadata diverge, o app preserva o arquivo validado e oferece `Abrir mesmo assim` em um diálogo nativo.
@@ -297,6 +299,8 @@ Por padrão, uma alteração somente remota pede confirmação. `Substituir arqu
 Exclusões usam `state: "deleted"`, `deletedUtc`, origem e uma nova revisão, não a ausência de um arquivo ou thread. As políticas são perguntar, propagar ou ignorar. Exclusão remota com edição local é conflito. Diretórios não vazios não são removidos recursivamente pelo worker. Renomeações locais com hash único reaproveitam `fileId` e chunks; renomeações remotas preservam a mesma identidade e respeitam a confirmação/configuração da pasta. Tombstones não são itens da aba Lixeira.
 
 ### Execução sem interface e inicialização
+
+O evento `Closed` libera imediatamente a referência à janela principal. A liberação é idempotente e não altera uma janela substituta; abrir novamente cria outra instância em vez de chamar `Show()` em uma janela já fechada.
 
 `App.xaml` não usa mais `StartupUri`. No modo normal, o primeiro frame continua sendo o splash WPF. O `App` mantém um `SyncBackgroundHost` independente do `AppController`; fechar a janela com `Minimizar para a área de notificação` descarta controller e WebView2, mas conserva somente worker e ícone nativo. Abrir pelo ícone recria a janela. O menu oferece abrir, sincronizar agora, pausar/retomar e sair; sair cancela workers, libera recursos e encerra o processo.
 

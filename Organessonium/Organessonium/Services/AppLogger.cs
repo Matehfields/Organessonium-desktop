@@ -34,8 +34,7 @@ public static class AppLogger
 
     internal static void SyncEvent(string area, string summary, bool warning = false)
     {
-        // Sync summaries contain counts/status codes only, never paths, names or exception bodies.
-        if (area.StartsWith("Sync.", StringComparison.Ordinal)) Write(warning ? "WARN" : "INFO", area, summary, null);
+        // Synchronization status is shown in the UI; only errors are persisted.
     }
 
     private static void Write(string level, string area, string? details, Exception? exception, string? subdirectory = null)

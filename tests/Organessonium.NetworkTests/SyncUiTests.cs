@@ -150,6 +150,10 @@ internal static partial class Program
                         return window;
                     }
                     var first = await OpenAsync(); var firstView = (WebView2)first.FindName("WebView");
+                    var releasedDuringClosed = false;
+                    first.Closed += (_, _) => releasedDuringClosed = typeof(App)
+                        .GetField("_mainWindow", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                        .GetValue(app) == null;
                     var browser = (int)firstView.CoreWebView2.BrowserProcessId;
                     first.Close();
                     using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20)))
@@ -158,6 +162,7 @@ internal static partial class Program
                         while (app.Windows.Count > 0 || !Exited()) { timeout.Token.ThrowIfCancellationRequested(); await Task.Delay(100); }
                     }
                     RequireSync(app.SyncHost != null && !app.Exiting, "fechar encerrou o serviço configurado para tray");
+                    RequireSync(releasedDuringClosed, "a janela fechada continuou disponível para reabertura durante Closed");
                     var second = await OpenAsync();
                     RequireSync(!ReferenceEquals(first, second) && ((WebView2)second.FindName("WebView")).CoreWebView2 != null,
                         "abrir novamente não recriou a interface");

@@ -62,9 +62,11 @@ public partial class App
             _mainWindow.Activate();
             return;
         }
-        _mainWindow = new MainWindow(_desktopStore);
-        MainWindow = _mainWindow;
-        _mainWindow.Show();
+        var window = new MainWindow(_desktopStore);
+        _mainWindow = window;
+        MainWindow = window;
+        window.Closed += (_, _) => WindowReleased(window);
+        window.Show();
         AppLogger.SyncEvent("Sync.Window", "opened");
         _tray?.Dispose();
         _tray = null;
@@ -74,7 +76,8 @@ public partial class App
 
     internal void WindowReleased(MainWindow window)
     {
-        if (ReferenceEquals(_mainWindow, window)) _mainWindow = null;
+        if (!ReferenceEquals(_mainWindow, window)) return;
+        _mainWindow = null;
         if (KeepBackgroundOnClose) EnsureTray();
         else _ = ExitDesktopAsync();
         AppLogger.SyncEvent("Sync.Window", "closed; WebView disposed");
