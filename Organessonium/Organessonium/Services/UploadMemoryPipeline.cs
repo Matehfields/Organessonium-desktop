@@ -210,6 +210,9 @@ internal sealed class UploadMemoryCoordinator : IDisposable
         if (forceParallelism) _allowedWorkers = _requestedWorkers;
     }
 
+    // Batches retain several ciphertext leases. Bound transient disk/AES buffers separately from HTTP workers.
+    internal SemaphoreSlim BatchPreparationGate { get; } = new(2, 2);
+
     public UploadMemoryPlan SelectPlan(long fileSizeBytes)
     {
         if (_forceParallelism && _strategy != UploadBufferStrategy.Disk)
@@ -389,6 +392,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             _disposed = true;
         }
         _pool.Dispose();
+        BatchPreparationGate.Dispose();
         if (Volatile.Read(ref _rentedMemoryBuffers) != 0)
         {
             UploadBufferMemoryReclaimer.Reclaim();

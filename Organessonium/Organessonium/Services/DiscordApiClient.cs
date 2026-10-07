@@ -548,15 +548,16 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
+        var initialMessage = channel.Message;
         var messageId = channel.Message?.Id ?? "";
         if (string.IsNullOrWhiteSpace(messageId))
         {
             var messages = await GetMessagesAsync(channel.Id, 5, cancellationToken);
-            messageId = messages
+            initialMessage = messages
                 .Where(message => message.Attachments.Any(a => a.FileName.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
                 .OrderBy(message => Snowflake(message.Id))
-                .Select(message => message.Id)
-                .FirstOrDefault() ?? "";
+                .FirstOrDefault();
+            messageId = initialMessage?.Id ?? "";
         }
 
         if (string.IsNullOrWhiteSpace(messageId))
@@ -564,7 +565,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             throw new InvalidOperationException("Não foi possível localizar a mensagem inicial do arquivo.");
         }
 
-        return new DiscordForumPostResult(channel.Id, messageId);
+        return new DiscordForumPostResult(channel.Id, messageId, initialMessage?.Attachments);
     }
 
     public async Task<IReadOnlyList<DiscordChannelDto>> GetActiveThreadsAsync(
@@ -732,10 +733,43 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Action<bool>? onTransferActivity,
         bool waitForTransientNetwork)
     {
+        return await SendFilesMessageAsync(channelId, content, [(fileName, openRead)], cancellationToken,
+            onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
+    }
+
+    public Task<DiscordMessageDto> SendFilesMessageAsync(
+        string channelId,
+        string content,
+        IReadOnlyList<PreparedUploadPart> files,
+        CancellationToken cancellationToken = default,
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool serializeRoute = true,
+        Action<bool>? onTransferActivity = null,
+        bool waitForTransientNetwork = false)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ValidateAttachmentCount(files.Count);
+        foreach (var file in files)
+        {
+            ArgumentNullException.ThrowIfNull(file);
+            if (file.Length > DiscordLimits.AttachmentBytes)
+                throw new ArgumentException("Um attachment excede o limite individual configurado para o Discord.", nameof(files));
+        }
+        return SendFilesMessageAsync(channelId, content,
+            files.Select(file => (file.FileName, (Func<Stream>)file.OpenRead)).ToArray(), cancellationToken,
+            onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
+    }
+
+    private async Task<DiscordMessageDto> SendFilesMessageAsync(
+        string channelId, string content, IReadOnlyList<(string FileName, Func<Stream> OpenRead)> files,
+        CancellationToken cancellationToken, Func<TimeSpan, Task>? onRateLimitWait,
+        bool serializeRoute, Action<bool>? onTransferActivity, bool waitForTransientNetwork)
+    {
+        ValidateAttachmentCount(files.Count);
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
-            request.Content = BuildMessageFileContent(content, fileName, openRead);
+            request.Content = BuildMessageFilesContent(content, files);
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
@@ -876,27 +910,42 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         string fileName,
         Func<Stream> openRead)
+        => BuildMessageFilesContent(content, [(fileName, openRead)]);
+
+    private static MultipartFormDataContent BuildMessageFilesContent(
+        string content, IReadOnlyList<(string FileName, Func<Stream> OpenRead)> files)
     {
+        ValidateAttachmentCount(files.Count);
         DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new
         {
             content,
-            attachments = new[] { new { id = "0", filename = fileName } }
+            attachments = files.Select((file, index) => new
+                { id = index.ToString(CultureInfo.InvariantCulture), filename = file.FileName }).ToArray()
         }, JsonOptions.Web);
 
         var multipart = new MultipartFormDataContent();
-        multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        AddFileContent(multipart, fileName, openRead);
-        return multipart;
+        try
+        {
+            multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
+            for (var index = 0; index < files.Count; index++)
+                AddFileContent(multipart, files[index].FileName, files[index].OpenRead, index);
+            return multipart;
+        }
+        catch { multipart.Dispose(); throw; }
     }
 
-    private static void AddFileContent(MultipartFormDataContent multipart, string fileName, Func<Stream> openRead)
+    private static void ValidateAttachmentCount(int count)
+    {
+        if (count is < 1 || count > DiscordLimits.AttachmentsPerMessage)
+            throw new ArgumentException($"A mensagem deve conter entre 1 e {DiscordLimits.AttachmentsPerMessage} attachments.");
+    }
+
+    private static void AddFileContent(MultipartFormDataContent multipart, string fileName, Func<Stream> openRead, int index = 0)
     {
         try
         {
-            multipart.Add(BuildFileContent(openRead), "files[0]", fileName);
-            if (multipart.Headers.ContentLength > DiscordLimits.MessageRequestBytes)
-                throw new ArgumentException($"A mensagem excede o limite de {DiscordLimits.MessageRequestBytes} bytes configurado para o Discord.");
+            multipart.Add(BuildFileContent(openRead), $"files[{index}]", fileName);
         }
         catch
         {
@@ -1095,7 +1144,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     }
 }
 
-public sealed record DiscordForumPostResult(string ThreadId, string MessageId);
+public sealed record DiscordForumPostResult(string ThreadId, string MessageId,
+    IReadOnlyList<DiscordAttachmentDto>? Attachments = null);
 
 public sealed class DiscordApiException : Exception
 {

@@ -157,7 +157,7 @@ public sealed partial class AppRegistry
                 detailed.ParentFolderId ??= entry.ParentFolderId;
                 if (NormalizeFolderId(detailed.ParentFolderId) != NormalizeFolderId(entry.ParentFolderId))
                     throw new InvalidOperationException("A pasta do item mudou no servidor. Atualize a lista antes de continuar.");
-                if (detailed.Type == "file" && detailed.SizeBytes > 0 && detailed.ChunkMessageIds.Count == 0)
+                if (detailed.Type == "file" && detailed.SizeBytes > 0 && detailed.LogicalChunkCount == 0)
                     throw new InvalidOperationException("Os metadados não contêm os chunks do arquivo; nenhuma exclusão foi realizada.");
                 if (detailed.Type == "folder") detailed.ThreadId = entry.ThreadId;
                 return (detailed, channel);

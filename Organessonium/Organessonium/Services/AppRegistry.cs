@@ -186,7 +186,7 @@ public sealed partial class AppRegistry
 
     public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default)
     {
-        if (entry.Type != "file" || entry.ChunkMessageIds.Count > 0 ||
+        if (entry.Type != "file" || entry.LogicalChunkCount > 0 ||
             string.IsNullOrWhiteSpace(entry.MetadataMessageId))
         {
             return entry;
@@ -1928,6 +1928,13 @@ public sealed partial class AppRegistry
         target.Type = source.Type;
         target.MimeType = source.MimeType;
         target.ChunkMessageIds = source.ChunkMessageIds.ToList();
+        target.ChunkReferences = source.ChunkReferences?.ToList();
+        target.ChunkCount = source.ChunkCount;
+        target.BatchId = source.BatchId;
+        target.VideoPreviewChunkMessageIds = source.VideoPreviewChunkMessageIds.ToList();
+        target.VideoPreviewChunkReferences = source.VideoPreviewChunkReferences?.ToList();
+        target.VideoPreviewMessageId = source.VideoPreviewMessageId;
+        target.VideoPreviewSizeBytes = source.VideoPreviewSizeBytes;
         target.PreviewMessageId = source.PreviewMessageId;
         target.Encryption = source.Encryption?.Clone();
     }

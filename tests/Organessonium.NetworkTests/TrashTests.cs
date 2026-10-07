@@ -114,7 +114,7 @@ internal static partial class Program
                     if (handler.DeletedChannels.Count != 0 || handler.Entry("root-thread", "file-a") != null)
                         throw new InvalidDataException("Delete apagou payloads ou deixou metadata na origem.");
                     var trashed = handler.Entry("trash-thread", "file-a") as FileMetadata;
-                    if (trashed?.Trash?.OriginalParentFolderId != "root" || !DateTimeOffset.TryParse(trashed.Trash.DeletedAt, out _) || trashed.Chunks.Single() != "payload-part" || trashed.Encryption?.Salt != "AAAAAAAAAAAAAAAAAAAAAA" || trashed.Preview?.ThumbnailMessageId != "thumb-part")
+                    if (trashed?.Trash?.OriginalParentFolderId != "root" || !DateTimeOffset.TryParse(trashed.Trash.DeletedAt, out _) || trashed.Chunks?.Single() != "payload-part" || trashed.Encryption?.Salt != "AAAAAAAAAAAAAAAAAAAAAA" || trashed.Preview?.ThumbnailMessageId != "thumb-part")
                         throw new InvalidDataException("O envio à lixeira perdeu os metadados completos.");
                     await ClickSidebarAsync("trash", 1, 0);
                     await CheckTrashSerialAsync(1);

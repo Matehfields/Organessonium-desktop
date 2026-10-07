@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.IO;
 using Organessonium.Models;
 using Organessonium.Services.MetadataEncryption;
 
@@ -240,14 +241,18 @@ public sealed class DebugNamesScanner
         if (string.IsNullOrWhiteSpace(file.ThreadId)) return "threadId-ausente";
         if (string.IsNullOrWhiteSpace(file.Name)) return "name-ausente";
         if (file.SizeBytes < 0) return $"sizeBytes-invalido ({file.SizeBytes})";
-        if (file.Chunks == null || file.Chunks.Count == 0) return "chunks-ausentes (arquivo vazio?)";
+        if (file.ChunkRefs != null)
+        {
+            try { ChunkReference.Validate(file.ChunkRefs, file.Chunks); }
+            catch (InvalidDataException) { return "chunkRefs-invalidos"; }
+        }
+        else if (file.Chunks == null || file.Chunks.Count == 0) return "chunks-ausentes (arquivo vazio?)";
         if (file.Preview != null)
         {
             if (file.Preview.Video480p != null &&
                 (!file.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
                  file.Preview.Video480p.SizeBytes <= 0 ||
-                 file.Preview.Video480p.Chunks == null ||
-                 file.Preview.Video480p.Chunks.Count == 0))
+                 (file.Preview.Video480p.ChunkRefs == null && file.Preview.Video480p.Chunks?.Count is not > 0)))
             {
                 return "preview-480p-descartada (video480p invalido)";
             }

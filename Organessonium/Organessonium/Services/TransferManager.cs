@@ -6,6 +6,7 @@ namespace Organessonium.Services;
 public sealed class TransferManager
 {
     private readonly TransferStateRepository _repository;
+    private readonly SemaphoreSlim _uploadCheckpointGate = new(1, 1);
 
     public TransferManager(TransferStateRepository repository)
     {
@@ -26,6 +27,7 @@ public sealed class TransferManager
         var state = new TransferState
         {
             TransferType = TransferTypes.Upload,
+            PayloadLayoutVersion = TransferPayloadLayouts.MultiAttachment,
             Status = TransferStatuses.Preparing,
             SourcePath = source.FullName,
             FileName = source.Name,
@@ -46,8 +48,10 @@ public sealed class TransferManager
         DirectoryInfo destination,
         CancellationToken cancellationToken = default)
     {
-        var chunks = entry.ChunkMessageIds
-            .Select((messageId, index) => new TransferChunkState
+        var chunks = entry.ChunkReferences != null
+            ? ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds).Select(reference => new TransferChunkState
+                { Index = reference.Index, MessageId = reference.MessageId, AttachmentId = reference.AttachmentId }).ToList()
+            : entry.ChunkMessageIds.Select((messageId, index) => new TransferChunkState
             {
                 Index = index,
                 MessageId = messageId,
@@ -58,11 +62,13 @@ public sealed class TransferManager
         var state = new TransferState
         {
             TransferType = TransferTypes.Download,
+            PayloadLayoutVersion = entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment,
             Status = TransferStatuses.Downloading,
             FileId = entry.FileId,
             FileName = entry.Name,
             MimeType = entry.MimeType,
             SizeBytes = entry.SizeBytes,
+            Encryption = entry.Encryption?.Clone(),
             DestinationPath = destination.FullName,
             ThreadId = entry.ThreadId,
             BatchId = entry.BatchId,
@@ -104,6 +110,36 @@ public sealed class TransferManager
             .OrderBy(index => index)
             .ToList();
         await SaveAsync(state, cancellationToken);
+    }
+
+    public async Task MarkUploadChunksAsync(TransferState state, ForumUploadedBatch batch,
+        CancellationToken cancellationToken = default)
+    {
+        if (state.PayloadLayoutVersion != TransferPayloadLayouts.MultiAttachment || batch.Chunks.Count is < 1 ||
+            batch.Chunks.Count > DiscordLimits.AttachmentsPerMessage || string.IsNullOrWhiteSpace(batch.ThreadId) ||
+            string.IsNullOrWhiteSpace(batch.BatchId) || batch.Chunks.Any(chunk => chunk.ThreadId != batch.ThreadId ||
+                chunk.BatchId != batch.BatchId || chunk.SizeBytes < 0 || chunk.MessageId != batch.Chunks[0].MessageId))
+            throw new InvalidDataException("O batch não pertence ao layout/arquivo esperado pela transferência.");
+        var references = batch.Chunks.Select(chunk => new ChunkReference
+            { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId }).ToArray();
+        ChunkReference.Validate(references, totalChunks: state.TotalChunks, partial: true);
+        await _uploadCheckpointGate.WaitAsync(cancellationToken);
+        try
+        {
+            var updated = state.UploadedChunks.Where(chunk => !references.Any(reference => reference.Index == chunk.Index)).ToList();
+            updated.AddRange(batch.Chunks.Select(chunk => new TransferChunkState
+            {
+                Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId,
+                SizeBytes = chunk.SizeBytes, LogicalSizeBytes = chunk.LogicalSizeBytes
+            }));
+            state.ThreadId = batch.ThreadId;
+            state.BatchId = batch.BatchId;
+            state.Status = TransferStatuses.Uploading;
+            state.UploadedChunks = updated.OrderBy(chunk => chunk.Index).ToList();
+            state.PendingChunks = Enumerable.Range(0, state.TotalChunks).Except(state.UploadedChunks.Select(chunk => chunk.Index)).ToList();
+            await SaveAsync(state, cancellationToken);
+        }
+        finally { _uploadCheckpointGate.Release(); }
     }
 
     public async Task MarkDownloadChunkAsync(

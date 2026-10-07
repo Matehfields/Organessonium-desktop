@@ -5,7 +5,7 @@ using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.Services;
 
-public sealed class ForumUploader
+public sealed partial class ForumUploader
 {
     private readonly DiscordApiClient _discord;
     private readonly string _forumId;
@@ -51,11 +51,25 @@ public sealed class ForumUploader
         SemaphoreSlim? uploadGate = null,
         EncryptedPayloadContext? encryptedPayload = null,
         AdaptiveUploadGate? adaptiveUploadGate = null,
-        Action<bool>? onTransferActivity = null)
+        Action<bool>? onTransferActivity = null,
+        bool useAttachmentReferences = false,
+        IReadOnlyList<ChunkReference>? uploadedChunkReferences = null,
+        Func<ForumUploadedBatch, Task>? onBatchUploaded = null)
     {
         if (parts.Count == 0)
         {
             throw new ArgumentException("Nenhuma parte para upload.", nameof(parts));
+        }
+
+        if (useAttachmentReferences)
+        {
+            if (uploadedChunkMessages.Count > 0 && uploadedChunkReferences == null)
+                throw new InvalidDataException("Uma retomada legada não pode ser convertida implicitamente para chunkRefs.");
+            return await UploadGroupedGeneratedAsync(parts.Count,
+                index => Task.FromResult(new PreparedUploadPart(parts[index], Math.Max(0, parts[index].Length - EncryptionService.EnvelopeOverheadBytes))),
+                existingThreadId, existingBatchId, uploadedChunkReferences ?? [], uploadedParts, onChunkUploaded,
+                onBatchUploaded, cancellationToken, onRateLimitWait, maxParallelParts, uploadGate,
+                encryptedPayload, null, adaptiveUploadGate, onTransferActivity, null);
         }
 
         var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
@@ -199,7 +213,11 @@ public sealed class ForumUploader
         EncryptedPayloadContext? encryptedPayload = null,
         Action<FileInfo>? cleanupPart = null,
         AdaptiveUploadGate? adaptiveUploadGate = null,
-        Action<bool>? onTransferActivity = null)
+        Action<bool>? onTransferActivity = null,
+        bool useAttachmentReferences = false,
+        IReadOnlyList<ChunkReference>? uploadedChunkReferences = null,
+        Func<ForumUploadedBatch, Task>? onBatchUploaded = null,
+        SemaphoreSlim? batchPreparationGate = null)
     {
         if (totalParts <= 0)
         {
@@ -207,6 +225,16 @@ public sealed class ForumUploader
         }
 
         ArgumentNullException.ThrowIfNull(preparePart);
+
+        if (useAttachmentReferences)
+        {
+            if (uploadedChunkMessages.Count > 0 && uploadedChunkReferences == null)
+                throw new InvalidDataException("Uma retomada legada não pode ser convertida implicitamente para chunkRefs.");
+            return await UploadGroupedGeneratedAsync(totalParts, preparePart, existingThreadId, existingBatchId,
+                uploadedChunkReferences ?? [], uploadedParts, onChunkUploaded, onBatchUploaded, cancellationToken,
+                onRateLimitWait, maxParallelParts, uploadGate, encryptedPayload, cleanupPart, adaptiveUploadGate,
+                onTransferActivity, batchPreparationGate);
+        }
 
         var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
         var threadId = existingThreadId ?? "";
@@ -394,12 +422,18 @@ public sealed class ForumUploader
         Action<int>? uploadedParts = null,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        EncryptedPayloadContext? encryptedPayload = null)
+        EncryptedPayloadContext? encryptedPayload = null,
+        bool useAttachmentReferences = false)
     {
         if (parts.Count == 0)
         {
             throw new ArgumentException("Nenhuma parte para upload.", nameof(parts));
         }
+
+        if (useAttachmentReferences)
+            return await UploadResumableAsync(archiveFileName, parts, threadId, "", new Dictionary<int, string>(),
+                uploadedParts, cancellationToken: cancellationToken, onRateLimitWait: onRateLimitWait,
+                encryptedPayload: encryptedPayload, useAttachmentReferences: true);
 
         var batchId = NewBatchId();
         uploadedParts?.Invoke(0);
@@ -516,11 +550,37 @@ public sealed class ForumUploader
     }
 }
 
-public sealed record ForumUploadResult(
-    string ThreadId,
-    string BatchId,
-    int ChunkCount,
-    IReadOnlyList<string> ChunkMessageIds);
+public sealed class ForumUploadResult
+{
+    private readonly IReadOnlyList<ChunkReference> _references;
+
+    public ForumUploadResult(string threadId, string batchId, int chunkCount, IReadOnlyList<string> chunkMessageIds)
+    {
+        ThreadId = threadId;
+        BatchId = batchId;
+        ChunkCount = chunkCount;
+        _references = chunkMessageIds.Select((message, index) => new ChunkReference { Index = index, MessageId = message }).ToArray();
+    }
+
+    private ForumUploadResult(string threadId, string batchId, IReadOnlyList<ChunkReference> references)
+    {
+        ThreadId = threadId;
+        BatchId = batchId;
+        _references = ChunkReference.Validate(references).AsReadOnly();
+        ChunkCount = _references.Count;
+        HasAttachmentReferences = true;
+    }
+
+    internal static ForumUploadResult FromReferences(string threadId, string batchId, IReadOnlyList<ChunkReference> references) =>
+        new(threadId, batchId, references);
+
+    public string ThreadId { get; }
+    public string BatchId { get; }
+    public int ChunkCount { get; }
+    public bool HasAttachmentReferences { get; }
+    public IReadOnlyList<ChunkReference>? ChunkReferences => HasAttachmentReferences ? _references : null;
+    public IReadOnlyList<string> ChunkMessageIds => HasAttachmentReferences ? [] : _references.Select(reference => reference.MessageId).ToArray();
+}
 
 public sealed record ForumUploadedChunk(
     string ThreadId,
@@ -528,7 +588,10 @@ public sealed record ForumUploadedChunk(
     int Index,
     string MessageId,
     long SizeBytes,
-    long LogicalSizeBytes = -1);
+    long LogicalSizeBytes = -1,
+    string AttachmentId = "");
+
+public sealed record ForumUploadedBatch(string ThreadId, string BatchId, IReadOnlyList<ForumUploadedChunk> Chunks);
 
 public sealed class PreparedUploadPart : IDisposable
 {

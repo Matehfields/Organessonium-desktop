@@ -133,9 +133,10 @@ public sealed class ForumDownloader
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
     {
+        if (entry.ChunkReferences != null) ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
         try
         {
-            if (entry.ChunkMessageIds.Count == 0)
+            if (entry.LogicalChunkCount == 0)
             {
                 if (entry.Encryption != null)
                 {
@@ -154,7 +155,8 @@ public sealed class ForumDownloader
                 cancellationToken,
                 onDetailedProgress,
                 EncryptionContext(entry, EncryptedPayloadRoles.Original),
-                entry.SizeBytes);
+                entry.SizeBytes,
+                entry.ChunkReferences);
         }
         catch (Exception ex) when (CanRecoverByBatch(entry, ex))
         {
@@ -203,6 +205,7 @@ public sealed class ForumDownloader
     {
         return ex is not OperationCanceledException &&
                entry.Encryption == null &&
+               entry.ChunkReferences == null &&
                !string.IsNullOrWhiteSpace(entry.BatchId);
     }
     public async Task<FileInfo> DownloadAndAssembleAsync(
@@ -214,7 +217,7 @@ public sealed class ForumDownloader
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
     {
-        if (entry.ChunkMessageIds.Count == 0)
+        if (entry.LogicalChunkCount == 0)
         {
             return await DownloadAndAssembleAsync(entry, destDir, onProgress, cancellationToken, onDetailedProgress);
         }
@@ -226,17 +229,22 @@ public sealed class ForumDownloader
         state.MimeType = entry.MimeType;
         state.SizeBytes = entry.SizeBytes;
         state.Encryption = entry.Encryption?.Clone();
-        state.TotalChunks = entry.ChunkMessageIds.Count;
-        state.Chunks = entry.ChunkMessageIds
+        var references = entry.ChunkReferences == null ? null : ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
+        state.PayloadLayoutVersion = references == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment;
+        state.TotalChunks = entry.LogicalChunkCount;
+        state.Chunks = (references?.Select(reference => reference.MessageId) ?? entry.ChunkMessageIds)
             .Select((messageId, index) =>
             {
+                var attachmentId = references?[index].AttachmentId;
                 var existing = state.Chunks.FirstOrDefault(chunk => chunk.Index == index);
-                if (existing == null || !string.Equals(existing.MessageId, messageId, StringComparison.OrdinalIgnoreCase))
+                if (existing == null || !string.Equals(existing.MessageId, messageId, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(existing.AttachmentId, attachmentId, StringComparison.Ordinal))
                 {
                     return new TransferChunkState
                     {
                         Index = index,
-                        MessageId = messageId
+                        MessageId = messageId,
+                        AttachmentId = attachmentId
                     };
                 }
 
@@ -245,13 +253,14 @@ public sealed class ForumDownloader
             })
             .ToList();
 
-        onProgress($"Localizando partes 0/{entry.ChunkMessageIds.Count}...");
+        onProgress($"Localizando partes 0/{entry.LogicalChunkCount}...");
         var parts = await ResolveMessagePartsAsync(
             entry.ThreadId,
             entry.ChunkMessageIds,
             entry.BatchId,
             cancellationToken,
-            (completed, total) => onProgress($"Localizando partes {completed}/{total}..."));
+            (completed, total) => onProgress($"Localizando partes {completed}/{total}..."),
+            references);
 
         foreach (var part in parts)
         {
@@ -413,7 +422,7 @@ public sealed class ForumDownloader
         Action<DownloadProgress>? onProgress = null,
         CancellationToken cancellationToken = default)
     {
-        if (entry.VideoPreviewChunkMessageIds.Count == 0)
+        if (entry.VideoPreviewChunkReferences == null && entry.VideoPreviewChunkMessageIds.Count == 0)
         {
             return await DownloadPreviewAndAssembleAsync(entry.ThreadId, "video-480", destDir, onProgress, cancellationToken);
         }
@@ -427,7 +436,8 @@ public sealed class ForumDownloader
             cancellationToken,
             onProgress,
             EncryptionContext(entry, EncryptedPayloadRoles.Video480p),
-            entry.VideoPreviewSizeBytes);
+            entry.VideoPreviewSizeBytes,
+            entry.VideoPreviewChunkReferences);
     }
 
     public async Task<FileInfo?> DownloadPreviewAndAssembleAsync(
@@ -797,11 +807,12 @@ public sealed class ForumDownloader
         AppEntry entry,
         CancellationToken cancellationToken = default)
     {
-        var parts = entry.ChunkMessageIds.Count > 0
-            ? await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken)
+        var parts = entry.ChunkReferences != null || entry.LogicalChunkCount > 0
+            ? await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken,
+                chunkReferences: entry.ChunkReferences)
             : await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
 
-        if (parts.Count == 0 && entry.ChunkMessageIds.Count > 0)
+        if (parts.Count == 0 && entry.ChunkReferences == null && entry.ChunkMessageIds.Count > 0)
         {
             parts = await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
         }
@@ -820,8 +831,10 @@ public sealed class ForumDownloader
         {
             var ids = entry.VideoPreviewChunkMessageIds.Count > 0 ? entry.VideoPreviewChunkMessageIds :
                 string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId) ? [] : new List<string> { entry.VideoPreviewMessageId };
-            parts = ids.Count > 0
-                ? await ResolveMessagePartsAsync(entry.ThreadId, ids, "", cancellationToken)
+            parts = entry.VideoPreviewChunkReferences != null || ids.Count > 0
+                ? await ResolveMessagePartsAsync(entry.ThreadId,
+                    entry.VideoPreviewChunkReferences == null ? ids : entry.VideoPreviewChunkMessageIds, "", cancellationToken,
+                    chunkReferences: entry.VideoPreviewChunkReferences)
                 : await CollectPreviewPartsAsync(entry.ThreadId, "video-480", cancellationToken);
             if (parts.Count == 0 && entry.Encryption == null)
             {
@@ -833,14 +846,15 @@ public sealed class ForumDownloader
         }
         else
         {
-            if (entry.Encryption != null && entry.ChunkMessageIds.Count == 0)
+            if (entry.Encryption != null && entry.LogicalChunkCount == 0)
                 throw new InvalidDataException("O metadata criptografado não contém referências aos chunks do vídeo.");
-            parts = entry.ChunkMessageIds.Count > 0
-                ? await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken)
+            parts = entry.ChunkReferences != null || entry.LogicalChunkCount > 0
+                ? await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken,
+                    chunkReferences: entry.ChunkReferences)
                 : await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
         }
         return new DiscordVideoChunkProvider(_discord, entry.ThreadId,
-            parts.Select(p => new VideoAttachment(p.Index, p.MessageId, p.Name, p.Url, p.Size)).ToArray(),
+            parts.Select(p => new VideoAttachment(p.Index, p.MessageId, p.Name, p.Url, p.Size, p.AttachmentId)).ToArray(),
             _encryption, EncryptionContext(entry, lowQuality ? EncryptedPayloadRoles.Video480p : EncryptedPayloadRoles.Original),
             lowQuality ? entry.VideoPreviewSizeBytes : entry.SizeBytes, _downloadClientFactory());
     }
@@ -980,8 +994,30 @@ public sealed class ForumDownloader
         IReadOnlyList<string> messageIds,
         string batchId,
         CancellationToken cancellationToken,
-        Action<int, int>? onPartResolved = null)
+        Action<int, int>? onPartResolved = null,
+        IReadOnlyList<ChunkReference>? chunkReferences = null)
     {
+        if (chunkReferences != null)
+        {
+            var ordered = ChunkReference.Validate(chunkReferences, messageIds);
+            var messageKeys = ordered.Select(reference => reference.MessageId).Distinct(StringComparer.Ordinal).ToArray();
+            var fetched = await _discord.GetMessagesByIdsAsync(threadId, messageKeys, cancellationToken);
+            foreach (var message in fetched.Values) DecodeReference(message);
+            var parts = new List<Part>(ordered.Count);
+            foreach (var reference in ordered)
+            {
+                if (!fetched.TryGetValue(reference.MessageId, out var message))
+                    throw new InvalidDataException("A mensagem referenciada por chunkRefs não foi encontrada.");
+                var attachments = message.Attachments.Where(attachment => attachment.Id == reference.AttachmentId).ToArray();
+                if (attachments.Length != 1 || attachments[0].Size <= 0)
+                    throw new InvalidDataException("O attachment exato referenciado por chunkRefs não existe ou está inválido.");
+                var attachment = attachments[0];
+                parts.Add(new Part(reference.Index, attachment.Url, attachment.FileName, attachment.Size,
+                    reference.MessageId, batchId, attachment.ProxyUrl, reference.AttachmentId));
+                onPartResolved?.Invoke(parts.Count, ordered.Count);
+            }
+            return parts;
+        }
         if (messageIds.Count == 0)
         {
             return [];
@@ -1034,9 +1070,11 @@ public sealed class ForumDownloader
         CancellationToken cancellationToken,
         Action<DownloadProgress>? onDetailedProgress = null,
         EncryptedPayloadContext? encryption = null,
-        long expectedPlaintextLength = -1)
+        long expectedPlaintextLength = -1,
+        IReadOnlyList<ChunkReference>? chunkReferences = null)
     {
-        var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken);
+        var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken, chunkReferences: chunkReferences);
+        encryption = encryption?.WithChunkCount(parts.Count);
 
         if (parts.Count == 0)
         {
@@ -1251,7 +1289,7 @@ public sealed class ForumDownloader
                         await _encryption.DecryptFileAsync(
                             encryptedTarget,
                             target,
-                            encryption.WithChunkIndex(part.Index).WithChunkCount(parts.Count),
+                            encryption.WithChunkIndex(part.Index),
                             cancellationToken);
                         TryDelete(encryptedTarget);
                     }
@@ -1421,7 +1459,10 @@ public sealed class ForumDownloader
     {
         return entry.Encryption == null
             ? null
-            : new EncryptedPayloadContext(entry.FileId, entry.Encryption, role, 0);
+            : new EncryptedPayloadContext(entry.FileId, entry.Encryption, role, 0,
+                Math.Max(1, role == EncryptedPayloadRoles.Video480p
+                    ? entry.VideoPreviewChunkReferences?.Count ?? entry.VideoPreviewChunkMessageIds.Count
+                    : entry.LogicalChunkCount));
     }
 
     private static void EnsureExpectedPlaintextLength(FileInfo file, long expectedLength)
@@ -1582,7 +1623,7 @@ public sealed class ForumDownloader
         return unit == 0 ? $"{value:0} {units[unit]}" : $"{value:0.00} {units[unit]}";
     }
 
-    private sealed record Part(int Index, string Url, string Name, long Size, string MessageId = "", string BatchId = "", string ProxyUrl = "");
+    private sealed record Part(int Index, string Url, string Name, long Size, string MessageId = "", string BatchId = "", string ProxyUrl = "", string AttachmentId = "");
     private sealed class PartBatch
     {
         public PartBatch(int totalParts)

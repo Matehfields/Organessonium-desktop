@@ -5,7 +5,7 @@ using Organessonium.Models;
 
 namespace Organessonium.Services;
 
-public sealed record VideoAttachment(int Index, string MessageId, string Name, string Url, long Size);
+public sealed record VideoAttachment(int Index, string MessageId, string Name, string Url, long Size, string AttachmentId = "");
 
 /// <summary>CDN bytes stay in memory; REST lookups reuse DiscordApiClient's rate limiter.</summary>
 public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
@@ -55,7 +55,9 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                     if (string.IsNullOrWhiteSpace(attachment.MessageId))
                         throw new IOException("O anexo do vídeo não está mais disponível.");
                     var message = await _discord.GetMessageAsync(_threadId, attachment.MessageId, cancellationToken).ConfigureAwait(false);
-                    var renewed = message.Attachments.FirstOrDefault(a => a.FileName == attachment.Name);
+                    var renewed = string.IsNullOrWhiteSpace(attachment.AttachmentId)
+                        ? message.Attachments.FirstOrDefault(a => a.FileName == attachment.Name)
+                        : message.Attachments.SingleOrDefault(a => a.Id == attachment.AttachmentId);
                     if (renewed == null || renewed.Size != attachment.Size)
                         throw new InvalidDataException("O anexo do chunk foi removido ou alterado.");
                     attachment = attachment with { Url = renewed.Url };

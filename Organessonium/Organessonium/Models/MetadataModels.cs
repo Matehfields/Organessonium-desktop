@@ -63,7 +63,12 @@ public sealed class FileMetadata : MetadataEntry
     public string? ParentFolderId { get; set; }
 
     [JsonPropertyName("chunks")]
-    public List<string> Chunks { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Chunks { get; set; } = [];
+
+    [JsonPropertyName("chunkRefs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ChunkReference>? ChunkRefs { get; set; }
 
     [JsonPropertyName("preview")]
     public PreviewMetadata? Preview { get; set; }
@@ -174,7 +179,12 @@ public sealed class VideoPreviewMetadata
     public long SizeBytes { get; set; }
 
     [JsonPropertyName("chunks")]
-    public List<string> Chunks { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Chunks { get; set; } = [];
+
+    [JsonPropertyName("chunkRefs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ChunkReference>? ChunkRefs { get; set; }
 }
 
 public sealed record MetadataEnvelope(string MessageId, MetadataEntry Entry);

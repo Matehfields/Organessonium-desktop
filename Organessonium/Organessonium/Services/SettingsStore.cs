@@ -260,7 +260,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json
+                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
+                       chunk_refs_json, video_preview_chunk_refs_json
                 FROM app_entries
                 WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
                 ORDER BY rowid
@@ -296,7 +297,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id,
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
-                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json
+                       encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
+                       chunk_refs_json, video_preview_chunk_refs_json
                 FROM app_entries
                 WHERE folder_id = $folderId AND type = 'folder'
                 LIMIT 1
@@ -367,9 +369,16 @@ public sealed class SettingsStore : IEncryptionSecretStore
             entry.ChunkMessageIds = DeserializeCachedList(reader.GetString(9));
             entry.ChunkCount = Math.Max(reader.GetInt32(10), entry.ChunkMessageIds.Count);
             entry.VideoPreviewChunkMessageIds = DeserializeCachedList(reader.GetString(14));
+            entry.ChunkReferences = reader.IsDBNull(26) ? null :
+                System.Text.Json.JsonSerializer.Deserialize<List<ChunkReference>>(reader.GetString(26), JsonOptions.Web)
+                ?? throw new InvalidDataException("Cache de chunkRefs inválido.");
+            entry.VideoPreviewChunkReferences = reader.IsDBNull(27) ? null :
+                System.Text.Json.JsonSerializer.Deserialize<List<ChunkReference>>(reader.GetString(27), JsonOptions.Web)
+                ?? throw new InvalidDataException("Cache de referências da prévia inválido.");
             if (string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
             {
-                entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
+                entry.VideoPreviewMessageId = entry.VideoPreviewChunkReferences?.FirstOrDefault()?.MessageId ??
+                    entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
             }
 
             entry.Normalize();
@@ -558,6 +567,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
         EnsureColumn(connection, "app_entries", "device_type", "TEXT");
         EnsureColumn(connection, "app_entries", "sync_json", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "sync_device_json", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "chunk_refs_json", "TEXT");
+        EnsureColumn(connection, "app_entries", "video_preview_chunk_refs_json", "TEXT");
     }
 
     private void MigrateIniIfNeeded()
@@ -674,11 +685,13 @@ public sealed class SettingsStore : IEncryptionSecretStore
             (name, thread_id, uploaded_at, size_bytes, names_message_id, path, folder_color, type,
              mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
              video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
-             encryption_version, encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json)
+             encryption_version, encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
+             chunk_refs_json, video_preview_chunk_refs_json)
             VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
              $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
              $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
-             $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType, $syncJson, $syncDeviceJson)
+             $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType, $syncJson, $syncDeviceJson,
+             $chunkRefs, $videoChunkRefs)
             """;
         insert.Parameters.AddWithValue("$name", entry.Name);
         insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
@@ -706,6 +719,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
         insert.Parameters.AddWithValue("$deviceType", (object?)entry.DeviceType ?? DBNull.Value);
         insert.Parameters.AddWithValue("$syncJson", entry.Sync == null ? "" : System.Text.Json.JsonSerializer.Serialize(entry.Sync, JsonOptions.Web));
         insert.Parameters.AddWithValue("$syncDeviceJson", entry.SyncDevice == null ? "" : System.Text.Json.JsonSerializer.Serialize(entry.SyncDevice, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$chunkRefs", entry.ChunkReferences == null ? DBNull.Value :
+            (object)System.Text.Json.JsonSerializer.Serialize(entry.ChunkReferences, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$videoChunkRefs", entry.VideoPreviewChunkReferences == null ? DBNull.Value :
+            (object)System.Text.Json.JsonSerializer.Serialize(entry.VideoPreviewChunkReferences, JsonOptions.Web));
         insert.ExecuteNonQuery();
     }
 

@@ -412,13 +412,19 @@ public sealed class MetadataService
                 entry.ParentFolderId = NormalizeParentId(file.ParentFolderId);
                 entry.MimeType = file.MimeType;
                 entry.BatchId = file.BatchId;
-                entry.ChunkMessageIds = file.Chunks.Where(id => !string.IsNullOrWhiteSpace(id)).ToList();
-                entry.ChunkCount = entry.ChunkMessageIds.Count;
+                entry.ChunkReferences = file.ChunkRefs == null ? null : ChunkReference.Validate(file.ChunkRefs, file.Chunks);
+                entry.ChunkMessageIds = entry.ChunkReferences == null
+                    ? (file.Chunks ?? []).Where(id => !string.IsNullOrWhiteSpace(id)).ToList() : [];
+                entry.ChunkCount = entry.LogicalChunkCount;
                 entry.PreviewMessageId = file.Preview?.ThumbnailMessageId ?? "";
-                entry.VideoPreviewChunkMessageIds = file.Preview?.Video480p?.Chunks
+                entry.VideoPreviewChunkMessageIds = file.Preview?.Video480p?.Chunks?
                     .Where(id => !string.IsNullOrWhiteSpace(id))
                     .ToList() ?? [];
-                entry.VideoPreviewMessageId = entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
+                entry.VideoPreviewChunkReferences = file.Preview?.Video480p?.ChunkRefs is { } videoReferences
+                    ? ChunkReference.Validate(videoReferences, file.Preview.Video480p.Chunks) : null;
+                if (entry.VideoPreviewChunkReferences != null) entry.VideoPreviewChunkMessageIds = [];
+                entry.VideoPreviewMessageId = entry.VideoPreviewChunkReferences?.FirstOrDefault()?.MessageId ??
+                    entry.VideoPreviewChunkMessageIds.FirstOrDefault() ?? "";
                 entry.VideoPreviewSizeBytes = Math.Max(0, file.Preview?.Video480p?.SizeBytes ?? 0);
                 entry.Encryption = file.Encryption?.Clone();
                 entry.Favorite = file.Favorite;
@@ -460,7 +466,8 @@ public sealed class MetadataService
             UploadedAt = NormalizeIsoTimestamp(entry.UploadedAt),
             BatchId = entry.BatchId,
             ParentFolderId = NormalizeParentId(entry.ParentFolderId),
-            Chunks = entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList(),
+            Chunks = entry.ChunkReferences == null ? entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList() : null,
+            ChunkRefs = entry.ChunkReferences?.ToList(),
             Preview = CreatePreviewMetadata(entry),
             Encryption = entry.Encryption?.Clone(),
             Trash = entry.Trash,
@@ -476,18 +483,19 @@ public sealed class MetadataService
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .ToList();
 
-        if (videoChunks.Count == 0 && !string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
+        if (entry.VideoPreviewChunkReferences == null && videoChunks.Count == 0 && !string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
         {
             videoChunks.Add(entry.VideoPreviewMessageId);
         }
 
         VideoPreviewMetadata? video480p = null;
-        if (videoChunks.Count > 0 && entry.VideoPreviewSizeBytes > 0)
+        if ((entry.VideoPreviewChunkReferences != null || videoChunks.Count > 0) && entry.VideoPreviewSizeBytes > 0)
         {
             video480p = new VideoPreviewMetadata
             {
                 SizeBytes = entry.VideoPreviewSizeBytes,
-                Chunks = videoChunks
+                Chunks = entry.VideoPreviewChunkReferences == null ? videoChunks : null,
+                ChunkRefs = entry.VideoPreviewChunkReferences?.ToList()
             };
         }
 
@@ -520,6 +528,7 @@ public sealed class MetadataService
 
     private static MetadataEntry? ParseMetadata(JsonElement root)
     {
+        ChunkReference.ValidateJsonPresence(root);
         if (!root.TryGetProperty("schemaVersion", out var version) ||
             !version.TryGetInt32(out var parsedVersion) ||
             parsedVersion != SchemaVersion ||
@@ -573,10 +582,13 @@ public sealed class MetadataService
                 Require(!string.IsNullOrWhiteSpace(file.ThreadId), "threadId ausente.");
                 Require(!string.IsNullOrWhiteSpace(file.Name), "name ausente.");
                 Require(file.SizeBytes >= 0, "sizeBytes invÃ¡lido.");
-                file.Chunks = file.Chunks?
-                    .Where(id => !string.IsNullOrWhiteSpace(id))
-                    .ToList() ?? [];
-                Require(file.Chunks.Count > 0, "chunks do arquivo ausentes.");
+                if (file.ChunkRefs != null)
+                    file.ChunkRefs = ChunkReference.Validate(file.ChunkRefs, file.Chunks);
+                else
+                {
+                    file.Chunks = file.Chunks?.Where(id => !string.IsNullOrWhiteSpace(id)).ToList() ?? [];
+                    Require(file.Chunks.Count > 0, "chunks do arquivo ausentes.");
+                }
                 if (file.Encryption != null)
                 {
                     Require(file.Encryption.Version == EncryptionMetadata.CurrentVersion, "versão de criptografia inválida.");
@@ -600,7 +612,14 @@ public sealed class MetadataService
 
                     if (file.Preview.Video480p != null)
                     {
-                        if (!file.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
+                        if (file.Preview.Video480p.ChunkRefs != null)
+                        {
+                            Require(file.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) &&
+                                file.Preview.Video480p.SizeBytes > 0, "Prévia 480p com referências inválidas.");
+                            file.Preview.Video480p.ChunkRefs = ChunkReference.Validate(
+                                file.Preview.Video480p.ChunkRefs, file.Preview.Video480p.Chunks);
+                        }
+                        else if (!file.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
                             file.Preview.Video480p.SizeBytes <= 0 ||
                             file.Preview.Video480p.Chunks == null ||
                             file.Preview.Video480p.Chunks.Count == 0)

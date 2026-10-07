@@ -1673,7 +1673,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static bool HasVideoPreview(AppEntry? entry)
     {
-        return entry?.VideoPreviewChunkMessageIds.Count > 0 || !string.IsNullOrWhiteSpace(entry?.VideoPreviewMessageId);
+        return entry?.VideoPreviewChunkReferences != null || entry?.VideoPreviewChunkMessageIds.Count > 0 || !string.IsNullOrWhiteSpace(entry?.VideoPreviewMessageId);
     }
 
 
@@ -1763,7 +1763,7 @@ public sealed partial class AppController : IAsyncDisposable
             return cached;
         }
 
-        var preview = entry?.VideoPreviewChunkMessageIds.Count > 0
+        var preview = entry?.VideoPreviewChunkReferences != null || entry?.VideoPreviewChunkMessageIds.Count > 0
             ? await Downloader().DownloadVideoPreview480Async(
                 entry,
                 tempDir,
@@ -2556,9 +2556,18 @@ public sealed partial class AppController : IAsyncDisposable
         var chunkSizeBytes = sourceLength > 0
             ? Math.Min(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes)
             : 0;
+        if (existingTransferState?.UploadedChunks.Count > 0 && existingTransferState.ChunkSizeBytes > 0)
+        {
+            chunkSizeBytes = existingTransferState.ChunkSizeBytes;
+            if (chunkSizeBytes > (existingTransferState.Encryption == null ? DiscordLimits.AttachmentBytes : EncryptionService.MaximumPlaintextPayloadBytes) ||
+                ArchiveSplitter.GetPartCount(sourceLength, (int)chunkSizeBytes) != existingTransferState.TotalChunks)
+                throw new IOException("O tamanho/layout da origem mudou; os chunks confirmados foram preservados.");
+            totalChunks = existingTransferState.TotalChunks;
+        }
         if (preserveLegacyTransfer)
         {
-            parts = await ArchiveSplitter.SplitAsync(file, cancellationToken);
+            parts = await ArchiveSplitter.SplitAsync(file, cancellationToken,
+                chunkSizeBytes > 0 ? (int)chunkSizeBytes : null);
             totalChunks = parts.Count;
             chunkSizeBytes = parts.Count > 0 ? parts.Max(part => part.Length) : 0;
         }
@@ -2720,6 +2729,19 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
 
+            async Task HandleUploadedBatchAsync(ForumUploadedBatch batch)
+            {
+                await checkpointGate.WaitAsync(cancellationToken);
+                try
+                {
+                    await _transferManager.MarkUploadChunksAsync(transferState, batch, cancellationToken);
+                    threadId = batch.ThreadId;
+                    if (onBytesUploaded != null)
+                        await onBytesUploaded(batch.Chunks.Sum(chunk => chunk.LogicalSizeBytes >= 0 ? chunk.LogicalSizeBytes : chunk.SizeBytes));
+                }
+                finally { checkpointGate.Release(); }
+            }
+
             ForumUploadResult upload;
             if (transferState.Encryption != null)
             {
@@ -2742,7 +2764,8 @@ public sealed partial class AppController : IAsyncDisposable
                             EncryptedPayloadRoles.Original,
                             index,
                             totalChunks,
-                            cancellationToken);
+                            cancellationToken,
+                            (int)transferState.ChunkSizeBytes);
                         if (inMemory != null)
                         {
                             return inMemory;
@@ -2764,7 +2787,8 @@ public sealed partial class AppController : IAsyncDisposable
                         EncryptedPayloadRoles.Original,
                         index,
                         totalChunks,
-                        cancellationToken);
+                        cancellationToken,
+                        (int)transferState.ChunkSizeBytes);
                 }
 
                 upload = await uploader.UploadResumableGeneratedAsync(
@@ -2782,7 +2806,13 @@ public sealed partial class AppController : IAsyncDisposable
                     encryptedPayload: encryptionContext,
                     cleanupPart: TryDeleteFile,
                     adaptiveUploadGate: adaptiveUploadGate,
-                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);
+                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
+                    useAttachmentReferences: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
+                    uploadedChunkReferences: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment
+                        ? transferState.UploadedChunks.Select(chunk => new ChunkReference
+                            { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
+                    onBatchUploaded: HandleUploadedBatchAsync,
+                    batchPreparationGate: memoryCoordinator?.BatchPreparationGate);
             }
             else
             {
@@ -2843,10 +2873,12 @@ public sealed partial class AppController : IAsyncDisposable
             entry.BatchId = upload.BatchId;
             entry.ChunkCount = upload.ChunkCount;
             entry.ChunkMessageIds = upload.ChunkMessageIds.ToList();
+            entry.ChunkReferences = upload.ChunkReferences?.ToList();
             entry.MimeType = GuessFileMime(name);
             entry.PreviewMessageId = previewIds.PreviewMessageId;
             entry.VideoPreviewMessageId = previewIds.VideoPreviewMessageId;
             entry.VideoPreviewChunkMessageIds = previewIds.VideoPreviewChunkMessageIds.ToList();
+            entry.VideoPreviewChunkReferences = previewIds.VideoPreviewChunkReferences?.ToList();
             entry.VideoPreviewSizeBytes = previewIds.VideoPreviewSizeBytes;
             await registry.AddEntryAsync(
                 entry,
@@ -2962,6 +2994,7 @@ public sealed partial class AppController : IAsyncDisposable
         var previewMessageId = "";
         var videoPreviewMessageId = "";
         IReadOnlyList<string> videoPreviewChunkMessageIds = [];
+        IReadOnlyList<ChunkReference>? videoPreviewChunkReferences = null;
         long videoPreviewSizeBytes = 0;
         try
         {
@@ -3102,13 +3135,17 @@ public sealed partial class AppController : IAsyncDisposable
                         progressTracker,
                         previewEncryption == null
                             ? null
-                            : previewEncryption with { Role = EncryptedPayloadRoles.Video480p });
+                            : previewEncryption with { Role = EncryptedPayloadRoles.Video480p },
+                        transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
                     videoPreviewChunkMessageIds = videoPreview.ChunkMessageIds;
-                    videoPreviewMessageId = videoPreviewChunkMessageIds.FirstOrDefault() ?? "";
+                    videoPreviewChunkReferences = videoPreview.ChunkReferences;
+                    videoPreviewMessageId = videoPreviewChunkReferences?.FirstOrDefault()?.MessageId ??
+                        videoPreviewChunkMessageIds.FirstOrDefault() ?? "";
                     videoPreviewSizeBytes = videoPreview.SizeBytes;
                     if (transferState != null)
                     {
                         transferState.VideoPreview480pChunks = videoPreviewChunkMessageIds.ToList();
+                        transferState.VideoPreview480pChunkRefs = videoPreviewChunkReferences?.ToList();
                         transferState.VideoPreview480pSizeBytes = videoPreviewSizeBytes;
                         await _transferManager.SaveAsync(transferState, cancellationToken);
                     }
@@ -3165,7 +3202,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
 
-        return new PreviewUploadIds(previewMessageId, videoPreviewMessageId, videoPreviewChunkMessageIds, videoPreviewSizeBytes);
+        return new PreviewUploadIds(previewMessageId, videoPreviewMessageId, videoPreviewChunkMessageIds, videoPreviewSizeBytes, videoPreviewChunkReferences);
     }
 
     private async Task<VideoPreviewUploadResult> UploadVideoPreview480Async(
@@ -3182,7 +3219,8 @@ public sealed partial class AppController : IAsyncDisposable
         bool useBatchUi,
         int maxParallelParts,
         UploadProgressTracker? progressTracker,
-        EncryptedPayloadContext? videoEncryption)
+        EncryptedPayloadContext? videoEncryption,
+        bool useAttachmentReferences = false)
     {
         using var preparedVideo = await Mp4FastStart.PrepareAsync(generated, cancellationToken);
         generated = preparedVideo.File;
@@ -3225,8 +3263,9 @@ public sealed partial class AppController : IAsyncDisposable
                 onRateLimitWait: onRateLimitWait,
                 maxParallelParts: maxParallelParts,
                 encryptedPayload: encryptionContext,
-                cleanupPart: TryDeleteFile);
-            return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds);
+                cleanupPart: TryDeleteFile,
+                useAttachmentReferences: useAttachmentReferences);
+            return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds, result.ChunkReferences);
         }
 
         var previewParts = await ArchiveSplitter.SplitAsync(generated, cancellationToken);
@@ -4079,7 +4118,7 @@ public sealed partial class AppController : IAsyncDisposable
                 try
                 {
                     uploadResult = canReuseThread
-                        ? await uploader.UploadToThreadAsync(threadId, safeName, encryptedParts.Files, encryptedPayload: encryptedPayload)
+                        ? await uploader.UploadToThreadAsync(threadId, safeName, encryptedParts.Files, encryptedPayload: encryptedPayload, useAttachmentReferences: true)
                         : await uploader.UploadResumableAsync(
                             safeName,
                             encryptedParts.Files,
@@ -4087,7 +4126,8 @@ public sealed partial class AppController : IAsyncDisposable
                             "",
                             new Dictionary<int, string>(),
                             cancellationToken: default,
-                            encryptedPayload: encryptedPayload);
+                            encryptedPayload: encryptedPayload,
+                            useAttachmentReferences: true);
                 }
                 catch (DiscordApiException ex) when (canReuseThread && ((int)ex.StatusCode == 403 || (int)ex.StatusCode == 404))
                 {
@@ -4098,7 +4138,8 @@ public sealed partial class AppController : IAsyncDisposable
                         "",
                         new Dictionary<int, string>(),
                         cancellationToken: default,
-                        encryptedPayload: encryptedPayload);
+                        encryptedPayload: encryptedPayload,
+                        useAttachmentReferences: true);
                 }
                 var newThreadId = uploadResult.ThreadId;
                 var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
@@ -4108,6 +4149,7 @@ public sealed partial class AppController : IAsyncDisposable
                 updated.BatchId = uploadResult.BatchId;
                 updated.ChunkCount = uploadResult.ChunkCount;
                 updated.ChunkMessageIds = uploadResult.ChunkMessageIds.ToList();
+                updated.ChunkReferences = uploadResult.ChunkReferences?.ToList();
                 var registry = Registry();
                 var all = CurrentLocalEntries();
                 updated.ParentFolderId = FolderIdForPath(all, path) ?? AppRegistry.RootFolderId;
@@ -4936,6 +4978,7 @@ public sealed partial class AppController : IAsyncDisposable
                     {
                         throw new InvalidOperationException("Arquivo não encontrado na listagem atual para retomar download.");
                     }
+                    entry = await registry.LoadFileDetailsAsync(entry, cancellationToken);
 
                     var destination = new DirectoryInfo(string.IsNullOrWhiteSpace(state.DestinationPath)
                         ? (settings.DownloadPath.Trim().Length > 0 ? settings.DownloadPath : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
@@ -7080,7 +7123,8 @@ private static string ClassifyConnectError(Exception ex)
         string role,
         int index,
         int totalParts,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? plaintextChunkBytes = null)
     {
         if (index < 0 || index >= totalParts)
         {
@@ -7093,9 +7137,10 @@ private static string ClassifyConnectError(Exception ex)
             throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
         }
 
-        var offset = checked((long)index * EncryptionService.MaximumPlaintextPayloadBytes);
+        var chunkBytes = plaintextChunkBytes > 0 ? plaintextChunkBytes.Value : EncryptionService.MaximumPlaintextPayloadBytes;
+        var offset = checked((long)index * chunkBytes);
         var remaining = Math.Max(0, expectedLength - offset);
-        var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, remaining);
+        var length = (int)Math.Min(chunkBytes, remaining);
         if (index > 0 && remaining <= 0)
         {
             throw new EndOfStreamException("O chunk solicitado não existe mais no arquivo de origem.");
@@ -7122,7 +7167,8 @@ private static string ClassifyConnectError(Exception ex)
         string role,
         int index,
         int totalParts,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? plaintextChunkBytes = null)
     {
         if (index < 0 || index >= totalParts)
         {
@@ -7135,9 +7181,10 @@ private static string ClassifyConnectError(Exception ex)
             throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
         }
 
-        var offset = checked((long)index * EncryptionService.MaximumPlaintextPayloadBytes);
+        var chunkBytes = plaintextChunkBytes > 0 ? plaintextChunkBytes.Value : EncryptionService.MaximumPlaintextPayloadBytes;
+        var offset = checked((long)index * chunkBytes);
         var remaining = Math.Max(0, expectedLength - offset);
-        var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, remaining);
+        var length = (int)Math.Min(chunkBytes, remaining);
         if (index > 0 && remaining <= 0)
         {
             throw new EndOfStreamException("O chunk solicitado não existe mais no arquivo de origem.");
@@ -7309,8 +7356,10 @@ private static string ClassifyConnectError(Exception ex)
         string PreviewMessageId,
         string VideoPreviewMessageId,
         IReadOnlyList<string> VideoPreviewChunkMessageIds,
-        long VideoPreviewSizeBytes);
-    private sealed record VideoPreviewUploadResult(long SizeBytes, IReadOnlyList<string> ChunkMessageIds);
+        long VideoPreviewSizeBytes,
+        IReadOnlyList<ChunkReference>? VideoPreviewChunkReferences = null);
+    private sealed record VideoPreviewUploadResult(long SizeBytes, IReadOnlyList<string> ChunkMessageIds,
+        IReadOnlyList<ChunkReference>? ChunkReferences = null);
     private sealed record DeletePlan(List<AppEntry> Files, List<AppEntry> Folders);
     private sealed record DeleteResult(int Total, int Deleted, int Failed);
     private sealed record DocxStyle(string? Alignment, bool Bold, bool Italic, bool Underline, string? FontSize);

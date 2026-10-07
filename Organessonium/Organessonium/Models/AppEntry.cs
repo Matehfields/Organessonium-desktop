@@ -49,7 +49,16 @@ public sealed class AppEntry
     public List<string> ChunkMessageIds { get; set; } = [];
 
     [JsonIgnore]
+    public List<ChunkReference>? ChunkReferences { get; set; }
+
+    [JsonIgnore]
     public List<string> VideoPreviewChunkMessageIds { get; set; } = [];
+
+    [JsonIgnore]
+    public List<ChunkReference>? VideoPreviewChunkReferences { get; set; }
+
+    [JsonIgnore]
+    public int LogicalChunkCount => ChunkReferences?.Count ?? ChunkMessageIds.Count;
 
     [JsonIgnore]
     public int ChunkCount { get; set; }
@@ -128,6 +137,13 @@ public sealed class AppEntry
         MimeType ??= "";
         ChunkMessageIds ??= [];
         VideoPreviewChunkMessageIds ??= [];
+        if (ChunkReferences != null)
+        {
+            ChunkReferences = ChunkReference.Validate(ChunkReferences, ChunkMessageIds);
+            ChunkCount = ChunkReferences.Count;
+        }
+        if (VideoPreviewChunkReferences != null)
+            VideoPreviewChunkReferences = ChunkReference.Validate(VideoPreviewChunkReferences, VideoPreviewChunkMessageIds);
         BatchId ??= "";
         PreviewMessageId ??= "";
         VideoPreviewMessageId ??= "";

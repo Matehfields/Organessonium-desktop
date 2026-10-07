@@ -108,12 +108,7 @@ public sealed class TransferStateRepository
                 await writer.FlushAsync(cancellationToken);
             }
 
-            if (file.Exists)
-            {
-                file.Delete();
-            }
-
-            File.Move(temp.FullName, file.FullName);
+            File.Move(temp.FullName, file.FullName, overwrite: true);
         }
         finally
         {

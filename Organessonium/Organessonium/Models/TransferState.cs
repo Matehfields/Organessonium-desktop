@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json.Serialization;
 
 namespace Organessonium.Models;
@@ -31,8 +32,17 @@ public static class TransferTypes
     public const string Download = "download";
 }
 
+public static class TransferPayloadLayouts
+{
+    public const int SingleAttachment = 1;
+    public const int MultiAttachment = 2;
+}
+
 public sealed class TransferState
 {
+    [JsonPropertyName("payloadLayoutVersion")]
+    public int PayloadLayoutVersion { get; set; } = TransferPayloadLayouts.SingleAttachment;
+
     [JsonPropertyName("syncFolderId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SyncFolderId { get; set; }
@@ -114,6 +124,10 @@ public sealed class TransferState
     [JsonPropertyName("videoPreview480pChunks")]
     public List<string> VideoPreview480pChunks { get; set; } = [];
 
+    [JsonPropertyName("videoPreview480pChunkRefs")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ChunkReference>? VideoPreview480pChunkRefs { get; set; }
+
     [JsonPropertyName("videoPreview480pSizeBytes")]
     public long VideoPreview480pSizeBytes { get; set; }
 
@@ -136,6 +150,8 @@ public sealed class TransferState
 
     public void Normalize()
     {
+        if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment))
+            throw new InvalidDataException("O layout desta transferência ainda não é suportado.");
         TransferId = string.IsNullOrWhiteSpace(TransferId) ? Guid.NewGuid().ToString("N") : TransferId;
         Status = string.IsNullOrWhiteSpace(Status) ? TransferStatuses.Queued : Status;
         CreatedAt = string.IsNullOrWhiteSpace(CreatedAt) ? Now() : CreatedAt;
@@ -174,6 +190,13 @@ public sealed class TransferChunkState
 
     [JsonPropertyName("messageId")]
     public string MessageId { get; set; } = "";
+
+    [JsonPropertyName("attachmentId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AttachmentId { get; set; }
+
+    [JsonPropertyName("logicalSizeBytes")]
+    public long LogicalSizeBytes { get; set; } = -1;
 
     [JsonPropertyName("sizeBytes")]
     public long SizeBytes { get; set; }

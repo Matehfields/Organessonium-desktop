@@ -24,7 +24,7 @@ Pode ser removido quando: Todos os registros antigos puderem ser descartados ou 
 
 Impacto da remoção: Entradas plaintext deixam de abrir.
 
-Procedimento para remoção: Remover branch JSON legado do router; exigir envelope nos leitores; remover somente fixtures legadas; manter validação de versão/autenticação; atualizar implementation.md e testes.
+Procedimento para remoção: Remover branch JSON legado do router; exigir envelope nos leitores; remover somente fixtures legadas; manter validação de versão/autenticação; atualizar a especificação criptográfica em implementation old.md e os testes.
 
 ### SERIAL-LEGACY-001
 
@@ -452,6 +452,98 @@ Impacto da remoção: Índices móveis antigos deixam de localizar seus threads.
 
 Procedimento para remoção: Confirmar a conversão dos mappings sem remover payloads/seriais; retirar somente o parser e o ramo de conversão explícita, manter erros criptográficos e testes de mappings v2.
 
+### PAYLOAD-LEGACY-004
+
+Status: ativo no desktop; suporte multi-attachment mobile a implementar
+
+Descrição: single attachment per message / chunks string[]. Metadata original e `preview.video480p` antigos listam apenas IDs de mensagens, um chunk por mensagem. Novos uploads desktop usam `chunkRefs: [{ index, messageId, attachmentId }]`, com índices zero-based e vários attachments por mensagem.
+
+Introduzido por: Multi-attachment payload transport. A leitura e a retomada unitárias já existiam e foram preservadas.
+
+Motivo: Arquivos e transferências anteriores não possuem IDs explícitos de attachment. Reescrever sua lista ou inserir messageIds repetidos não produz compatibilidade real. Clientes sem chunkRefs ainda precisam de atualização coordenada.
+
+Código relacionado:
+
+- Models/ChunkReference, MetadataModels, AppEntry e TransferState.PayloadLayoutVersion.
+- MetadataService.Parse/ToAppEntry/CreateFileMetadata/CreatePreviewMetadata.
+- ForumUploader.UploadResumableGeneratedAsync/UploadResumableAsync e ForumUploader.MultiAttachment.
+- ForumDownloader.ResolveMessagePartsAsync, resolução de original/video480p, download e streaming.
+- AppController upload/resume/Markdown, CloudSyncRepository e DiscordVideoChunkProvider.
+
+Comportamento atual:
+
+- Leitura: `chunkRefs` presente é autoritativo e estritamente validado; ausente usa `chunks` unitário legado. Declaração inválida não cai no legado.
+- Escrita: uploads novos usam somente `chunkRefs`; arquivos antigos modificados sem reupload preservam sua lista `chunks`.
+- Preview: a mesma distinção aplica-se independentemente a `preview.video480p`; thumbnail permanece unitário.
+- Payload plaintext: sem `encryption`, conserva o caminho antigo de leitura, registrado em PAYLOAD-LEGACY-001.
+- Migração: nenhuma regravação de payload ao ler, baixar, renomear, mover ou favoritar. O envelope cifrado de metadata pode ser atualizado sem converter transporte.
+
+Pode ser removido quando: Dados unitários necessários tiverem referências completas confirmadas ou puderem ser descartados, todos os checkpoints antigos forem concluídos e a versão mínima dos clientes suportar chunkRefs.
+
+Impacto da remoção: Arquivos/previews antigos deixam de localizar chunks; leitores antigos não abrem uploads novos. Metadados cifrados não garantem compatibilidade de transporte.
+
+Procedimento para remoção: Inventariar mensagens unitárias e checkpoints sem expor dados privados; planejar conversão explícita com IDs reais e sem reenviar conteúdo; confirmar acesso antes de remover parsers/resolvers antigos; retirar fixtures unitárias apenas depois dessa decisão; atualizar implementation.md e a versão mínima dos clientes. Não alterar ORGAESGC, encrypted metadata V1 ou OSER para essa remoção.
+
+### TRANSFER-LEGACY-001
+
+Status: ativo
+
+Descrição: Checkpoints anteriores sem `payloadLayoutVersion` ou sem `attachmentId` continuam com layout 1, uma mensagem por chunk. O layout 2 novo confirma messageId e attachmentId juntos.
+
+Introduzido por: Multi-attachment payload transport.
+
+Motivo: Evitar continuar uma transferência parcialmente enviada em outro layout ou recalcular seus índices usando o limite atual.
+
+Código relacionado: TransferState/TransferChunkState.Normalize; TransferManager.CreateUpload/MarkUploadChunkAsync/MarkUploadChunksAsync; TransferStateRepository; AppController e CloudSyncRepository retomada.
+
+Comportamento atual: Propriedade ausente recebe layout 1. Layouts desconhecidos falham. Retomadas antigas preservam thread, chunks confirmados, tamanho lógico e quantidade global registrados; não fabricam attachmentIds. Novas transferências usam layout 2. O estado conserva também videoPreview480pChunks legado e videoPreview480pChunkRefs novo.
+
+Pode ser removido quando: Não houver transferências recuperáveis no layout 1 e a política de upgrades permitir descartar checkpoints anteriores.
+
+Impacto da remoção: Transferências antigas podem precisar reiniciar o upload e perder a identificação dos chunks já confirmados.
+
+Procedimento para remoção: Concluir ou migrar checkpoints com verificação dos anexos remotos; definir schema mínimo; retirar default e ramo unitário; preservar a atomicidade por batch e testes de retomada do layout 2.
+
+### CACHE-LEGACY-002
+
+Status: ativo
+
+Descrição: Bancos app_entries anteriores ao agrupamento não têm `chunk_refs_json` e `video_preview_chunk_refs_json`.
+
+Introduzido por: Multi-attachment payload transport.
+
+Motivo: Acrescentar referências completas sem apagar o cache existente ou impedir uma instalação anterior de iniciar.
+
+Código relacionado: SettingsStore.EnsureColumn/ReadCachedEntries/cache SQL; AppEntry.Normalize; AppRegistry.CopyEntryState; SerialIndexService.CopyEntry.
+
+Comportamento atual: Migração aditiva de duas colunas opcionais. NULL indica referências não disponíveis; listas unitárias existentes continuam válidas. Serial OSER continua sem lista detalhada de chunks, e a hidratação busca o metadata completo quando necessário. Não reconstruir referências novas apenas com messageIds.
+
+Pode ser removido quando: Houver schema mínimo de SQLite definido e migração explícita dos bancos anteriores.
+
+Impacto da remoção: Bancos antigos deixam de abrir ou perdem detalhes necessários ao download de arquivos já armazenados.
+
+Procedimento para remoção: Definir upgrade de schema, conservar registros existentes e testar reabertura; retirar apenas o suporte ao banco antigo, não a ausência válida de detalhes em um card vindo do serial.
+
+### PAYLOAD-COMPAT-001
+
+Status: verificar antes da remoção
+
+Descrição: Redução automática do tamanho do batch quando Discord rejeita quantidade/tamanho de attachments. Não é parser legado nem migração de dados.
+
+Introduzido por: Multi-attachment payload transport.
+
+Motivo: A capacidade observada de dez anexos de 20 MiB pode não ser aceita por toda rota/conta futura; a falha de limite não deve obrigar trocar a cifra ou o tamanho lógico dos chunks.
+
+Código relacionado: ForumUploader.MultiAttachment.SendBatchAsync/IsAttachmentLimitRejection/HasLimitCode; DiscordApiClient.SendFilesMessageAsync.
+
+Comportamento atual: HTTP 413, code 40005 ou erros específicos de tamanho/quantidade em HTTP 400/code 50035 reduzem o agrupamento pela metade, até um attachment, reutilizando o ciphertext e mantendo chunkRefs. Outros erros 400 não recebem retry de redução. O teto aprendido dura na instância do uploader. Rate limits/429 continuam independentes.
+
+Pode ser removido quando: Uma decisão explícita de produto exigir falha imediata para qualquer rejeição de agrupamento e a capacidade de todas as rotas suportadas estiver verificada. Não presumir que robustez operacional seja dívida removível.
+
+Impacto da remoção: Uma conta/rota com teto menor pode falhar em vez de continuar o upload.
+
+Procedimento para remoção: Validar capacidades reais e alternativa de recuperação; manter retries de rede/429, tamanho individual, abertura de streams e checkpoints; retirar somente a divisão de batches e o teste correspondente após a decisão.
+
 ## Fronteiras e itens que não são dívida automaticamente
 
 - Não foi encontrado protocolo de compartilhamento JSON neste desktop. Não existe evidência para inventar SHARE-LEGACY-001. Exportação OEK1 é recuperação de chave, não share de arquivo.
@@ -460,7 +552,7 @@ Procedimento para remoção: Confirmar a conversão dos mappings sem remover pay
 - Tamanhos reais/variáveis de chunks, índices de Range, fallback de MP4 não suportado, limites de memória, retry, falta de codec de mídia e moldura WPF em Windows antigo são comportamentos operacionais, não autorização para simplificar suporte.
 - Base64URL sem padding de encryption.salt é contrato atual de conteúdo; Base64 padrão com padding do envelope de metadata é outro contrato. Não adicionar fallback entre eles sem registrar e justificar.
 - A ausência de preview/sync/trash/encryption pode ser válida no tipo de entrada. Campos opcionais não são automaticamente legado removível.
-- O cache SQLite local continua operacional e pode conter plaintext. Somente seriais novos receberam transporte cifrado. Não houve mudança de schema do cache nesta tarefa.
+- O cache SQLite local continua operacional e pode conter plaintext. Seriais novos usam transporte cifrado; as colunas aditivas para chunkRefs não cifram o restante do banco. CACHE-LEGACY-002 registra essa evolução sem apagar dados.
 - Não existe downgrade de envelope declarado: version futura, Base64 inválido, chave/tag incorretas ou JSON interno inválido não seguem METADATA-LEGACY-001.
 
 ## Verificações antes de uma versão definitiva

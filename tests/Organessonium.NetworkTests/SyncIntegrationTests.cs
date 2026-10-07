@@ -52,7 +52,7 @@ internal static partial class Program
             await using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
             {
                 var buffer = RandomNumberGenerator.GetBytes(64 * 1024);
-                var remaining = EncryptionService.MaximumPlaintextPayloadBytes + 65536;
+                var remaining = 2 * EncryptionService.MaximumPlaintextPayloadBytes + 65536;
                 while (remaining > 0) { var count = (int)Math.Min(buffer.Length, remaining); await file.WriteAsync(buffer.AsMemory(0, count)); remaining -= count; }
             }
             File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(-10));
@@ -66,7 +66,9 @@ internal static partial class Program
             await engineA.SynchronizeAsync(a);
             var remote = await cloudA.ReadAsync(a, CancellationToken.None);
             var revision = remote.Heads["src/grande.dat"].Single();
-            RequireSync(revision.Payload is { Encryption: not null, Chunks.Count: 2 } && server.PayloadPosts == sent,
+            RequireSync(revision.Payload is { Encryption: not null, ChunkRefs.Count: 3 } && revision.Payload.Chunks?.Count is null or 0 &&
+                revision.Payload.ChunkRefs[1].MessageId == revision.Payload.ChunkRefs[2].MessageId &&
+                revision.Payload.ChunkRefs[1].AttachmentId != revision.Payload.ChunkRefs[2].AttachmentId && server.PayloadPosts == sent,
                 "recuperação do card reenviou conteúdo ou perdeu chunks criptografados");
             await engineB.SynchronizeAsync(b);
             RequireSync(await CloudSyncRepository.HashAsync(SyncPaths.Resolve(b.LocalPath, "src/grande.dat"), default) == revision.Hash,
@@ -74,7 +76,7 @@ internal static partial class Program
             var folderId = AppRegistry.SyncDirectoryId(a.SyncFolderId, "src");
             await deviceRegistry.RefreshMappingsAsync();
             var cards = await deviceRegistry.RefreshFolderAsync(folderId, a.CloudPath + "/src");
-            RequireSync(cards.Count == 1 && cards[0].Sync?.RevisionId == revision.RevisionId && cards[0].ChunkMessageIds.Count == 2,
+            RequireSync(cards.Count == 1 && cards[0].Sync?.RevisionId == revision.RevisionId && cards[0].ChunkReferences?.Count == 3,
                 "revisão confirmada não apareceu no índice dos cards");
             var serial = await deviceRegistry.LoadCachedFolderAsync(folderId, a.CloudPath + "/src");
             RequireSync(serial.Single().FileId == revision.FileId && serial.Single().Sync?.Hash == revision.Hash,
@@ -139,7 +141,7 @@ internal static partial class Program
         public DiscordMessageDto SeedLegacyMetadata(string json)
         {
             var message = Add("root-thread", "");
-            Attach(message, "metadata.json", Encoding.UTF8.GetBytes(json));
+            Attach(message, [("metadata.json", Encoding.UTF8.GetBytes(json))]);
             return message;
         }
 
@@ -181,13 +183,14 @@ internal static partial class Program
                 }
             }
             if (request.Method == HttpMethod.Patch && parts.Length == 1) return Json(new { id = channel });
-            JsonDocument document; byte[]? bytes = null; string? filename = null;
+            JsonDocument document;
+            var uploadedFiles = new List<(string Name, byte[] Bytes)>();
             if (request.Content is MultipartFormDataContent multipart)
             {
                 document = JsonDocument.Parse(await multipart.First(p => p.Headers.ContentDisposition?.Name?.Trim('"') == "payload_json").ReadAsStringAsync(token));
-                var file = multipart.First(p => p.Headers.ContentDisposition?.FileName != null);
-                filename = file.Headers.ContentDisposition?.FileNameStar ?? file.Headers.ContentDisposition!.FileName!.Trim('"');
-                bytes = await file.ReadAsByteArrayAsync(token);
+                foreach (var file in multipart.Where(p => p.Headers.ContentDisposition?.FileName != null))
+                    uploadedFiles.Add((file.Headers.ContentDisposition?.FileNameStar ?? file.Headers.ContentDisposition!.FileName!.Trim('"'),
+                        await file.ReadAsByteArrayAsync(token)));
             }
             else document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
             using (document)
@@ -203,30 +206,35 @@ internal static partial class Program
                     if (RejectNextFileProjection && inspected.Contains("\"entryType\":\"file\"", StringComparison.Ordinal))
                     { RejectNextFileProjection = false; return new(HttpStatusCode.Forbidden); }
                     PublishedContents.Add(content);
-                    if (bytes != null && filename is "metadata.json" or "sync-revision.json" or "serial.bin")
-                        PublishedMetadataAttachments.Add(Encoding.UTF8.GetString(bytes));
+                    foreach (var file in uploadedFiles.Where(file => file.Name is "metadata.json" or "sync-revision.json" or "serial.bin"))
+                        PublishedMetadataAttachments.Add(Encoding.UTF8.GetString(file.Bytes));
                     if (forum)
                     {
                         PublishedTitles.Add(document.RootElement.GetProperty("name").GetString()!);
                         var thread = (++_next).ToString(); _channels[thread] = []; _parents[thread] = channel;
-                        var message = Add(thread, content); Attach(message, filename, bytes);
+                        var message = Add(thread, content); Attach(message, uploadedFiles);
                         if (channel == "files") PayloadPosts++;
                         return Json(new { id = thread, message });
                     }
                     var result = request.Method == HttpMethod.Post ? Add(channel, content) : new DiscordMessageDto { Id = parts[2], Content = content };
                     if (request.Method == HttpMethod.Patch && !payload.TryGetProperty("attachments", out _) &&
                         _channels[channel].TryGetValue(parts[2], out var previous)) result.Attachments = previous.Attachments;
-                    Attach(result, filename, bytes); _channels[channel][result.Id] = result;
+                    Attach(result, uploadedFiles); _channels[channel][result.Id] = result;
                     return Json(result);
                 }
             }
         }
-        private void Attach(DiscordMessageDto message, string? filename, byte[]? bytes)
+        private void Attach(DiscordMessageDto message, IReadOnlyList<(string Name, byte[] Bytes)> files)
         {
-            if (bytes == null) return;
-            _attachments[message.Id] = bytes;
-            message.Attachments = [new DiscordAttachmentDto { Id = message.Id, FileName = filename!, Size = bytes.Length,
-                Url = "https://sync.fixture/attachments/" + message.Id }];
+            if (files.Count == 0) return;
+            message.Attachments = [];
+            foreach (var file in files)
+            {
+                var attachmentId = (++_next).ToString();
+                _attachments[attachmentId] = file.Bytes;
+                message.Attachments.Add(new DiscordAttachmentDto { Id = attachmentId, FileName = file.Name, Size = file.Bytes.Length,
+                    Url = "https://sync.fixture/attachments/" + attachmentId });
+            }
         }
     }
 }

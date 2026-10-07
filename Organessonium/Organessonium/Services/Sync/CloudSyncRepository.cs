@@ -231,14 +231,18 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             transfer.Encryption = _encryption.CreateFileEncryption(_settings.EncryptionMode);
             await _transfers.SaveAsync(transfer, token);
         }
+        var chunkBytes = transfer.ChunkSizeBytes > 0 ? checked((int)transfer.ChunkSizeBytes) : EncryptionService.MaximumPlaintextPayloadBytes;
+        count = ArchiveSplitter.GetPartCount(local.Size, chunkBytes);
+        if (count != transfer.TotalChunks || chunkBytes > EncryptionService.MaximumPlaintextPayloadBytes)
+            throw new InvalidDataException("O layout do checkpoint não corresponde ao conteúdo sincronizado.");
         var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count);
         var uploader = new ForumUploader(_api, _settings.AppsForumId, MetadataCodec.ForStore(_store));
         try
         {
             var result = await uploader.UploadResumableGeneratedAsync(transfer.FileName, count, async index =>
             {
-                var offset = (long)index * EncryptionService.MaximumPlaintextPayloadBytes;
-                var length = (int)Math.Min(EncryptionService.MaximumPlaintextPayloadBytes, Math.Max(0, local.Size - offset));
+                var offset = (long)index * chunkBytes;
+                var length = (int)Math.Min(chunkBytes, Math.Max(0, local.Size - offset));
                 var part = new FileInfo(Path.Combine(staging.FullName, safeFile + "-" + index + ".bin"));
                 await _encryption.EncryptFileRangeAsync(snapshot, offset, length, part, encryption.WithChunkIndex(index), token);
                 return new PreparedUploadPart(part, length);
@@ -251,14 +255,20 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                     await _transfers.MarkUploadChunkAsync(transfer, chunk.Index, chunk.MessageId, chunk.SizeBytes, token);
                 }, token, _ => { progress(new(transfer.TransferId, local.RelativePath, "upload", 0, "waiting")); return Task.CompletedTask; },
                 maxParallelParts: _settings.EffectiveUploadThreads, uploadGate: _uploadGate, encryptedPayload: encryption,
-                cleanupPart: file => { if (file.Exists) file.Delete(); });
-            if (result.ChunkMessageIds.Count != count || result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace))
+                cleanupPart: file => { if (file.Exists) file.Delete(); },
+                useAttachmentReferences: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
+                uploadedChunkReferences: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment
+                    ? transfer.UploadedChunks.Select(chunk => new ChunkReference
+                        { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
+                onBatchUploaded: batch => _transfers.MarkUploadChunksAsync(transfer, batch, token));
+            if (result.ChunkCount != count || (result.ChunkReferences == null && result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace)))
                 throw new InvalidDataException("O upload não confirmou todos os chunks.");
             var payload = new FileMetadata
             {
                 FileId = fileId, ThreadId = result.ThreadId, Name = transfer.FileName, SizeBytes = local.Size,
                 MimeType = transfer.MimeType, UploadedAt = DateTime.UtcNow.ToString("O"), BatchId = result.BatchId,
-                Chunks = result.ChunkMessageIds.ToList(), Encryption = transfer.Encryption?.Clone()
+                Chunks = result.HasAttachmentReferences ? null : result.ChunkMessageIds.ToList(),
+                ChunkRefs = result.ChunkReferences?.ToList(), Encryption = transfer.Encryption?.Clone()
             };
             if (_settings.PreviewEnabled)
                 payload.Preview = await UploadThumbnailAsync(snapshot, payload, staging, token);
@@ -374,6 +384,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
     {
         if (document == null) return null;
         if (!document.RootElement.TryGetProperty("entryType", out var type) || type.GetString() != "syncRevision") return null;
+        if (document.RootElement.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
+            ChunkReference.ValidateJsonPresence(payload);
         var result = document.RootElement.Deserialize<SyncRevision>(SyncJson.Options) ?? throw new InvalidDataException("Revisão inválida.");
         result.MessageId = messageId;
         return result;
@@ -431,8 +443,11 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             !DateTimeOffset.TryParse(revision.ModifiedUtc, out var modified) || modified.Offset != TimeSpan.Zero ||
             (revision.IsDeleted && (!DateTimeOffset.TryParse(revision.DeletedUtc, out var deleted) || deleted.Offset != TimeSpan.Zero)) ||
             (!revision.IsDeleted && revision.Kind == "file" && (revision.Hash?.Length != 64 || revision.Hash.Any(c => !Uri.IsHexDigit(c)) || revision.Payload?.FileId != revision.FileId ||
-                revision.Payload.SizeBytes != revision.SizeBytes || revision.Payload.Chunks?.Count is not > 0)))
+                revision.Payload.SizeBytes != revision.SizeBytes ||
+                (revision.Payload.ChunkRefs == null && revision.Payload.Chunks?.Count is not > 0))))
             throw new InvalidDataException("Metadata de sincronização inválido; os arquivos locais foram preservados.");
+        if (revision.Payload?.ChunkRefs != null)
+            ChunkReference.Validate(revision.Payload.ChunkRefs, revision.Payload.Chunks);
     }
 
     private static bool SafeIdentity(string value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 128 &&
