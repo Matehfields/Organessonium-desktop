@@ -76,6 +76,7 @@ internal static partial class Program
                 await uploader.UploadResumableGeneratedAsync(source.Name, count, Prepare, "", "", new Dictionary<int, string>(),
                     cancellationToken: interrupted.Token, encryptedPayload: context, cleanupPart: file => file.Delete(),
                     useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate,
+                    maxPreparedPartBytes: 1024 + count + EncryptionService.EnvelopeOverheadBytes,
                     onBatchUploaded: async batch =>
                     {
                         await manager.MarkUploadChunksAsync(state, batch);
@@ -95,6 +96,7 @@ internal static partial class Program
                 state.UploadedChunks.ToDictionary(chunk => chunk.Index, chunk => chunk.MessageId), progress.Add,
                 encryptedPayload: context, cleanupPart: file => file.Delete(), useAttachmentReferences: true,
                 uploadedChunkReferences: resumedReferences, batchPreparationGate: memory.BatchPreparationGate,
+                maxPreparedPartBytes: 1024 + count + EncryptionService.EnvelopeOverheadBytes,
                 onBatchUploaded: batch => manager.MarkUploadChunksAsync(state, batch));
             RequireSync(result.ChunkReferences?.Count == count && result.ChunkMessageIds.Count == 0 &&
                 progress.First() == 11 && progress.Last() == count && state.PendingChunks.Count == 0,

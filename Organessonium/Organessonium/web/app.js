@@ -144,7 +144,7 @@ const I18N = {
         encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
         enablePreviews:'Ativar prévias', simultaneousPreviews:'Prévias simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
-        forceUploadParallelism:'Forçar 16 workers', forceUploadParallelismHelp:'Mantém até 16 partes em upload, sem ajuste automático por rede ou RAM. Aplica-se aos próximos uploads.',
+        forceUploadParallelism:'Forçar 16 workers (RAM até 1 GB)', forceUploadParallelismHelp:'Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -282,7 +282,7 @@ const I18N = {
         encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
         enablePreviews:'Enable previews', simultaneousPreviews:'Simultaneous previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
-        forceUploadParallelism:'Force 16 workers', forceUploadParallelismHelp:'Keeps up to 16 parts uploading without automatic network or RAM adjustments. Applies to new uploads.',
+        forceUploadParallelism:'Force 16 workers (RAM up to 1 GB)', forceUploadParallelismHelp:'Applies immediately to running uploads. Bypasses only dynamic worker adjustment; keeps the global RAM ceiling and Discord limits. Chunks are encrypted in RAM without ciphertext disk fallback.',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -2348,6 +2348,7 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     const row = $('op-file-' + id + '-' + fileIndex);
     if (!row) return;
     const normalizedStatus = ['active', 'waiting', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
+    if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && normalizedStatus === 'active') return;
     row.dataset.fileStatus = normalizedStatus;
     const detail = $('op-file-detail-' + id + '-' + fileIndex);
     if (detail && message) detail.textContent = message;
@@ -2437,11 +2438,12 @@ window._opsProgress = (id, percent, msg) => {
     setOpProgress(id, percent);
 };
 
-window._opsTransferMetrics = (id, direction, completedItems, totalItems, transferredBytes, totalBytes, activeTransferSeconds) => {
+window._opsTransferMetrics = (id, direction, completedItems, totalItems, transferredBytes, totalBytes, activeTransferSeconds, rateBytes) => {
     const item = $('op-' + id);
     if (!item) return;
     const now = performance.now();
     const reportedBytes = Math.max(0, Number(transferredBytes) || 0);
+    const reportedRateBytes = rateBytes == null ? reportedBytes : Math.max(0, Number(rateBytes) || 0);
     const total = Math.max(0, Number(totalBytes) || 0);
     const reportedActiveSeconds = Number(activeTransferSeconds);
     const hasActiveClock = activeTransferSeconds != null && Number.isFinite(reportedActiveSeconds) && reportedActiveSeconds >= 0;
@@ -2451,30 +2453,32 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
             direction,
             hasActiveClock,
             highWaterBytes:reportedBytes,
+            highWaterRateBytes:reportedRateBytes,
             activeSeconds:hasActiveClock ? reportedActiveSeconds : 0,
-            samples:[[now, reportedBytes, hasActiveClock ? reportedActiveSeconds : 0]],
+            samples:[[now, reportedRateBytes, hasActiveClock ? reportedActiveSeconds : 0]],
             speed:0
         };
         transferRateStates.set(id, state);
     } else {
         state.highWaterBytes = Math.max(state.highWaterBytes, reportedBytes);
+        state.highWaterRateBytes = Math.max(state.highWaterRateBytes, reportedRateBytes);
         if (hasActiveClock) {
             state.activeSeconds = Math.max(state.activeSeconds, reportedActiveSeconds);
-            state.samples.push([now, state.highWaterBytes, state.activeSeconds]);
+            state.samples.push([now, state.highWaterRateBytes, state.activeSeconds]);
             while (state.samples.length > 1 && state.activeSeconds - state.samples[1][2] >= 60) state.samples.shift();
             const baseline = state.samples[0];
             const elapsed = state.activeSeconds - baseline[2];
             state.speed = elapsed >= 1
-                ? Math.max(0, state.highWaterBytes - baseline[1]) / elapsed
+                ? Math.max(0, state.highWaterRateBytes - baseline[1]) / elapsed
                 : 0;
         } else {
-            state.samples.push([now, state.highWaterBytes, 0]);
+            state.samples.push([now, state.highWaterRateBytes, 0]);
             const cutoff = now - 60000;
             while (state.samples.length > 1 && state.samples[1][0] <= cutoff) state.samples.shift();
             const baseline = state.samples[0];
             const elapsed = now - baseline[0];
             state.speed = elapsed >= 1000
-                ? Math.max(0, state.highWaterBytes - baseline[1]) / (elapsed / 1000)
+                ? Math.max(0, state.highWaterRateBytes - baseline[1]) / (elapsed / 1000)
                 : 0;
         }
     }

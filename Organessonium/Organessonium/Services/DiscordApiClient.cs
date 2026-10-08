@@ -978,7 +978,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         var shouldWaitForTransientNetwork = waitForTransientNetwork || onRateLimitWait != null;
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
-            using var request = requestFactory();
+            using var request = await Task.Run(requestFactory, cancellationToken).ConfigureAwait(false);
             var routeKey = DiscordRequestLimiter.RouteKey(request);
             var routeLock = serializeRoute
                 ? _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1))

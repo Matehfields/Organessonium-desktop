@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime;
 using System.Security.Cryptography;
+using Organessonium.Models;
 
 namespace Organessonium.Services;
 
@@ -188,217 +189,70 @@ internal static class UploadConcurrencyPlanner
 
 internal sealed class UploadMemoryCoordinator : IDisposable
 {
-    private static readonly TimeSpan PressureSampleInterval = TimeSpan.FromSeconds(4);
-    private readonly object _sync = new();
     private readonly int _requestedWorkers;
-    private readonly UploadBufferStrategy _strategy;
-    private readonly bool _forceParallelism;
-    private readonly UploadChunkBufferPool _pool = new();
-    private int _activeWorkers;
-    private int _allowedWorkers;
-    private int _healthySamples;
-    private long _lastSampleTimestamp;
-    private int _rentedMemoryBuffers;
     private bool _disposed;
 
     public UploadMemoryCoordinator(int requestedWorkers, UploadBufferStrategy strategy = UploadBufferStrategy.Auto,
-        bool forceParallelism = false)
-    {
-        _requestedWorkers = Math.Clamp(requestedWorkers, 1, 16);
-        _strategy = strategy;
-        _forceParallelism = forceParallelism;
-        if (forceParallelism) _allowedWorkers = _requestedWorkers;
-    }
+        bool forceParallelism = false) => _requestedWorkers = Math.Clamp(requestedWorkers, 1, 16);
 
-    // Batches retain several ciphertext leases. Bound transient disk/AES buffers separately from HTTP workers.
-    internal SemaphoreSlim BatchPreparationGate { get; } = new(2, 2);
+    internal SemaphoreSlim BatchPreparationGate => RamUploadBudget.Batches;
 
     public UploadMemoryPlan SelectPlan(long fileSizeBytes)
     {
-        if (_forceParallelism && _strategy != UploadBufferStrategy.Disk)
-        {
-            return new UploadMemoryPlan(_strategy, true, "Fixed upload parallelism", _requestedWorkers,
-                _requestedWorkers, _requestedWorkers * UploadMemoryPlanner.EstimatedWorkerBytes, default);
-        }
-        if (!UploadMemorySnapshot.TryCapture(out var snapshot))
-        {
-            var unavailable = new UploadMemoryPlan(
-                _strategy,
-                false,
-                "Physical memory status could not be read",
-                _requestedWorkers,
-                0,
-                0,
-                default);
-            LogPlan(fileSizeBytes, unavailable);
-            return unavailable;
-        }
-
-        var plan = UploadMemoryPlanner.CreatePlan(
-            fileSizeBytes,
-            _requestedWorkers,
-            _strategy,
-            snapshot,
-            Volatile.Read(ref _activeWorkers));
-        if (plan.UseMemory)
-        {
-            lock (_sync)
-            {
-                if (_allowedWorkers == 0 || plan.MemorySafeWorkers < _allowedWorkers)
-                {
-                    _allowedWorkers = plan.MemorySafeWorkers;
-                    _healthySamples = 0;
-                }
-            }
-        }
-
-        LogPlan(fileSizeBytes, plan);
-        return plan;
+        UploadMemorySnapshot.TryCapture(out var snapshot);
+        return new UploadMemoryPlan(UploadBufferStrategy.Memory, true, "RAM only, shared bounded buffers",
+            _requestedWorkers, RamUploadBudget.MaxResidentChunks,
+            (RamUploadBudget.MaxResidentChunks + 2L) * DiscordLimits.AttachmentBytes, snapshot);
     }
 
     public bool TryRentBuffers(int plaintextLength, out UploadChunkBufferLease? lease)
     {
         lease = null;
-        if (plaintextLength < 0 || Volatile.Read(ref _disposed))
-        {
-            return false;
-        }
-
-        if (!_forceParallelism) RefreshCapacity();
-        lock (_sync)
-        {
-            if (_disposed || _allowedWorkers < 1 || _activeWorkers >= _allowedWorkers)
-            {
-                return false;
-            }
-
-            _activeWorkers++;
-        }
-
+        if (_disposed || plaintextLength < 0 || !RamUploadBudget.Chunks.Wait(0)) return false;
         try
         {
-            lease = _pool.Rent(
-                plaintextLength,
-                checked(plaintextLength + EncryptionService.EnvelopeOverheadBytes),
-                ReleaseWorker);
-            Volatile.Write(ref _rentedMemoryBuffers, 1);
+            lease = RamUploadBudget.Pool.Rent(plaintextLength,
+                checked(plaintextLength + EncryptionService.EnvelopeOverheadBytes), () => RamUploadBudget.Chunks.Release());
             return true;
         }
-        catch (OutOfMemoryException)
+        catch (OutOfMemoryException) { RamUploadBudget.Chunks.Release(); return false; }
+        catch { RamUploadBudget.Chunks.Release(); throw; }
+    }
+
+    internal Task<PreparedUploadPart> PreparePartAsync(EncryptionService encryption, FileInfo source,
+        long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token) => Task.Run(async () =>
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        source.Refresh();
+        if (source.Length != expectedLength) throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
+        var offset = checked((long)context.ChunkIndex * chunkBytes);
+        var length = checked((int)Math.Min(chunkBytes, Math.Max(0, expectedLength - offset)));
+        if (context.ChunkIndex > 0 && offset >= expectedLength) throw new EndOfStreamException("Chunk ausente na origem.");
+        await RamUploadBudget.Preparation.WaitAsync(token).ConfigureAwait(false);
+        UploadChunkBufferLease? lease = null;
+        var slot = false;
+        try
         {
-            lock (_sync)
-            {
-                _allowedWorkers = Math.Min(_allowedWorkers, Math.Max(0, _activeWorkers - 1));
-                _healthySamples = 0;
-            }
-            ReleaseWorker();
-            AppLogger.Debug("Upload.MemoryPipeline", "Disk fallback: buffer allocation failed.");
-            return false;
+            await RamUploadBudget.Chunks.WaitAsync(token).ConfigureAwait(false);
+            slot = true;
+            lease = RamUploadBudget.Pool.Rent(length, checked(length + EncryptionService.EnvelopeOverheadBytes),
+                () => RamUploadBudget.Chunks.Release());
+            var encryptedLength = await encryption.EncryptFileRangeIntoAsync(source, offset, length,
+                lease.Plaintext, lease.Ciphertext, context, token).ConfigureAwait(false);
+            lease.ReleasePlaintext();
+            return new PreparedUploadPart(EncryptedPayloadProtocol.FileName(context.Role, context.ChunkIndex, context.ChunkCount),
+                encryptedLength, length, lease);
         }
         catch
         {
-            ReleaseWorker();
+            if (lease != null) lease.Dispose();
+            else if (slot) RamUploadBudget.Chunks.Release();
             throw;
         }
-    }
+        finally { RamUploadBudget.Preparation.Release(); }
+    }, token);
 
-    private void RefreshCapacity()
-    {
-        var now = Stopwatch.GetTimestamp();
-        var last = Volatile.Read(ref _lastSampleTimestamp);
-        if (last != 0 && Stopwatch.GetElapsedTime(last, now) < PressureSampleInterval)
-        {
-            return;
-        }
-
-        if (Interlocked.CompareExchange(ref _lastSampleTimestamp, now, last) != last)
-        {
-            return;
-        }
-
-        if (!UploadMemorySnapshot.TryCapture(out var snapshot))
-        {
-            return;
-        }
-
-        var plan = UploadMemoryPlanner.CreatePlan(
-            UploadMemoryPlanner.LargeFileThresholdBytes,
-            _requestedWorkers,
-            UploadBufferStrategy.Memory,
-            snapshot,
-            Volatile.Read(ref _activeWorkers));
-        var next = plan.MemorySafeWorkers;
-        int previous;
-        lock (_sync)
-        {
-            previous = _allowedWorkers;
-            if (previous == 0 || next < previous)
-            {
-                _allowedWorkers = next;
-                _healthySamples = 0;
-            }
-            else if (next > previous)
-            {
-                _healthySamples++;
-                if (_healthySamples >= 2)
-                {
-                    _allowedWorkers = Math.Min(next, previous + 1);
-                    _healthySamples = 0;
-                }
-            }
-            else
-            {
-                _healthySamples = 0;
-            }
-        }
-
-        if (previous != _allowedWorkers)
-        {
-            AppLogger.Debug(
-                "Upload.MemoryPipeline",
-                $"Memory-safe workers changed: {previous} -> {_allowedWorkers}. Reason: {plan.Reason}.");
-        }
-    }
-
-    private void ReleaseWorker()
-    {
-        Interlocked.Decrement(ref _activeWorkers);
-    }
-
-    private static void LogPlan(long fileSizeBytes, UploadMemoryPlan plan)
-    {
-        var snapshot = plan.Snapshot;
-        AppLogger.Debug(
-            "Upload.MemoryPipeline",
-            $"Strategy: {(plan.UseMemory ? "Memory" : "Disk fallback")}; " +
-            $"reason: {plan.Reason}; file: {FormatBytes(fileSizeBytes)}; " +
-            $"system RAM: {FormatBytes(snapshot.TotalPhysicalBytes)}; " +
-            $"available RAM: {FormatBytes(snapshot.AvailablePhysicalBytes)}; " +
-            $"process working set: {FormatBytes(snapshot.ProcessWorkingSetBytes)}; " +
-            $"chunk: {FormatBytes(EncryptionService.MaximumPlaintextPayloadBytes)}; " +
-            $"requested workers: {plan.RequestedWorkers}; memory-safe workers: {plan.MemorySafeWorkers}; " +
-            $"estimated upload buffer budget: {FormatBytes(plan.EstimatedBufferBudgetBytes)}.");
-    }
-
-    private static string FormatBytes(long value)
-    {
-        return (Math.Max(0, value) / 1024d / 1024d).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " MiB";
-    }
-
-    public void Dispose()
-    {
-        lock (_sync)
-        {
-            _disposed = true;
-        }
-        _pool.Dispose();
-        BatchPreparationGate.Dispose();
-        if (Volatile.Read(ref _rentedMemoryBuffers) != 0)
-        {
-            UploadBufferMemoryReclaimer.Reclaim();
-            AppLogger.Debug("Upload.MemoryPipeline", "Released upload buffers and compacted the large object heap.");
-        }
-    }
+    public void Dispose() => _disposed = true;
 }
 
 internal sealed class UploadChunkBufferLease : IDisposable
@@ -463,6 +317,9 @@ internal sealed class UploadChunkBufferPool : IDisposable
     private readonly ConcurrentBag<byte[]> _ciphertext = new();
     private int _disposed;
 
+    private long _allocatedBytes;
+    internal long AllocatedBytes => Interlocked.Read(ref _allocatedBytes);
+
     public UploadChunkBufferLease Rent(int plaintextLength, int ciphertextLength, Action releaseWorker)
     {
         if (Volatile.Read(ref _disposed) != 0)
@@ -493,7 +350,7 @@ internal sealed class UploadChunkBufferPool : IDisposable
         Return(_ciphertext, buffer);
     }
 
-    private static byte[] Rent(ConcurrentBag<byte[]> buffers, int minimumLength)
+    private byte[] Rent(ConcurrentBag<byte[]> buffers, int minimumLength)
     {
         while (buffers.TryTake(out var buffer))
         {
@@ -503,9 +360,12 @@ internal sealed class UploadChunkBufferPool : IDisposable
             }
 
             CryptographicOperations.ZeroMemory(buffer);
+            Interlocked.Add(ref _allocatedBytes, -buffer.Length);
         }
 
-        return GC.AllocateUninitializedArray<byte>(minimumLength);
+        var allocated = GC.AllocateUninitializedArray<byte>(minimumLength);
+        Interlocked.Add(ref _allocatedBytes, allocated.Length);
+        return allocated;
     }
 
     private void Return(ConcurrentBag<byte[]> buffers, byte[] buffer)
@@ -528,11 +388,18 @@ internal sealed class UploadChunkBufferPool : IDisposable
         Clear(_ciphertext);
     }
 
-    private static void Clear(ConcurrentBag<byte[]> buffers)
+    internal void TrimFreeBuffers()
+    {
+        Clear(_plaintext);
+        Clear(_ciphertext);
+    }
+
+    private void Clear(ConcurrentBag<byte[]> buffers)
     {
         while (buffers.TryTake(out var buffer))
         {
             CryptographicOperations.ZeroMemory(buffer);
+            Interlocked.Add(ref _allocatedBytes, -buffer.Length);
         }
     }
 }
@@ -546,8 +413,8 @@ public sealed class AdaptiveUploadGate : IDisposable
     private const int HealthySamplesRequired = 2;
     private readonly object _sync = new();
     private readonly Queue<Waiter> _waiters = new();
-    private readonly int _maximumWorkers;
-    private readonly bool _adaptive;
+    private int _maximumWorkers;
+    private bool _adaptive;
     private int _activeWorkers;
     private int _currentLimit;
     private int _slowSamples;
@@ -569,6 +436,21 @@ public sealed class AdaptiveUploadGate : IDisposable
             {
                 return _currentLimit;
             }
+        }
+    }
+
+    internal bool Forced { get { lock (_sync) return !_adaptive; } }
+
+    public void Reconfigure(int requestedWorkers, bool adaptive)
+    {
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            _maximumWorkers = Math.Clamp(requestedWorkers, 1, 16);
+            _adaptive = adaptive;
+            _currentLimit = _maximumWorkers;
+            _slowSamples = _healthySamples = 0;
+            ReleaseWaitingWorkers();
         }
     }
 
@@ -603,7 +485,7 @@ public sealed class AdaptiveUploadGate : IDisposable
         int next = 0;
         lock (_sync)
         {
-            if (_disposed)
+            if (_disposed || !_adaptive)
             {
                 return;
             }
@@ -689,8 +571,7 @@ public sealed class AdaptiveUploadGate : IDisposable
                 continue;
             }
 
-            _activeWorkers++;
-            waiter.Source.TrySetResult(new Lease(this));
+            if (waiter.Source.TrySetResult(new Lease(this))) _activeWorkers++;
         }
     }
 

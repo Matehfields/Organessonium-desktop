@@ -544,6 +544,26 @@ Impacto da remoção: Uma conta/rota com teto menor pode falhar em vez de contin
 
 Procedimento para remoção: Validar capacidades reais e alternativa de recuperação; manter retries de rede/429, tamanho individual, abertura de streams e checkpoints; retirar somente a divisão de batches e o teste correspondente após a decisão.
 
+### TRANSFER-METRICS-COMPAT-001
+
+Status: verificar antes da remoção
+
+Descrição: `_opsTransferMetrics` continua aceitando o contrato anterior de sete argumentos. O oitavo, `rateBytes`, separa transmissão real e retries do progresso lógico único do upload.
+
+Introduzido por: Upload limitado em RAM com progresso durante o corpo HTTP.
+
+Motivo: Preservar chamadas existentes, inclusive downloads, que ainda enviam um único contador de bytes. Essa ausência pode ser comportamento atual válido, não dívida removível automaticamente.
+
+Código relacionado: `web/app.js` (`_opsTransferMetrics`); `Bridge/AppController.cs` (`OpsTransferMetricsAsync`); `Services/UploadByteProgress.cs`, `UploadWireProgressStream.cs`.
+
+Comportamento atual: `rateBytes` ausente/null usa `transferredBytes` para velocidade. Uploads com contador separado mantêm progresso lógico monotônico e contam retransmissões somente na vazão. Nenhum formato de metadata, payload ou checkpoint foi alterado.
+
+Pode ser removido quando: Todos os produtores de métricas enviarem um contador de transmissão explícito, inclusive fluxos de download e retomada, ou o contrato opcional deixar de ser necessário.
+
+Impacto da remoção: Chamadas de sete argumentos podem perder velocidade/estimativa. Não confundir esse fallback com downgrade de dados criptografados.
+
+Procedimento para remoção: Inventariar as chamadas C#/JS, atualizar produtores e testes do painel; depois remover somente o fallback do oitavo argumento e atualizar a documentação.
+
 ## Fronteiras e itens que não são dívida automaticamente
 
 - Não foi encontrado protocolo de compartilhamento JSON neste desktop. Não existe evidência para inventar SHARE-LEGACY-001. Exportação OEK1 é recuperação de chave, não share de arquivo.

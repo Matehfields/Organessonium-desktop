@@ -22,6 +22,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="536870912" />
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">

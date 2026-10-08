@@ -49,7 +49,11 @@ public partial class App : Application
         }
 
         base.OnStartup(e);
-        try { await StartDesktopAsync(_startBackground || e.Args.Any(arg => arg.Equals("--background", StringComparison.OrdinalIgnoreCase)), _desktopStore, _initialIdentityPath); }
+        try
+        {
+            AppMemoryBudget.Initialize();
+            await StartDesktopAsync(_startBackground || e.Args.Any(arg => arg.Equals("--background", StringComparison.OrdinalIgnoreCase)), _desktopStore, _initialIdentityPath);
+        }
         catch (Exception ex)
         {
             _desktopStarted.TrySetException(ex);

@@ -46,7 +46,7 @@ internal static partial class Program
             }
             catch { lease.Dispose(); throw; }
         }
-        if (!memory.SelectPlan(1024).UseMemory || memory.SelectPlan(1L << 40).MemorySafeWorkers != 16)
+        if (!memory.SelectPlan(1024).UseMemory || memory.SelectPlan(1L << 40).MemorySafeWorkers != RamUploadBudget.MaxResidentChunks)
             return TestOutcome.Fail("o modo fixo ainda depende do tamanho do arquivo ou do plano adaptativo");
         var result = await uploader.UploadResumableGeneratedAsync("arquivo.bin", 33, PrepareAsync, "thread", "batch",
             new Dictionary<int, string> { [0] = "already-uploaded" },

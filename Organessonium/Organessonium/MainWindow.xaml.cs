@@ -314,6 +314,9 @@ public partial class MainWindow : Window
 
         var environment = await CoreWebView2Environment.CreateAsync(null, _store.WebViewDataDirectory.FullName, options);
         await WebView.EnsureCoreWebView2Async(environment);
+        environment.ProcessInfosChanged += (_, _) => AppMemoryBudget.RegisterWebViewProcesses(
+            environment.GetProcessInfos().Select(info => info.ProcessId));
+        AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
         WebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
             LocalWebHost,
             ResolveWebRootDirectory().FullName,

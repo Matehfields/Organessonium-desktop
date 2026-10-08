@@ -154,12 +154,18 @@ public sealed partial class ForumUploader
             .ToArray();
         if (pending.Length > 0)
         {
-            var parallelism = Math.Min(Math.Clamp(maxParallelParts, 1, 16), pending.Length);
+            var parallelism = Math.Min(adaptiveUploadGate == null ? Math.Clamp(maxParallelParts, 1, 16) : 16, pending.Length);
             var nextPendingIndex = -1;
-            var uploads = Enumerable.Range(0, parallelism).Select(async _ =>
+            var uploads = Enumerable.Range(0, parallelism).Select(async workerIndex =>
             {
                 while (true)
                 {
+                    if (adaptiveUploadGate != null && !adaptiveUploadGate.Forced && workerIndex >= Math.Clamp(maxParallelParts, 1, 16))
+                    {
+                        if (Volatile.Read(ref nextPendingIndex) >= pending.Length - 1) return;
+                        await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
                     var pendingIndex = Interlocked.Increment(ref nextPendingIndex);
                     if (pendingIndex >= pending.Length)
                     {
@@ -217,7 +223,9 @@ public sealed partial class ForumUploader
         bool useAttachmentReferences = false,
         IReadOnlyList<ChunkReference>? uploadedChunkReferences = null,
         Func<ForumUploadedBatch, Task>? onBatchUploaded = null,
-        SemaphoreSlim? batchPreparationGate = null)
+        SemaphoreSlim? batchPreparationGate = null,
+        Action<int, long>? onPartTransferProgress = null,
+        int maxPreparedPartBytes = DiscordLimits.AttachmentBytes)
     {
         if (totalParts <= 0)
         {
@@ -225,6 +233,8 @@ public sealed partial class ForumUploader
         }
 
         ArgumentNullException.ThrowIfNull(preparePart);
+        if (maxPreparedPartBytes < EncryptionService.EnvelopeOverheadBytes || maxPreparedPartBytes > DiscordLimits.AttachmentBytes)
+            throw new ArgumentOutOfRangeException(nameof(maxPreparedPartBytes));
 
         if (useAttachmentReferences)
         {
@@ -233,7 +243,7 @@ public sealed partial class ForumUploader
             return await UploadGroupedGeneratedAsync(totalParts, preparePart, existingThreadId, existingBatchId,
                 uploadedChunkReferences ?? [], uploadedParts, onChunkUploaded, onBatchUploaded, cancellationToken,
                 onRateLimitWait, maxParallelParts, uploadGate, encryptedPayload, cleanupPart, adaptiveUploadGate,
-                onTransferActivity, batchPreparationGate);
+                onTransferActivity, batchPreparationGate, onPartTransferProgress, maxPreparedPartBytes);
         }
 
         var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
@@ -309,7 +319,9 @@ public sealed partial class ForumUploader
             {
                 var post = await InUploadSlotAsync(async () =>
                 {
-                    first = await preparePart(0);
+                    using var reservation = batchPreparationGate == null ? null : await RamUploadBudget.ReserveBytesAsync(maxPreparedPartBytes, cancellationToken);
+                    first = await Task.Run(() => preparePart(0), cancellationToken);
+                    first.TransferProgress = bytes => onPartTransferProgress?.Invoke(0, bytes);
                     return await _discord.CreateForumPostWithFileDetailedAsync(
                         _forumId,
                         EncryptedThreadTitle(),
@@ -357,12 +369,18 @@ public sealed partial class ForumUploader
             .ToArray();
         if (pending.Length > 0)
         {
-            var parallelism = Math.Min(Math.Clamp(maxParallelParts, 1, 16), pending.Length);
+            var parallelism = Math.Min(adaptiveUploadGate == null ? Math.Clamp(maxParallelParts, 1, 16) : 16, pending.Length);
             var nextPendingIndex = -1;
-            var uploads = Enumerable.Range(0, parallelism).Select(async _ =>
+            var uploads = Enumerable.Range(0, parallelism).Select(async workerIndex =>
             {
                 while (true)
                 {
+                    if (adaptiveUploadGate != null && !adaptiveUploadGate.Forced && workerIndex >= Math.Clamp(maxParallelParts, 1, 16))
+                    {
+                        if (Volatile.Read(ref nextPendingIndex) >= pending.Length - 1) return;
+                        await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
                     var pendingIndex = Interlocked.Increment(ref nextPendingIndex);
                     if (pendingIndex >= pending.Length)
                     {
@@ -375,7 +393,9 @@ public sealed partial class ForumUploader
                     {
                         var message = await InUploadSlotAsync(async () =>
                         {
-                            prepared = await preparePart(index);
+                            using var reservation = batchPreparationGate == null ? null : await RamUploadBudget.ReserveBytesAsync(maxPreparedPartBytes, cancellationToken);
+                            prepared = await Task.Run(() => preparePart(index), cancellationToken);
+                            prepared.TransferProgress = bytes => onPartTransferProgress?.Invoke(index, bytes);
                             return await _discord.SendFileMessageAsync(
                                 threadId,
                                 encryptedPayload == null
@@ -489,6 +509,15 @@ public sealed partial class ForumUploader
             AppLogger.Error("Discord.UploadPreviewFile", ex, $"{content} | {file.FullName}");
             throw;
         }
+    }
+
+    internal async Task<string> UploadPreviewFileToThreadAsync(string threadId, string content,
+        PreparedUploadPart part, CancellationToken cancellationToken = default, Func<TimeSpan, Task>? onRateLimitWait = null)
+    {
+        await _discord.UnarchiveThreadAsync(threadId, cancellationToken, onRateLimitWait);
+        var message = await _discord.SendFileMessageAsync(threadId, content, part, cancellationToken,
+            onRateLimitWait, waitForTransientNetwork: true);
+        return message.Id;
     }
 
     public async Task<IReadOnlyList<string>> UploadPreviewToThreadAsync(
@@ -637,15 +666,19 @@ public sealed class PreparedUploadPart : IDisposable
 
     public long LogicalSizeBytes { get; }
 
+    internal Action<long>? TransferProgress { get; set; }
+
     internal Stream OpenRead()
     {
         if (File != null)
         {
-            return File.OpenRead();
+            var fileStream = File.OpenRead();
+            return TransferProgress == null ? fileStream : new UploadWireProgressStream(fileStream, TransferProgress);
         }
 
         var lease = _memoryLease ?? throw new ObjectDisposedException(nameof(PreparedUploadPart));
-        return lease.OpenCiphertextStream(_memoryLength);
+        var stream = lease.OpenCiphertextStream(_memoryLength);
+        return TransferProgress == null ? stream : new UploadWireProgressStream(stream, TransferProgress);
     }
 
     public void Dispose()

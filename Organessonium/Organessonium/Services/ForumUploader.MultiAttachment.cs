@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Text.Json;
+using System.Threading.Channels;
 using Organessonium.Models;
 
 namespace Organessonium.Services;
@@ -17,10 +18,13 @@ public sealed partial class ForumUploader
         Func<ForumUploadedBatch, Task>? onBatchUploaded, CancellationToken token,
         Func<TimeSpan, Task>? onWait, int maxParallelParts, SemaphoreSlim? uploadGate,
         EncryptedPayloadContext? encryption, Action<FileInfo>? cleanupPart,
-        AdaptiveUploadGate? adaptiveGate, Action<bool>? onActivity, SemaphoreSlim? preparationGate)
+        AdaptiveUploadGate? adaptiveGate, Action<bool>? onActivity, SemaphoreSlim? preparationGate,
+        Action<int, long>? onPartTransferProgress = null, int maxPreparedPartBytes = DiscordLimits.AttachmentBytes)
     {
         if (encryption == null)
             throw new InvalidDataException("Uploads novos agrupados exigem o contexto de criptografia dos chunks.");
+        using var pipelineCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        token = pipelineCancellation.Token;
         var confirmed = ChunkReference.Validate(uploadedReferences, totalChunks: totalParts, partial: true);
         var references = new ChunkReference?[totalParts];
         foreach (var reference in confirmed) references[reference.Index] = reference;
@@ -29,6 +33,7 @@ public sealed partial class ForumUploader
         if (threadId.Length == 0 && confirmed.Count > 0)
             throw new InvalidDataException("O checkpoint contém chunks confirmados sem o thread de origem.");
         var completed = confirmed.Count;
+        var progressSync = new object();
         uploadedParts?.Invoke(completed);
         using var localPreparationGate = preparationGate == null ? new SemaphoreSlim(2, 2) : null;
         var preparationSlots = preparationGate ?? localPreparationGate!;
@@ -55,8 +60,11 @@ public sealed partial class ForumUploader
             foreach (var chunk in chunks)
                 references[chunk.Index] = new ChunkReference
                     { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId };
-            var count = Interlocked.Add(ref completed, chunks.Count);
-            uploadedParts?.Invoke(count);
+            lock (progressSync)
+            {
+                completed += chunks.Count;
+                uploadedParts?.Invoke(completed);
+            }
         }
 
         void Cleanup(IReadOnlyList<PreparedUploadPart> files)
@@ -110,14 +118,21 @@ public sealed partial class ForumUploader
             }
         }
 
-        if (threadId.Length == 0)
+        async Task InitializeThreadAsync()
         {
+            if (threadId.Length > 0)
+            {
+                await _discord.UnarchiveThreadAsync(threadId, token, onWait);
+                return;
+            }
             var initial = new List<PreparedUploadPart>(1);
             try
             {
                 await InSlotAsync(async () =>
                 {
-                    initial.Add(await preparePart(0));
+                    using var initialReservation = preparationGate == null ? null : await RamUploadBudget.ReserveBytesAsync(maxPreparedPartBytes, token);
+                    initial.Add(await Task.Run(() => preparePart(0), token));
+                    initial[0].TransferProgress = bytes => onPartTransferProgress?.Invoke(0, bytes);
                     var post = await _discord.CreateForumPostWithFileDetailedAsync(_forumId, EncryptedThreadTitle(),
                         PayloadMessage(encryption.WithChunkIndex(0), totalParts), initial[0], token, onWait,
                         serializeRoute: false, onTransferActivity: onActivity, waitForTransientNetwork: true);
@@ -130,43 +145,131 @@ public sealed partial class ForumUploader
             }
             finally { Cleanup(initial); }
         }
-        else await _discord.UnarchiveThreadAsync(threadId, token, onWait);
 
-        var batches = Enumerable.Range(0, totalParts).Where(index => references[index] == null)
-            .Chunk(Volatile.Read(ref _attachmentsPerBatch)).ToArray();
-        var nextBatch = -1;
-        var workers = Enumerable.Range(0, Math.Min(Math.Clamp(maxParallelParts, 1, 16), batches.Length)).Select(async _ =>
+        var needsInitialChunk = threadId.Length == 0;
+        var batchSize = Volatile.Read(ref _attachmentsPerBatch);
+        if (preparationGate != null) batchSize = Math.Min(batchSize, RamUploadBudget.PipelineBatchChunks(maxPreparedPartBytes));
+        var batches = Enumerable.Range(0, totalParts).Where(index => references[index] == null && (!needsInitialChunk || index != 0))
+            .Chunk(batchSize).ToArray();
+        var ready = Channel.CreateBounded<PreparedBatch>(new BoundedChannelOptions(1)
         {
-            while (true)
-            {
-                var batchIndex = Interlocked.Increment(ref nextBatch);
-                if (batchIndex >= batches.Length) return;
-                var indices = batches[batchIndex];
-                var files = new List<PreparedUploadPart>(indices.Length);
-                try
-                {
-                    await InSlotAsync(async () =>
-                    {
-                        await preparationSlots.WaitAsync(token);
-                        try
-                        {
-                            foreach (var index in indices)
-                            {
-                                token.ThrowIfCancellationRequested();
-                                files.Add(await preparePart(index));
-                            }
-                        }
-                        finally { preparationSlots.Release(); }
-                        await SendBatchAsync(indices, files);
-                    }, () => files.Sum(file => file.Length));
-                }
-                finally { Cleanup(files); }
-            }
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait,
+            AllowSynchronousContinuations = false
         });
-        await Task.WhenAll(workers);
+
+        async Task PrepareBatchesAsync()
+        {
+            try
+            {
+                foreach (var indices in batches)
+                {
+                    // Backpressure before reading: only one ready successor is retained per file.
+                    if (!await ready.Writer.WaitToWriteAsync(token).ConfigureAwait(false)) break;
+                    var files = new List<PreparedUploadPart>(indices.Length);
+                    IDisposable? memoryReservation = null;
+                    var reserved = false;
+                    try
+                    {
+                        await preparationSlots.WaitAsync(token).ConfigureAwait(false);
+                        reserved = true;
+                        if (preparationGate != null)
+                            memoryReservation = await RamUploadBudget.ReserveBytesAsync((long)indices.Length * maxPreparedPartBytes, token).ConfigureAwait(false);
+                        foreach (var index in indices)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            var file = await Task.Run(() => preparePart(index), token).ConfigureAwait(false);
+                            file.TransferProgress = bytes => onPartTransferProgress?.Invoke(index, bytes);
+                            files.Add(file);
+                        }
+                        if (preparationGate == null)
+                        {
+                            preparationSlots.Release();
+                            reserved = false;
+                        }
+                        var batch = new PreparedBatch(indices, files, memoryReservation,
+                            reserved ? preparationSlots : null, Cleanup);
+                        // The batch now owns all cleanup, including cancellation during publication.
+                        memoryReservation = null;
+                        reserved = false;
+                        files = [];
+                        try { await ready.Writer.WriteAsync(batch, token).ConfigureAwait(false); }
+                        catch { batch.Dispose(); throw; }
+                    }
+                    finally
+                    {
+                        Cleanup(files);
+                        memoryReservation?.Dispose();
+                        if (reserved) preparationSlots.Release();
+                    }
+                }
+                ready.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                ready.Writer.TryComplete(ex);
+                pipelineCancellation.Cancel();
+                throw;
+            }
+        }
+
+        var producer = Task.Run(PrepareBatchesAsync, token);
+        try { await InitializeThreadAsync().ConfigureAwait(false); }
+        catch
+        {
+            pipelineCancellation.Cancel();
+            try { await producer.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            finally { while (ready.Reader.TryRead(out var abandoned)) abandoned.Dispose(); }
+            throw;
+        }
+        var workerLimit = adaptiveGate == null ? Math.Clamp(maxParallelParts, 1, 16) : 16;
+        var workers = Enumerable.Range(0, Math.Min(workerLimit, batches.Length)).Select(async workerIndex =>
+        {
+            try
+            {
+                while (true)
+                {
+                    if (adaptiveGate != null && !adaptiveGate.Forced && workerIndex >= Math.Clamp(maxParallelParts, 1, 16))
+                    {
+                        if (ready.Reader.Completion.IsCompleted) return;
+                        await Task.Delay(50, token).ConfigureAwait(false);
+                        continue;
+                    }
+                    if (!await ready.Reader.WaitToReadAsync(token).ConfigureAwait(false)) return;
+                    if (!ready.Reader.TryRead(out var batch)) continue;
+                    using (batch)
+                        await InSlotAsync(() => SendBatchAsync(batch.Indices, batch.Files),
+                            () => batch.Files.Sum(file => file.Length)).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                pipelineCancellation.Cancel();
+                throw;
+            }
+        }).ToArray();
+        try { await Task.WhenAll(workers.Prepend(producer)).ConfigureAwait(false); }
+        finally
+        {
+            pipelineCancellation.Cancel();
+            while (ready.Reader.TryRead(out var abandoned)) abandoned.Dispose();
+        }
         if (references.Any(reference => reference == null))
             throw new InvalidDataException("O servidor não confirmou todas as referências do arquivo.");
         return ForumUploadResult.FromReferences(threadId, batchId, references.Select(reference => reference!).ToArray());
+    }
+
+    private sealed class PreparedBatch(int[] indices, IReadOnlyList<PreparedUploadPart> files,
+        IDisposable? reservation, SemaphoreSlim? slot, Action<IReadOnlyList<PreparedUploadPart>> cleanup) : IDisposable
+    {
+        internal int[] Indices { get; } = indices;
+        internal IReadOnlyList<PreparedUploadPart> Files { get; } = files;
+        public void Dispose()
+        {
+            try { cleanup(Files); }
+            finally { reservation?.Dispose(); slot?.Release(); }
+        }
     }
 
     private static IReadOnlyList<ForumUploadedChunk> MapAttachments(string threadId, string batchId,

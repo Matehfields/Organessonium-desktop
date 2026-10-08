@@ -84,6 +84,11 @@ public sealed class ForumDownloader
         Action<string> onProgress,
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
+        => await Task.Run(() => DownloadThreadCoreAsync(threadId, destDir, onProgress,
+            cancellationToken, onDetailedProgress), cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileInfo> DownloadThreadCoreAsync(string threadId, DirectoryInfo destDir,
+        Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
         onProgress("Recolhendo URLs dos anexos...");
         var parts = await CollectPartsAsync(threadId, cancellationToken);
@@ -132,6 +137,11 @@ public sealed class ForumDownloader
         Action<string> onProgress,
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
+        => await Task.Run(() => DownloadEntryCoreAsync(entry, destDir, onProgress,
+            cancellationToken, onDetailedProgress), cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileInfo> DownloadEntryCoreAsync(AppEntry entry, DirectoryInfo destDir,
+        Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
         if (entry.ChunkReferences != null) ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
         try
@@ -216,6 +226,12 @@ public sealed class ForumDownloader
         Action<string> onProgress,
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
+        => await Task.Run(() => DownloadResumableCoreAsync(entry, destDir, state, transferManager, onProgress,
+            cancellationToken, onDetailedProgress), cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileInfo> DownloadResumableCoreAsync(
+        AppEntry entry, DirectoryInfo destDir, TransferState state, TransferManager transferManager,
+        Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
         if (entry.LogicalChunkCount == 0)
         {
@@ -421,6 +437,11 @@ public sealed class ForumDownloader
         DirectoryInfo destDir,
         Action<DownloadProgress>? onProgress = null,
         CancellationToken cancellationToken = default)
+        => await Task.Run(() => DownloadVideoPreviewCoreAsync(entry, destDir, onProgress,
+            cancellationToken), cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileInfo?> DownloadVideoPreviewCoreAsync(AppEntry entry, DirectoryInfo destDir,
+        Action<DownloadProgress>? onProgress, CancellationToken cancellationToken)
     {
         if (entry.VideoPreviewChunkReferences == null && entry.VideoPreviewChunkMessageIds.Count == 0)
         {
@@ -446,6 +467,11 @@ public sealed class ForumDownloader
         DirectoryInfo destDir,
         Action<DownloadProgress>? onProgress = null,
         CancellationToken cancellationToken = default)
+        => await Task.Run(() => DownloadPreviewCoreAsync(threadId, kind, destDir, onProgress,
+            cancellationToken), cancellationToken).ConfigureAwait(false);
+
+    private async Task<FileInfo?> DownloadPreviewCoreAsync(string threadId, string kind, DirectoryInfo destDir,
+        Action<DownloadProgress>? onProgress, CancellationToken cancellationToken)
     {
         var parts = await CollectPreviewPartsAsync(threadId, kind, cancellationToken);
         if (parts.Count == 0)

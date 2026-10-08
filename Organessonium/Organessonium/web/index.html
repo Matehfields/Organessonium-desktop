@@ -516,8 +516,8 @@
                 <input id="setting-upload-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
             </div>
             <div class="setting-row col setting-copy">
-                <button id="setting-force-upload" class="card-size-btn" type="button" aria-pressed="false" aria-describedby="setting-force-upload-help">Forçar 16 workers</button>
-                <small id="setting-force-upload-help">Mantém até 16 partes em upload, sem ajuste automático por rede ou RAM. Aplica-se aos próximos uploads.</small>
+                <button id="setting-force-upload" class="card-size-btn" type="button" aria-pressed="false" aria-describedby="setting-force-upload-help">Forçar 16 workers (RAM até 1 GB)</button>
+                <small id="setting-force-upload-help">Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.</small>
             </div>
         </section>
         <section class="settings-section">

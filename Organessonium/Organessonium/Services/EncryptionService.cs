@@ -219,12 +219,15 @@ public sealed class EncryptionService
         }
     }
 
-    public async Task DecryptFileAsync(
+    public Task DecryptFileAsync(
         FileInfo source,
         FileInfo destination,
         EncryptedPayloadContext context,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) => Task.Run(async () =>
     {
+        source.Refresh();
+        using var memoryBudget = await RamUploadBudget.ReserveAsync(
+            Math.Max(1, checked((int)((source.Length + DiscordLimits.AttachmentBytes - 1) / DiscordLimits.AttachmentBytes)) * 2), cancellationToken);
         var encrypted = await File.ReadAllBytesAsync(source.FullName, cancellationToken);
         try
         {
@@ -243,7 +246,7 @@ public sealed class EncryptionService
         {
             CryptographicOperations.ZeroMemory(encrypted);
         }
-    }
+    }, cancellationToken);
 
     public byte[] EncryptBytes(ReadOnlySpan<byte> plaintext, EncryptedPayloadContext context)
     {
