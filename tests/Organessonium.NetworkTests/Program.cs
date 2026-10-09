@@ -66,6 +66,7 @@ internal static partial class Program
         ("memoryBudgetHiddenBrowser", MemoryBudgetHiddenBrowserAsync),
         ("ramOnlyLargeUploadAndMetrics", RamOnlyLargeUploadAndMetricsAsync),
         ("uploadPreparationOverlapsSending", UploadPreparationOverlapsSendingAsync),
+        ("uploadQuotaSnapshotsKeepSending", UploadQuotaSnapshotsKeepSendingAsync),
         ("liveUploadWorkersAndSlowStorage", LiveUploadWorkersAndSlowStorageAsync),
         ("multiAttachmentEncryptedResumeDownload", MultiAttachmentEncryptedResumeDownloadAsync),
         ("multiAttachmentMetadataCompatibility", MultiAttachmentMetadataCompatibilityAsync),
@@ -104,6 +105,8 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--live-upload-cadence")
+            return await RunLiveUploadCadenceAsync();
         var passed = 0;
         var failed = 0;
         var allowUi = args.Contains("--include-ui", StringComparer.OrdinalIgnoreCase);

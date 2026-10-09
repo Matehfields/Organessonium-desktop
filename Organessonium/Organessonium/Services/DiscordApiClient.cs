@@ -989,7 +989,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             }
             try
             {
-                using var reservation = await _rateLimiter.WaitAsync(routeKey, onRateLimitWait, cancellationToken);
+                using var reservation = await _rateLimiter.WaitAsync(routeKey, onRateLimitWait, cancellationToken,
+                    uploadSnapshots: !serializeRoute && request.Content is MultipartFormDataContent);
 
                 HttpResponseMessage response;
                 var transferActivityStarted = false;

@@ -10,6 +10,8 @@ public static class DiscordLimits
     // Per-file upload limit, including the encrypted envelope.
     public const int AttachmentBytes = 20 * 1024 * 1024;
     public const int AttachmentsPerMessage = 10;
+    // Scheduling target, not a Discord hard limit. Large messages delay acknowledgement per attachment.
+    public const int UploadMessageTargetBytes = 2 * AttachmentBytes;
     public const int PlaintextChunkBytes = AttachmentBytes - EncryptionService.EnvelopeOverheadBytes;
 
     // Discord's global limit is per SECOND, not per minute. Leave headroom.

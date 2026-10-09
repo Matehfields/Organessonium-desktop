@@ -148,7 +148,12 @@ public sealed partial class ForumUploader
 
         var needsInitialChunk = threadId.Length == 0;
         var batchSize = Volatile.Read(ref _attachmentsPerBatch);
-        if (preparationGate != null) batchSize = Math.Min(batchSize, RamUploadBudget.PipelineBatchChunks(maxPreparedPartBytes));
+        if (preparationGate != null)
+        {
+            batchSize = Math.Min(batchSize, RamUploadBudget.PipelineBatchChunks(maxPreparedPartBytes));
+            batchSize = Math.Min(batchSize, Math.Clamp(DiscordLimits.UploadMessageTargetBytes / maxPreparedPartBytes,
+                1, DiscordLimits.AttachmentsPerMessage));
+        }
         var batches = Enumerable.Range(0, totalParts).Where(index => references[index] == null && (!needsInitialChunk || index != 0))
             .Chunk(batchSize).ToArray();
         var ready = Channel.CreateBounded<PreparedBatch>(new BoundedChannelOptions(1)

@@ -32,7 +32,8 @@ internal sealed class DiscordRequestLimiter
         return request.Method.Method + " " + string.Join('/', segments);
     }
 
-    public async Task<Reservation> WaitAsync(string route, Func<TimeSpan, Task>? onWait, CancellationToken token)
+    public async Task<Reservation> WaitAsync(string route, Func<TimeSpan, Task>? onWait, CancellationToken token,
+        bool uploadSnapshots = false)
     {
         while (true)
         {
@@ -47,9 +48,15 @@ internal sealed class DiscordRequestLimiter
                 {
                     budget.Remaining = budget.Limit;
                     budget.ResetAt = 0;
+                    if (uploadSnapshots) budget.UploadSnapshotSequence = Math.Max(budget.UploadSnapshotSequence, _sequence);
                 }
                 var readyAt = Math.Max(Math.Max(_nextRequestAt, _globalReadyAt), budget.BlockedUntil);
-                var available = budget.Remaining.HasValue ? Math.Max(0, budget.Remaining.Value - budget.InFlight) : (int?)null;
+                // Long uploads can wait for a response across several quota windows. A fresh server
+                // snapshot supersedes admissions that preceded it; only later admissions need reserving again.
+                var reserved = uploadSnapshots && budget.UploadSnapshotSequence > 0
+                    ? budget.Active.Count(reservation => !reservation.UploadSnapshots || reservation.Sequence > budget.UploadSnapshotSequence)
+                    : budget.InFlight;
+                var available = budget.Remaining.HasValue ? Math.Max(0, budget.Remaining.Value - reserved) : (int?)null;
                 if (available == 0)
                     readyAt = Math.Max(readyAt, budget.ResetAt > now ? budget.ResetAt : now + 10);
                 if (budget.PendingRetries > 0) readyAt = Math.Max(readyAt, now + 10);
@@ -62,7 +69,9 @@ internal sealed class DiscordRequestLimiter
                         DiscordLimits.TargetRequestsPerSecond, DiscordLimits.ApiRequestsPerSecond));
                     var soleRequest = budget.InFlight == 0 && budget.Remaining.HasValue;
                     budget.InFlight++;
-                    return new Reservation(this, route, budget, ++_sequence, soleRequest);
+                    var reservation = new Reservation(this, route, budget, ++_sequence, soleRequest, uploadSnapshots);
+                    budget.Active.Add(reservation);
+                    return reservation;
                 }
             }
             if (onWait != null && delay >= 100) await onWait(TimeSpan.FromMilliseconds(delay));
@@ -132,12 +141,15 @@ internal sealed class DiscordRequestLimiter
                 {
                     shared = Root(shared);
                     shared.InFlight += budget.InFlight;
+                    shared.Active.UnionWith(budget.Active);
+                    budget.Active.Clear();
                     shared.PendingRetries += budget.PendingRetries;
                     if (budget.Remaining.HasValue)
                         shared.Remaining = Math.Min(shared.Remaining ?? int.MaxValue, budget.Remaining.Value);
                     shared.ResetAt = Math.Max(shared.ResetAt, budget.ResetAt);
                     shared.BlockedUntil = Math.Max(shared.BlockedUntil, budget.BlockedUntil);
                     shared.LatestSequence = Math.Max(shared.LatestSequence, budget.LatestSequence);
+                    shared.UploadSnapshotSequence = Math.Max(shared.UploadSnapshotSequence, budget.UploadSnapshotSequence);
                     budget.Parent = shared;
                     budget = shared;
                 }
@@ -145,6 +157,7 @@ internal sealed class DiscordRequestLimiter
                 _routes[reservation.Route] = budget;
             }
             budget.InFlight--;
+            budget.Active.Remove(reservation);
             var now = Environment.TickCount64;
             if (response == null)
             {
@@ -179,6 +192,7 @@ internal sealed class DiscordRequestLimiter
                         // Store the server snapshot. In-flight reservations are discounted only during admission.
                         var reported = Math.Max(0, (int)remaining);
                         budget.Remaining = fresh ? reported : Math.Min(budget.Remaining ?? int.MaxValue, reported);
+                        if (fresh && !limited) budget.UploadSnapshotSequence = Math.Max(budget.UploadSnapshotSequence, reservation.Sequence);
                     }
                     else if (budget.Remaining.HasValue) budget.Remaining = Math.Max(0, budget.Remaining.Value - 1);
                     if (deadline > 0)
@@ -218,9 +232,12 @@ internal sealed class DiscordRequestLimiter
         public double? ResetEpoch;
         public DateTimeOffset? HeaderDate;
         public long LatestSequence;
+        public long UploadSnapshotSequence;
+        public HashSet<Reservation> Active = [];
     }
 
-    internal sealed class Reservation(DiscordRequestLimiter owner, string route, Budget budget, long sequence, bool soleRequest) : IDisposable
+    internal sealed class Reservation(DiscordRequestLimiter owner, string route, Budget budget, long sequence, bool soleRequest,
+        bool uploadSnapshots) : IDisposable
     {
         internal string Route { get; } = route;
         internal Budget Budget { get; } = budget;
@@ -228,6 +245,7 @@ internal sealed class DiscordRequestLimiter
         internal bool PendingRetry { get; set; }
         internal long Sequence { get; } = sequence;
         internal bool SoleRequest { get; } = soleRequest;
+        internal bool UploadSnapshots { get; } = uploadSnapshots;
         public void Observe(HttpResponseMessage response) => owner.Observe(this, response);
         public void Dispose() => owner.Observe(this, null);
     }
