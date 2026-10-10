@@ -15,6 +15,8 @@ internal static partial class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),
+        ("fileVersionsLifecycle", FileVersionsLifecycleAsync),
+        ("fileActionsHiddenBrowser", FileActionsHiddenBrowserAsync),
         ("metadataV1RoundTripAndErrors", MetadataV1RoundTripAndErrorsAsync),
         ("metadataLegacyAndEncryptedWrites", MetadataLegacyAndEncryptedWritesAsync),
         ("metadataV1Interoperability", MetadataV1InteroperabilityAsync),

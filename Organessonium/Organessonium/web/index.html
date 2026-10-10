@@ -239,11 +239,13 @@
 
 <!-- ─── Context menu ─────────────────────────────────────────────────────── -->
 <div id="ctx-menu" class="ctx-menu hidden" role="menu">
-    <button id="ctx-open"     class="ctx-item"><span data-icon="open_in_new"     data-size="17"></span> <span id="ctx-open-text">Abrir</span></button>
-    <button id="ctx-download" class="ctx-item"><span data-icon="download"        data-size="17"></span> <span id="ctx-dl-label">Baixar</span></button>
-    <button id="ctx-move"     class="ctx-item"><span data-icon="drive_file_move" data-size="17"></span> <span id="ctx-move-text">Mover</span></button>
-    <button id="ctx-rename"   class="ctx-item"><span data-icon="description"     data-size="17"></span> <span id="ctx-rename-text">Renomear</span></button>
-    <button id="ctx-favorite" class="ctx-item"><span id="ctx-favorite-icon" data-icon="star_border" data-size="17"></span> <span id="ctx-favorite-text">Adicionar aos favoritos</span></button>
+    <button id="ctx-favorite" class="ctx-item"><span id="ctx-favorite-icon" data-icon="star_border" data-size="20"></span> <span id="ctx-favorite-text">Adicionar à pasta "Com estrela"</span></button>
+    <button id="ctx-copy" class="ctx-item"><span data-icon="content_copy" data-size="20"></span> <span id="ctx-copy-text">Fazer cópia</span></button>
+    <button id="ctx-download" class="ctx-item"><span data-icon="download" data-size="20"></span> <span id="ctx-dl-label">Fazer o download</span></button>
+    <button id="ctx-rename" class="ctx-item"><span data-icon="edit_square" data-size="20"></span> <span id="ctx-rename-text">Renomear</span></button>
+    <button id="ctx-move" class="ctx-item"><span data-icon="drive_file_move" data-size="20"></span> <span id="ctx-move-text">Mover</span></button>
+    <button id="ctx-info" class="ctx-item"><span data-icon="info" data-size="20"></span> <span id="ctx-info-text">Ver informações</span></button>
+    <button id="ctx-versions" class="ctx-item hidden"><span data-icon="history" data-size="20"></span> <span id="ctx-versions-text">Versões</span></button>
     <div id="ctx-folder-colors" class="ctx-colors hidden" aria-label="Cor da pasta">
         <button data-folder-color="#C4C7C5" style="--swatch:#C4C7C5" title="Cinza"></button>
         <button data-folder-color="#F28B82" style="--swatch:#F28B82" title="Vermelho"></button>
@@ -655,6 +657,7 @@
 <script src="bridge.js"></script>
 <script src="icons.js"></script>
 <script src="app.js"></script>
+<script src="file-details.js"></script>
 <script src="sync.js"></script>
 </body>
 </html>

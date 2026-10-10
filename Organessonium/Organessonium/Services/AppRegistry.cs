@@ -184,9 +184,9 @@ public sealed partial class AppRegistry
         }
     }
 
-    public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default)
+    public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default, bool forceRefresh = false)
     {
-        if (entry.Type != "file" || entry.LogicalChunkCount > 0 ||
+        if (entry.Type != "file" || (!forceRefresh && entry.LogicalChunkCount > 0) ||
             string.IsNullOrWhiteSpace(entry.MetadataMessageId))
         {
             return entry;
@@ -212,6 +212,9 @@ public sealed partial class AppRegistry
                 {
                     detailed.Path = entry.Path;
                     detailed.ParentFolderId = entry.ParentFolderId;
+                    var siblings = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId));
+                    ReplaceEntry(siblings, detailed);
+                    _store.CacheFolderEntries(NormalizeFolderId(entry.ParentFolderId), siblings);
                     return detailed;
                 }
             }
@@ -226,6 +229,8 @@ public sealed partial class AppRegistry
             }
         }
 
+        if (forceRefresh)
+            throw new InvalidDataException("Não foi possível ler os metadados atuais do arquivo no servidor.");
         return entry;
     }
 
@@ -450,6 +455,11 @@ public sealed partial class AppRegistry
 
         if (_mappings.ContainsKey(parentFolderId))
         {
+            if (entry.Type == "file")
+            {
+                var detailed = await LoadFileDetailsAsync(entry, cancellationToken, forceRefresh: true);
+                CopyEntryState(detailed, entry);
+            }
             entry.Favorite = favorite;
             await UpdateEntryAsync(entry, cancellationToken);
             return;
@@ -958,6 +968,11 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        if (entry.Type == "file" && entry.LogicalChunkCount == 0)
+        {
+            var details = await LoadFileDetailsAsync(entry, cancellationToken);
+            CopyFilePayload(details, entry);
+        }
         entry.Normalize();
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         entry.ParentFolderId = parentFolderId;
@@ -1004,6 +1019,12 @@ public sealed partial class AppRegistry
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool synchronizeSerials = true)
     {
+        if (entry.Type == "file")
+        {
+            var details = await LoadFileDetailsAsync(entry, cancellationToken, forceRefresh: true);
+            CopyFilePayload(details, entry);
+        }
+        entry.ModifiedAt = TransferState.Now();
         entry.Normalize();
         var sourceFolderId = NormalizeFolderId(entry.ParentFolderId);
         var destinationFolderId = NormalizeFolderId(targetFolderId);
@@ -1937,6 +1958,33 @@ public sealed partial class AppRegistry
         target.VideoPreviewSizeBytes = source.VideoPreviewSizeBytes;
         target.PreviewMessageId = source.PreviewMessageId;
         target.Encryption = source.Encryption?.Clone();
+        target.ModifiedAt = source.ModifiedAt;
+        target.VersionId = source.VersionId;
+        target.VersionUploadedAt = source.VersionUploadedAt;
+        target.Versions = source.Versions;
+    }
+
+    private static void CopyFilePayload(AppEntry source, AppEntry target)
+    {
+        if (source.LogicalChunkCount == 0)
+            throw new InvalidDataException("Os metadados completos do arquivo não puderam ser carregados.");
+        target.ChunkMessageIds = source.ChunkMessageIds.ToList();
+        target.ChunkReferences = source.ChunkReferences?.ToList();
+        target.ChunkCount = source.ChunkCount;
+        target.BatchId = source.BatchId;
+        target.PreviewMessageId = source.PreviewMessageId;
+        target.VideoPreviewMessageId = source.VideoPreviewMessageId;
+        target.VideoPreviewChunkMessageIds = source.VideoPreviewChunkMessageIds.ToList();
+        target.VideoPreviewChunkReferences = source.VideoPreviewChunkReferences?.ToList();
+        target.VideoPreviewSizeBytes = source.VideoPreviewSizeBytes;
+        target.Encryption = source.Encryption?.Clone();
+        target.Versions = source.Versions;
+        target.VersionId = source.VersionId;
+        target.VersionUploadedAt = source.VersionUploadedAt;
+        target.UploadedAt = source.UploadedAt;
+        if (string.IsNullOrEmpty(target.ModifiedAt)) target.ModifiedAt = source.ModifiedAt;
+        target.SizeBytes = source.SizeBytes;
+        if (string.IsNullOrEmpty(target.MimeType)) target.MimeType = source.MimeType;
     }
 
     private static FolderSerial CopySerial(FolderSerial source, IReadOnlyList<FolderSerialEntry> children)

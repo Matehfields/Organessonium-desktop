@@ -428,6 +428,9 @@ public sealed class MetadataService
                 entry.VideoPreviewSizeBytes = Math.Max(0, file.Preview?.Video480p?.SizeBytes ?? 0);
                 entry.Encryption = file.Encryption?.Clone();
                 entry.Favorite = file.Favorite;
+                entry.VersionId = file.VersionId ?? "";
+                entry.VersionUploadedAt = file.VersionUploadedAt ?? file.UploadedAt;
+                entry.Versions = file.Versions ?? [];
                 break;
             case FolderMetadata folder:
                 entry = AppEntry.Folder(folder.Name, "/");
@@ -446,6 +449,7 @@ public sealed class MetadataService
         }
 
         entry.MetadataMessageId = envelope.MessageId;
+        entry.ModifiedAt = envelope.Entry.ModifiedAt ?? entry.UploadedAt;
         entry.Trash = envelope.Entry.Trash;
         entry.Sync = envelope.Entry.Sync;
         entry.SyncDevice = envelope.Entry.SyncDevice;
@@ -453,7 +457,7 @@ public sealed class MetadataService
         return entry;
     }
 
-    private static FileMetadata CreateFileMetadata(AppEntry entry)
+    public static FileMetadata CreateFileMetadata(AppEntry entry)
     {
         return new FileMetadata
         {
@@ -464,6 +468,10 @@ public sealed class MetadataService
             MimeType = entry.MimeType,
             SizeBytes = entry.SizeBytes,
             UploadedAt = NormalizeIsoTimestamp(entry.UploadedAt),
+            ModifiedAt = string.IsNullOrWhiteSpace(entry.ModifiedAt) ? null : NormalizeIsoTimestamp(entry.ModifiedAt),
+            VersionId = string.IsNullOrWhiteSpace(entry.VersionId) ? null : entry.VersionId,
+            VersionUploadedAt = string.IsNullOrWhiteSpace(entry.VersionUploadedAt) ? null : NormalizeIsoTimestamp(entry.VersionUploadedAt),
+            Versions = entry.Versions.Count == 0 ? null : entry.Versions,
             BatchId = entry.BatchId,
             ParentFolderId = NormalizeParentId(entry.ParentFolderId),
             Chunks = entry.ChunkReferences == null ? entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList() : null,
@@ -557,6 +565,7 @@ public sealed class MetadataService
             ThreadId = null,
             Name = entry.Name,
             CreatedAt = NormalizeIsoTimestamp(entry.UploadedAt),
+            ModifiedAt = string.IsNullOrWhiteSpace(entry.ModifiedAt) ? null : NormalizeIsoTimestamp(entry.ModifiedAt),
             ParentFolderId = NormalizeFolderParentId(entry.ParentFolderId),
             FolderColor = string.IsNullOrWhiteSpace(entry.FolderColor) ? "#C4C7C5" : entry.FolderColor,
             DeviceType = entry.DeviceType,
@@ -577,6 +586,18 @@ public sealed class MetadataService
         switch (metadata)
         {
             case FileMetadata file:
+                if (file.Versions != null)
+                {
+                    var ids = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var version in file.Versions)
+                    {
+                        Require(!string.IsNullOrWhiteSpace(version.VersionId) && ids.Add(version.VersionId), "Identificador de versão ausente ou duplicado.");
+                        Require(version.Payload != null && version.Payload.Versions == null, "Histórico de versões aninhado inválido.");
+                        Require(version.Payload?.VersionId == version.VersionId, "Identificador do payload histórico inválido.");
+                        Validate(version.Payload!);
+                        Require(version.Payload!.FileId == file.FileId, "A versão pertence a outro arquivo.");
+                    }
+                }
                 Require(file.EntryType == "file", "entryType de arquivo invÃ¡lido.");
                 Require(!string.IsNullOrWhiteSpace(file.FileId), "fileId ausente.");
                 Require(!string.IsNullOrWhiteSpace(file.ThreadId), "threadId ausente.");

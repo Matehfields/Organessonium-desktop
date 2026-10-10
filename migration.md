@@ -564,6 +564,46 @@ Impacto da remoção: Chamadas de sete argumentos podem perder velocidade/estima
 
 Procedimento para remoção: Inventariar as chamadas C#/JS, atualizar produtores e testes do painel; depois remover somente o fallback do oitavo argumento e atualizar a documentação.
 
+## Compatibilidades do histórico de arquivos
+
+### FILE-VERSION-LEGACY-001
+
+Status: ativo
+
+Descrição: metadados anteriores à extensão de versões não possuem `versionId`, `versionUploadedAt`, `modifiedAt` ou `versions`. A ausência de histórico é lida como lista vazia; as datas ausentes usam `uploadedAt`. Ao substituir efetivamente um conteúdo antigo, o snapshot recebe um ID opaco `legacy-` derivado de seu JSON e o conteúdo novo recebe o ID do checkpoint. Leitura isolada não publica migração.
+
+Introduzido por: histórico de arquivos e informações no desktop.
+
+Código relacionado: `Models/MetadataModels.cs`, `Services/MetadataService.cs` (`ToAppEntry`), `Services/FileVersioning.cs` (`PreservePrevious`), `Bridge/AppController.Files.cs`.
+
+Comportamento atual: leitura de arquivos sem histórico, `chunks` legados ou sem criptografia é preservada; o snapshot mantém as referências/criptografia daquele payload. Escritores atualizados precisam preservar o histórico ao alterar o arquivo. Leitores antigos podem abrir o conteúdo superior, mas não são escritores seguros de metadata com versões.
+
+Pode ser removido quando: todos os arquivos mantidos tiverem identificação/datas de versão e os clientes escritores preservarem o contrato novo.
+
+Impacto da remoção: arquivos antigos podem deixar de abrir ou de criar a primeira versão; datas de alterações antigas não podem ser reconstruídas.
+
+Procedimento: inventariar dados, migrar deliberadamente sem excluir payloads, atualizar os clientes e somente depois retirar fallbacks e cenários legados dos testes.
+
+### CACHE-LEGACY-003
+
+Status: ativo
+
+Descrição: bancos anteriores continuam válidos por adição de `modified_at`, `version_id`, `version_uploaded_at` e `versions_json`, com defaults vazios. OSER v3 permanece sem campos de histórico; o metadata completo é carregado quando necessário.
+
+Código relacionado: `Services/SettingsStore.cs`, `Services/SerialIndexService.cs`, `Services/AppRegistry.cs`.
+
+Comportamento atual: o cache persiste histórico/datas, mas um serial sem detalhes não vira metadata vazio para gravação. Mudanças de salt/thread/thumbnail invalidam detalhes antigos. Remoção futura exige migração do banco/cache e contrato de serial explícito, não exclusão indiscriminada dos dados locais.
+
+### TRANSFER-DOWNLOAD-LEGACY-001
+
+Status: ativo
+
+Descrição: checkpoints novos contêm `downloadMetadata` para fixar o payload durante retomada após uma substituição. Checkpoints antigos sem esse snapshot mantêm o fluxo de resolução da listagem atual.
+
+Código relacionado: `Models/TransferState.cs`, `Services/TransferManager.cs` (`CreateDownloadAsync`), `Bridge/AppController.cs` (`ResumeInterruptedTransfersAsync`).
+
+Pode ser removido quando: não existirem downloads interrompidos de versões anteriores do desktop. Impacto: estados antigos sem snapshot deixarão de retomar; atualizar testes e documentação junto da remoção.
+
 ## Fronteiras e itens que não são dívida automaticamente
 
 - Não foi encontrado protocolo de compartilhamento JSON neste desktop. Não existe evidência para inventar SHARE-LEGACY-001. Exportação OEK1 é recuperação de chave, não share de arquivo.

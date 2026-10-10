@@ -603,6 +603,25 @@ public sealed class SerialIndexService
             var entry = cachedByKey.TryGetValue(key, out var cached)
                 ? CopyEntry(cached)
                 : new AppEntry();
+            if (!child.IsFolder && cached != null &&
+                (cached.Encryption?.Salt != child.Encryption?.Salt || cached.ThreadId != child.ThreadId ||
+                 (child.SizeBytes > 0 && cached.SizeBytes != child.SizeBytes) || cached.PreviewMessageId != child.PreviewMessageId))
+            {
+                // A newer payload in the same thread must not reuse the previous chunk list/key context.
+                entry.ChunkMessageIds = [];
+                entry.ChunkReferences = null;
+                entry.VideoPreviewChunkMessageIds = [];
+                entry.VideoPreviewChunkReferences = null;
+                entry.VideoPreviewMessageId = "";
+                entry.VideoPreviewSizeBytes = 0;
+                entry.ChunkCount = 0;
+                entry.BatchId = "";
+                entry.VersionId = "";
+                entry.VersionUploadedAt = "";
+                entry.ModifiedAt = "";
+                entry.Versions = [];
+                entry.SizeBytes = 0;
+            }
             entry.Name = child.Name;
             entry.MetadataMessageId = child.NamesMessageId;
             // A serial contains only direct children of its own folder. Use
@@ -617,7 +636,7 @@ public sealed class SerialIndexService
                 ? mapping.ThreadId
                 : child.ThreadId;
             entry.UploadedAt = child.UploadedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
-            entry.SizeBytes = Math.Max(0, child.SizeBytes);
+            entry.SizeBytes = child.IsFolder || child.SizeBytes > 0 ? Math.Max(0, child.SizeBytes) : entry.SizeBytes;
             entry.MimeType = child.MimeType;
             entry.PreviewMessageId = child.PreviewMessageId;
             entry.Encryption = child.Encryption?.Clone();
@@ -760,7 +779,11 @@ public sealed class SerialIndexService
             PreviewMessageId = source.PreviewMessageId,
             VideoPreviewMessageId = source.VideoPreviewMessageId,
             VideoPreviewSizeBytes = source.VideoPreviewSizeBytes,
-            Encryption = source.Encryption?.Clone()
+            Encryption = source.Encryption?.Clone(),
+            ModifiedAt = source.ModifiedAt,
+            VersionId = source.VersionId,
+            VersionUploadedAt = source.VersionUploadedAt,
+            Versions = source.Versions
         };
     }
 

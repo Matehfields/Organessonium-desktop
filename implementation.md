@@ -1,449 +1,233 @@
-# Organessônium: upload multi-attachment
+# Versões de arquivos e ações de arquivo
 
-Especificação do transporte implementado no desktop C# WPF + WebView2. Este documento descreve o agrupamento de payloads e as referências necessárias para outro cliente ler, escrever e retomar o mesmo formato.
+Este documento especifica o histórico de versões implementado no desktop e o contrato necessário para clientes que leem e escrevem os mesmos dados. Não é uma especificação de desempenho do upload. O transporte continua descrito em [implementation old 2.md](<implementation old 2.md>) e a criptografia em [implementation old.md](<implementation old.md>).
 
-Para o mobile, o objetivo é compatibilidade do protocolo, não copiar workers, buffers, filas ou metas de vazão do desktop. A seção `Flutter interoperability - multi-attachment` separa os contratos obrigatórios das políticas de desempenho adaptáveis a aparelhos com memória e processamento limitados.
+## 1. Objetivo e responsabilidades
 
-A especificação criptográfica anterior foi preservada, sem alterações, em [implementation old.md](<implementation old.md>). Encrypted metadata V1, conteúdo ORGAESGC V1, master keys standard/custom, KDF, AES-GCM e OSER não mudaram. Este documento complementa esses contratos, não os substitui.
+Ao enviar um arquivo com nome e pasta iguais aos de um arquivo existente, escolher **Substituir** publica um novo conteúdo sem apagar o anterior. O desktop envia as partes novas para o mesmo post do fórum `files`, com um novo `batchId`, salt e referências de attachments. O `fileId` continua identificando o mesmo arquivo lógico.
 
-## Multi-attachment payload transport
+A mensagem do metadata permanece no índice da pasta. O histórico faz parte desse mesmo metadata, protegido integralmente pelo envelope criptográfico já existente. Não são publicados nomes ou listas de versões em JSON legível no Discord.
 
-### Limites e identidades
+Componentes:
 
-- `DiscordLimits.AttachmentsPerMessage = 10`.
-- `DiscordLimits.AttachmentBytes = 20 * 1024 * 1024 = 20.971.520` bytes por attachment, incluindo seu envelope criptográfico.
-- `EncryptionService.EnvelopeOverheadBytes = 70` bytes.
-- `DiscordLimits.PlaintextChunkBytes = 20.971.450` bytes. O último chunk pode ser menor. Um arquivo vazio ainda utiliza um payload criptografado com plaintext vazio.
-- Não existe validação local de 25 MiB para a soma do multipart. Dez attachments no limite individual resultam em aproximadamente 200 MiB transmitidos, mais headers, sem criar um chunk lógico de 200 MiB.
+- `Models/MetadataModels.cs`: `FileMetadata`, `FileVersion` e checkpoint `FileReplacement`.
+- `Models/AppEntry.cs`: estado operacional e campos enviados à interface.
+- `Services/FileVersioning.cs`: snapshot, preservação do conteúdo anterior e cálculo do espaço utilizado.
+- `Services/MetadataService.cs`: leitura, validação e escrita cifrada do metadata completo.
+- `Bridge/AppController.Files.cs`: informações, cópia, download histórico e publicação de substituição.
+- `Bridge/AppController.cs`: conflito de nomes, upload, editor Markdown e retomada.
+- `Services/SettingsStore.cs` e `SerialIndexService.cs`: cache persistente e reutilização segura dos detalhes.
+- `web/file-details.js`: diálogos de informações e histórico.
 
-Os limites individuais acima são a configuração atual do projeto. O prompt desta implementação forneceu resultados de testes reais de mensagens com 2 e 10 attachments de 20 MiB, e rejeição de 11. A implementação respeita também as respostas de limite do servidor; esses resultados não garantem a mesma capacidade em qualquer conta/rota futura.
+## 2. Identidade e localização
 
-| Conceito | Identificação e significado |
+| Campo | Significado |
 | --- | --- |
-| Chunk lógico | Índice zero-based dentro do original ou da versão 480p. Mantém criptografia, tamanho e posição independentes. |
-| Mensagem Discord | `messageId`, dentro do `threadId` de payload. Pode conter até dez chunks. |
-| Attachment Discord | `attachmentId`, retornado pela API. Identifica exatamente um payload na mensagem. |
-| Arquivo | `fileId`, identidade estável para metadata, chave derivada e operações de biblioteca. |
-| Thread de payload | `threadId`, post no fórum `files`. Não é o thread de índice de pasta. |
+| `fileId` | Identidade lógica estável, inclusive na derivação da chave do conteúdo. |
+| `threadId` | Post que contém o payload atual. Substituir por upload reutiliza esse post. |
+| `metadataMessageId` | ID da mensagem de metadata no índice do pai; pertence ao estado local/serial, não ao JSON interno do arquivo. |
+| `parentFolderId` | Pasta atual, incluindo raízes técnicas quando aplicável. |
+| `path` | Localização calculada para a interface, como `/` ou `/Fotos`; não substitui `parentFolderId`. |
+| `versionId` | Identificador opaco e estável de uma versão de conteúdo. Não é a versão do algoritmo criptográfico. |
+| `batchId` | Lote de payloads de uma versão. Cada conteúdo novo recebe outro lote. |
 
-O par `(messageId, attachmentId)` é a localização persistente de um chunk dentro do thread. URLs da CDN são temporárias e não substituem esses IDs. IDs Discord são strings no JSON, nunca números de ponto flutuante.
+IDs do Discord são strings, nunca números de ponto flutuante. `chunkRefs.index` é inteiro zero-based. A ordem lógica deve ser definida por esse índice, e não pela ordem em que anexos ou mensagens chegam.
 
-A ordem é sempre:
+Renomear, mover e favoritar não alteram `fileId`, `versionId`, salt ou referências do conteúdo. Mover pode mudar o ID da mensagem de metadata porque o índice de destino é outro thread.
 
-```text
-arquivo -> chunks plaintext atuais -> ORGAESGC individual
-        -> attachments independentes -> mensagem multipart
-```
+## 3. JSON interno
 
-Não concatenar plaintext/ciphertext dos dez chunks para formar outro payload. Não alterar salt, chave, nonce, role ou header apenas porque mudou o agrupamento HTTP.
+O schema existente continua `schemaVersion: 2`, `entryType: "file"`. O contrato de versões é uma extensão aditiva desse schema. Todos os campos anteriores continuam válidos: `fileId`, `threadId`, `name`, `mimeType`, `sizeBytes`, `uploadedAt`, `batchId`, `parentFolderId`, `chunks` ou `chunkRefs`, `preview`, `encryption`, `fav`, `sync` e `trash`.
 
-### Metadata exato
+Campos novos:
 
-O schema dos metadados comuns permanece `schemaVersion: 2`. Um payload novo utiliza:
+- `versionId`: versão de conteúdo atual. Uploads desktop usam o UUID/identificador do checkpoint, sem separadores; uma retomada reutiliza esse valor.
+- `versionUploadedAt`: instante de upload do conteúdo atual.
+- `modifiedAt`: última alteração do arquivo, incluindo substituição, renomeação, movimento ou edição.
+- `versions`: array de conteúdos anteriores, do mais antigo para o mais recente. A versão atual não entra nesse array.
+
+`uploadedAt` passa a permanecer como a data inicial do arquivo lógico. Na primeira publicação, `uploadedAt`, `versionUploadedAt` e `modifiedAt` têm o mesmo valor. Ao substituir, somente os dois últimos mudam. Datas remotas são ISO 8601 UTC, normalmente `yyyy-MM-ddTHH:mm:ssZ`; checkpoints e `archivedAt` podem conter frações de segundo. O consumidor deve aceitar ISO 8601 com ou sem frações e apresentar no fuso local.
+
+Cada elemento de `versions` contém:
 
 ```json
-"chunkRefs": [
-  { "index": 0, "messageId": "100", "attachmentId": "200" },
-  { "index": 1, "messageId": "101", "attachmentId": "201" },
-  { "index": 2, "messageId": "101", "attachmentId": "202" }
-]
+{
+  "versionId": "identificador-opaco-da-versao-anterior",
+  "archivedAt": "2026-10-10T15:00:00.000Z",
+  "payload": {
+    "schemaVersion": 2,
+    "entryType": "file",
+    "fileId": "identidade-logica-estavel",
+    "threadId": "post-do-conteudo-anterior",
+    "name": "Foto.jpg",
+    "mimeType": "image/jpeg",
+    "sizeBytes": 4096,
+    "uploadedAt": "2026-10-01T12:00:00Z",
+    "versionId": "identificador-opaco-da-versao-anterior",
+    "versionUploadedAt": "2026-10-01T12:00:00Z",
+    "modifiedAt": "2026-10-01T12:00:00Z",
+    "batchId": "lote-anterior",
+    "parentFolderId": "root",
+    "chunkRefs": [
+      { "index": 0, "messageId": "mensagem-anterior", "attachmentId": "anexo-anterior" }
+    ],
+    "encryption": { "version": 1, "mode": "standard", "salt": "AAAAAAAAAAAAAAAAAAAAAA" }
+  }
+}
 ```
 
-Este fragmento representa os campos internos, antes da cifra do metadata. Propriedades exatas: `index`, `messageId`, `attachmentId`. `index` é inteiro zero-based. Nenhum campo novo de URL, offset, chave ou nonce é necessário na referência. O tamanho real vem do attachment e do envelope ORGAESGC; os demais dados criptográficos continuam no objeto `encryption` existente.
+Os identificadores e o salt acima são ilustrativos e não representam dados de uma conta. O salt fixo do exemplo nunca deve ser utilizado para upload real.
 
-Regras de leitura e escrita:
+O `payload` é um snapshot completo e independente dos dados necessários para baixar aquele conteúdo. Deve conservar o MIME, nome, tamanho, lote, referências, `encryption` e `preview` daquele momento. Não possui `versions` aninhado. `trash`, `sync` e `fav` são retirados do snapshot pelo desktop, pois a organização corrente pertence ao arquivo atual, não a um attachment antigo. O consumidor não deve usar o `parentFolderId` histórico para mover ou listar o arquivo atual.
 
-1. `chunkRefs` presente seleciona o layout novo. `null`, outro tipo JSON, array vazio, referência nula, índice ausente/negativo/duplicado, lacunas ou IDs vazios são inválidos. Não fazer fallback silencioso para `chunks`.
-2. Um metadata completo deve possuir índices contíguos `0..N-1`. A ordem física do array não é obrigatória; ordenar pelo índice antes de consumir ou publicar. A ordem das propriedades JSON não importa.
-3. `(messageId, attachmentId)` não pode aparecer duas vezes no mesmo payload. Vários índices podem compartilhar `messageId`, mas devem apontar para attachments distintos.
-4. `chunkRefs` ausente seleciona `chunks: string[]` legado. Seu índice é a posição da mensagem no array; cada mensagem representa um chunk e o leitor conserva a seleção unitária antiga.
-5. Se ambos os campos vierem preenchidos, só aceitar quando `chunks` tiver o mesmo comprimento, sem mensagens duplicadas, e cada posição corresponder ao `messageId` da referência equivalente. `chunkRefs` continua autoritativo. Não escrever ambos em payloads novos.
-6. Um array legado vazio ao lado de referências válidas não define outro layout. Ele pode existir como default de um modelo/cache antigo, mas o escritor novo omite `chunks`.
-7. Renomear, mover, favoritar, restaurar ou salvar novamente um arquivo antigo preserva seu layout de payload. Cifrar novamente o metadata não transforma mensagens unitárias em agrupadas.
+O `fileId` de cada snapshot deve ser igual ao do arquivo lógico. O desktop verifica isso, valida suas referências e não aceita IDs de versão ausentes/duplicados ou histórico aninhado. `payload.versionId` corresponde ao `versionId` externo.
 
-O JSON é serializado em UTF-8, sem BOM, utilizando nomes camelCase explicitados pelo contrato. `null` de propriedades opcionais é omitido nas publicações. Datas continuam ISO-8601 UTC, tamanhos são inteiros de bytes, booleanos são JSON e arrays não recebem representação binária. O metadata completo é cifrado antes da escolha entre conteúdo inline e `metadata.json`. Não há formato novo de envelope de metadata.
-
-### Exemplo completo novo
-
-Exemplo estrutural com IDs fictícios e salt público ilustrativo. Não representa dados existentes nem um vetor criptográfico; o vetor de cifra continua no documento anterior.
+Um metadata completo após substituição tem a estrutura:
 
 ```json
 {
   "schemaVersion": 2,
   "entryType": "file",
-  "fileId": "11111111111111111111111111111111",
-  "threadId": "900",
+  "fileId": "identidade-logica-estavel",
+  "threadId": "post-existente",
+  "name": "Foto.jpg",
+  "mimeType": "image/jpeg",
+  "sizeBytes": 8192,
+  "uploadedAt": "2026-10-01T12:00:00Z",
+  "versionId": "nova-versao",
+  "versionUploadedAt": "2026-10-10T15:00:00Z",
+  "modifiedAt": "2026-10-10T15:00:00Z",
   "parentFolderId": "root",
-  "name": "Vídeo de exemplo.mp4",
-  "mimeType": "video/mp4",
-  "sizeBytes": 41943800,
-  "uploadedAt": "2026-10-07T12:00:00Z",
-  "batchId": "exemplo",
+  "batchId": "novo-lote",
   "chunkRefs": [
-    { "index": 0, "messageId": "100", "attachmentId": "200" },
-    { "index": 1, "messageId": "101", "attachmentId": "201" },
-    { "index": 2, "messageId": "101", "attachmentId": "202" }
+    { "index": 0, "messageId": "nova-mensagem", "attachmentId": "novo-anexo" }
   ],
-  "preview": {
-    "thumbnailMessageId": "103",
-    "video480p": {
-      "sizeBytes": 41943000,
-      "chunkRefs": [
-        { "index": 0, "messageId": "102", "attachmentId": "300" },
-        { "index": 1, "messageId": "102", "attachmentId": "301" },
-        { "index": 2, "messageId": "102", "attachmentId": "302" }
-      ]
+  "encryption": { "version": 1, "mode": "standard", "salt": "AAECAwQFBgcICQoLDA0ODw" },
+  "versions": [
+    {
+      "versionId": "versao-antiga",
+      "archivedAt": "2026-10-10T15:00:00.000Z",
+      "payload": {
+        "schemaVersion": 2,
+        "entryType": "file",
+        "fileId": "identidade-logica-estavel",
+        "threadId": "post-existente",
+        "name": "Foto.jpg",
+        "mimeType": "image/jpeg",
+        "sizeBytes": 4096,
+        "uploadedAt": "2026-10-01T12:00:00Z",
+        "versionId": "versao-antiga",
+        "versionUploadedAt": "2026-10-01T12:00:00Z",
+        "batchId": "lote-antigo",
+        "chunkRefs": [
+          { "index": 0, "messageId": "mensagem-antiga", "attachmentId": "anexo-antigo" }
+        ],
+        "encryption": { "version": 1, "mode": "standard", "salt": "AAAAAAAAAAAAAAAAAAAAAA" }
+      }
     }
-  },
-  "encryption": {
-    "version": 1,
-    "mode": "standard",
-    "salt": "AAECAwQFBgcICQoLDA0ODw"
-  }
-}
-```
-
-`preview.video480p.chunkRefs` é outro array independente, no mesmo thread de payload. Ele utiliza os mesmos nomes de propriedades e regras, mas índices e `ChunkCount` referentes apenas à prévia. A miniatura continua sendo um único attachment referenciado por `thumbnailMessageId`.
-
-### Exemplo completo legado
-
-```json
-{
-  "schemaVersion": 2,
-  "entryType": "file",
-  "fileId": "22222222222222222222222222222222",
-  "threadId": "901",
-  "parentFolderId": "root",
-  "name": "Arquivo antigo.mp4",
-  "mimeType": "video/mp4",
-  "sizeBytes": 30000000,
-  "uploadedAt": "2026-09-01T12:00:00Z",
-  "batchId": "antigo",
-  "chunks": ["110", "111", "112"],
-  "preview": {
-    "thumbnailMessageId": "113",
-    "video480p": { "sizeBytes": 1000000, "chunks": ["114"] }
-  }
-}
-```
-
-Sem `encryption`, os payloads desse exemplo são plaintext legados. Um metadata legado também pode ter `encryption` V1 e `chunks`; nesse caso, as mensagens continuam unitárias, mas cada chunk é autenticado normalmente. Ambos permanecem legíveis. Não migrar ao ler ou baixar.
-
-### Contexto criptográfico e contagens
-
-`EncryptedPayloadContext.ChunkIndex` recebe `chunkRefs.index`, zero-based. O header ORGAESGC existente grava esse valor mais um. `ChunkCount` deve ser o número total de chunks lógicos daquele payload, obtido do array completo, não o número de mensagens, attachments do batch ou partes pendentes na retomada.
-
-No exemplo novo:
-
-- Original: role `original`, `ChunkCount = 3`, índices de contexto `0, 1, 2`.
-- Prévia: role `video480p`, `ChunkCount = 3`, índices de contexto `0, 1, 2`.
-- Thumbnail: role `preview`, índice `0`, quantidade `1`.
-
-Os demais roles existentes, inclusive imagens Markdown, conservam sua semântica. Alterar índice, quantidade global, role, ciphertext ou tag invalida a autenticação. Uma retomada que ainda precisa dos índices 1 e 2 continua usando quantidade global 3.
-
-### payloadReference agrupado
-
-Uma mensagem com um attachment conserva o rótulo anterior:
-
-```text
-file:11111111111111111111111111111111 role:original chunk:1/26 encryption:v1
-```
-
-Com vários attachments, o rótulo interno exato é:
-
-```text
-file:11111111111111111111111111111111 role:original chunks:2,3,4,5,6,7,8,9,10,11/26 encryption:v1
-```
-
-Números one-based, separados por vírgula sem espaços, seguidos por `/` e a quantidade global. Não há um identificador criptográfico novo de batch. `batchId` permanece o identificador de transferência existente no metadata/checkpoint, não entra no rótulo criptografado novo.
-
-O rótulo vira o JSON interno abaixo, então passa pelo codec encrypted metadata V1:
-
-```json
-{
-  "schemaVersion": 1,
-  "entryType": "payloadReference",
-  "content": "file:11111111111111111111111111111111 role:original chunks:2,3,4,5,6,7,8,9,10,11/26 encryption:v1"
-}
-```
-
-A mensagem Discord não expõe esse JSON em claro. O leitor novo localiza anexos pelos IDs de `chunkRefs`, não extrai localização desse rótulo. Não tentar passar `chunks:` pelo parser unitário antigo. Rótulos antigos plaintext e unitários continuam no caminho legado já existente.
-
-## Upload e multipart
-
-### Primeiro chunk e forum post
-
-Quando não existe thread, o desktop cria o post com apenas o chunk 0 pelo endpoint de forum post. Ele valida e salva o `messageId` e o `attachmentId` inicial. Não assume que esse endpoint aceite dez arquivos.
-
-Os índices restantes são agrupados em dez por chamada a `POST /channels/{threadId}/messages`, exceto o lote final incompleto. Para 26 chunks, o caso sem falhas é: 1 no post inicial, depois 10, 10 e 5. A pressão de RAM faz a preparação de anexos aguardar, não reduz a quantidade por mensagem. Uma rejeição específica de tamanho/quantidade do servidor ainda utiliza a redução já existente. Mensagens podem ser enviadas em paralelo; a ordem de conclusão não determina a ordem do arquivo. Descritores podem ser preparados durante o post inicial; o envio das mensagens exige o thread confirmado.
-
-Uma prévia 480p ou atualização Markdown dentro de um thread existente não precisa criar outro post, então pode agrupar desde seu índice 0. Um checkpoint já com thread continua nesse mesmo thread.
-
-### Corpo HTTP
-
-O cliente envia `multipart/form-data` em streaming:
-
-```json
-{
-  "content": "<envelope cifrado de payloadReference>",
-  "attachments": [
-    { "id": "0", "filename": "chunk-2.bin" },
-    { "id": "1", "filename": "chunk-3.bin" }
   ]
 }
 ```
 
-Esse JSON ocupa `payload_json`. As partes binárias têm nomes `files[0]`, `files[1]`, etc., correspondentes aos IDs locais do multipart. Esses IDs locais não são `attachmentId` remoto, nem o índice lógico do chunk. Os nomes técnicos são únicos dentro do batch e usam a nomenclatura criptografada anterior, com número lógico mais um.
+JSON UTF-8 segue as regras existentes. A ordem das propriedades não afeta a leitura. Campos opcionais nulos/arrays vazios não são publicados. `versions` ausente significa histórico vazio; não significa falha. Arquivos antigos podem usar `chunks` sem `encryption`, e um snapshot desse arquivo deve preservar exatamente essa ausência.
 
-Na resposta, mapear cada arquivo enviado pelo filename técnico exato; conferir quantidade, unicidade, tamanho em bytes e ID remoto não vazio. Não confiar na ordem de `attachments` da resposta. Depois dessa validação, construir `chunkRefs` com os índices lógicos originais e os IDs reais retornados. Uma resposta incompleta não confirma parcialmente os chunks daquele request.
+## 4. Escrita e atomicidade
 
-### Algoritmo de upload
+1. Resolver nome e pasta, e aguardar a escolha Substituir. Manter ambos continua sendo outro arquivo independente.
+2. Ler o metadata completo, não apenas o serial. Conferir a identidade e guardar um snapshot no checkpoint local.
+3. Reutilizar `fileId` e `threadId`; gerar outro `batchId`, outro salt de arquivo e nonces seguros para o conteúdo novo. Não reutilizar a chave de arquivo derivada com o salt anterior para simplesmente sobrescrever os blobs.
+4. Desarquivar o post existente e enviar novas mensagens/attachments nele. Não editar as mensagens antigas de conteúdo.
+5. Confirmar e validar todas as referências novas. Concluir as prévias novas antes de trocar o metadata.
+6. Reler o metadata atual. Se outra versão já o substituiu, interromper a publicação e informar conflito, mantendo a versão existente. Mudanças de organização devem ser preservadas a partir dessa leitura.
+7. Copiar o conteúdo atual para `versions`, sem histórico aninhado. Reutilizar o histórico já existente e evitar duplicação pelo `versionId`.
+8. Gerar e validar o novo metadata cifrado completo. Fazer PATCH da mensagem existente, inclusive ao trocar inline por `metadata.json`, sem DELETE prévio da mensagem.
+9. Após confirmação, atualizar `app_entries`, seriais local/remoto e interface. Reabrir o arquivo usa o novo conteúdo.
+10. Invalidar thumbnails e cache de prévia vinculados ao thread, pois esse ID não mudou, mas o conteúdo mudou. Rearquivar o post ao finalizar.
 
-```text
-carregar ou criar contexto de cifra e layout do checkpoint
-validar referências já confirmadas
-pendentes = índices globais menos confirmados e o chunk inicial se falta thread
-selecionar agrupamento de 10 (último lote pode ser incompleto)
-iniciar produtor independente das vagas HTTP:
-    adquirir uma das 64 vagas globais de mensagens pendentes
-    criar descritores de faixa/filename/tamanho/contexto, sem ler o arquivo
-    publicar descritores na fila (capacidade: um lote por arquivo)
-se não existe thread:
-    criar forum post com o descriptor do chunk 0, usando a mesma transmissão sob demanda
-    validar resposta e persistir referência inicial
-iniciar consumidores de mensagens limitados globalmente a 64:
-    criar multipart com até dez conteúdos de comprimento conhecido
-    adquirir worker de transmissão; respeitar rate limiter antes do request
-    para cada attachment que o HTTP está prestes a consumir:
-        reservar os bytes desse anexo no orçamento global
-        ler somente sua faixa; cifrar em RAM com contexto global
-        transmitir e reportar bytes; zerar/devolver buffers e reserva
-    ao terminar o último attachment, devolver worker de transmissão
-    aguardar resposta sem ocupar worker nem buffers dos anexos
-    validar todos os attachments retornados
-    salvar um checkpoint contendo todos os chunks do request
-    publicar número de chunks confirmados, sem contar mensagens
-    descartar nonce/digest/descritores e liberar vaga de mensagem pendente
-em falha ou cancelamento:
-    cancelar produtor e consumidores; liberar vagas e dados também do lote da fila
-validar referências completas e ordená-las por índice
-publicar metadata cifrado com chunkRefs, sem chunks
-```
+O Discord não fornece uma transação envolvendo payload, metadata e serial, nem compare-and-swap do JSON de metadata. A releitura reduz conflitos, mas não elimina uma corrida entre clientes que publicam simultaneamente. Os chunks antigos nunca são apagados na substituição. Se o envio falhar, o metadata anterior permanece; chunks novos confirmados podem ficar sem publicação até retomada/recuperação. Cancelar uma substituição não pode excluir o thread compartilhado.
 
-A nova API de resultado utiliza referências completas. Não gerar `chunks` com messageIds repetidos para fingir compatibilidade com leitores antigos. Referências do payload só são publicadas no metadata após o upload completo e válido.
+Se o PATCH foi confirmado e uma etapa posterior falhou, a retomada identifica o `versionId` já publicado e não adiciona o mesmo conteúdo duas vezes ao histórico. O checkpoint guarda `replacement: { metadataMessageId, path, metadata }`; o novo `versionId` é o `transferId`. Um cliente mobile pode escolher outro identificador, desde que ele seja opaco, único e persistente entre tentativas.
 
-## Download, preview e streaming
+Quando dados de desenvolvimento já possuem vários arquivos com o mesmo nome/pasta, a substituição do desktop seleciona uma entrada existente e preserva as demais. Arquivos ainda não enviados do mesmo lote continuam obedecendo à escolha de conflito, sem criar versões de conteúdo que nunca chegou ao servidor.
 
-```text
-decodificar e autenticar metadata antes da lógica de negócio
-se chunkRefs presente:
-    validar array completo e ordenar por index
-    obter mensagens de distinct(messageId), no thread de payload
-    para cada referência:
-        selecionar exatamente um attachment com id == attachmentId
-        falhar se mensagem/anexo estiver ausente ou duplicado
-        registrar URL/tamanho real no índice do chunk
-    N = quantidade global das referências
-    baixar chunks com concorrência limitada
-    autenticar cada um com fileId, role, index e ChunkCount=N
-senão:
-    executar resolver chunks unitário legado
-concatenar plaintexts por índice, sem renumerar pendentes
-conferir tamanho final com sizeBytes
-```
+## 5. Leitura e download
 
-`GetMessagesByIdsAsync` recebe IDs de mensagens deduplicados. Assim, dez chunks na mesma mensagem não exigem dez GETs para montar uma resolução. A resposta pode chegar em ordem diferente da solicitada. A tabela de lookup é por ID remoto.
+O arquivo atual continua nos campos superiores do metadata. Leitores que ignoram `versions` conseguem localizar o payload atual se já suportam o codec criptográfico e o transporte de attachments. Porém, esses leitores não são escritores seguros: recriar o JSON omitindo campos de versões destruiria o histórico.
 
-Falhas do layout novo não seguem recuperação por batch/nome ou seleção do primeiro attachment. O antigo caminho `chunks` conserva seus parsers, recuperação por batch e payloads plaintext quando não existe `encryption`.
+Para baixar uma versão anterior, selecionar o elemento por `versionId` e usar exclusivamente seu `payload`: `threadId`, `fileId`, `batchId`, tamanho, referências e criptografia. Não usar o salt, contagem ou previews atuais para o conteúdo antigo. O download autentica cada payload com o contexto e total de chunks daquela versão.
 
-O player virtual continua usando tamanhos plaintext reais, prefix sums, seek e prefetch limitado. Cada chunk é autenticado integralmente antes de disponibilizar bytes. O cache de vídeo não baixa o arquivo inteiro. Quando uma URL expira, a consulta de renovação seleciona o mesmo `attachmentId`; filename não substitui identidade. A deduplicação de mensagens ocorre na resolução inicial; renovações posteriores ainda podem consultar a mensagem para chunks distintos.
+Downloads novos guardam `downloadMetadata` no checkpoint. A retomada usa esse snapshot, mesmo que a versão atual mude enquanto o download está interrompido. Checkpoints anteriores sem esse campo continuam seguindo a recuperação antiga.
 
-O download 480p utiliza `preview.video480p.chunkRefs` ou o array legado daquela prévia, com o contexto `video480p`. Não reutilizar a quantidade de chunks do original para uma prévia de quantidade diferente. Os previews de imagem e thumbnails unitários não foram convertidos em batches misturados com o original.
+O array é exibido em ordem inversa na interface, com a versão atual separada. Há download do conteúdo histórico, sem ações de restauração/exclusão de versões individuais nesta implementação.
 
-## Checkpoint e retomada
+## 6. Datas, espaço e informações
 
-O JSON local `TransferState` inclui `payloadLayoutVersion`:
+O diálogo mostra categoria/MIME, localização calculada, tamanho atual, espaço utilizado, upload inicial, última modificação, thread, mensagem de metadata e quantidade lógica de chunks. `messageId` não é o ID de uma mensagem arbitrária de chunk.
 
-- `1`: layout unitário antigo. Também é o default quando a propriedade está ausente em um checkpoint já existente.
-- `2`: layout novo. Cada elemento confirmado inclui `index`, `messageId` e `attachmentId`.
-- Outra versão: erro explícito de layout não suportado.
+`tamanho utilizado = sizeBytes atual + soma(versions[].payload.sizeBytes)`.
 
-`uploadedChunks` mantém também `sizeBytes` do ciphertext enviado e `logicalSizeBytes` do plaintext, além dos campos locais já existentes. Índices são zero-based. `totalChunks` e `chunkSizeBytes` pertencem ao arquivo inteiro. Exemplo de fragmento local confirmado:
+Essa medida é a soma dos conteúdos plaintext registrados, não uma medição dos bytes totais de attachments no Discord. Não inclui thumbnails, versões de vídeo de prévia, headers/tags, metadata, mensagens órfãs ou retries não referenciados. A quantidade de chunks também é lógica: uma mensagem com dez anexos pode representar dez chunks.
 
-```json
-{
-  "payloadLayoutVersion": 2,
-  "threadId": "900",
-  "batchId": "exemplo",
-  "chunkSizeBytes": 20971450,
-  "totalChunks": 3,
-  "uploadedChunks": [
-    { "index": 0, "messageId": "100", "attachmentId": "200", "sizeBytes": 20971520, "logicalSizeBytes": 20971450 },
-    { "index": 1, "messageId": "101", "attachmentId": "201", "sizeBytes": 20971520, "logicalSizeBytes": 20971450 },
-    { "index": 2, "messageId": "101", "attachmentId": "202", "sizeBytes": 970, "logicalSizeBytes": 900 }
-  ],
-  "pendingChunks": []
-}
-```
+Metadados antigos sem `modifiedAt` ou `versionUploadedAt` usam `uploadedAt` como fallback operacional. Não é possível reconstruir datas de modificações que versões antigas nunca registraram. O editor Markdown registra conteúdo novo e preserva histórico ao salvar um documento existente.
 
-Após validar toda a resposta, `MarkUploadChunksAsync` serializa a alteração em memória e salva todos os elementos de uma mensagem de uma vez. O repository grava um arquivo temporário de checkpoint e o move sobre o anterior, sem apagar primeiro o estado antigo. Conclusões concorrentes são serializadas para não sobrescrever chunks de outro batch. O batch inicial de um attachment segue a mesma regra.
+A recuperação já existente do editor Markdown em HTTP 403/404 pode criar outro post quando o antigo não pode ser reutilizado. O snapshot conserva o `threadId` anterior e o desktop não apaga aquele post. Isso não é o fluxo de Substituir por upload, que exige o post existente. Conteúdo removido externamente do Discord não pode ser recuperado apenas pelo snapshot.
 
-Ao reabrir:
+## 7. Cópia
+
+Fazer cópia cria outro arquivo, na mesma pasta, com nome `Cópia de <nome>` e sufixo numérico em caso de conflito. Copia somente o conteúdo atual, não o histórico ou estado de favorito. O desktop baixa o conteúdo autenticado para um diretório operacional temporário e o envia como upload independente: outro `fileId`, post, salt e metadata. A criptografia das partes de upload continua em RAM; o diretório de reconstrução é removido ao finalizar.
+
+Reutilizar apenas referências de attachments entre arquivos não é equivalente. A derivação criptográfica usa `fileId`, e excluir um post compartilhado destruiria outra entrada. O cliente mobile pode limitar concorrência e usar seu diretório temporário normal de download para implementar essa ação.
+
+## 8. Cache e seriais
+
+O SQLite recebe colunas aditivas `modified_at`, `version_id`, `version_uploaded_at` e `versions_json`, sem limpar o cache anterior. Esse cache permanece operacional/local e pode conter metadata descriptografado, como os demais campos já existentes.
+
+O formato binário OSER v3 não foi alterado. Um serial não é um catálogo completo de versões. O menu lê o metadata completo para descobrir se Versões deve aparecer; o diálogo consulta os detalhes atuais. Ao materializar um serial, detalhes em cache são preservados quando o payload continua compatível. Mudança de salt, thread ou referência de thumbnail invalida detalhes antigos em vez de combinar chunks velhos com a chave nova.
+
+Renomear, mover, favoritar e enviar/restaurar pela lixeira devem carregar/preservar o metadata inteiro. Não fazer uma gravação de negócios usando somente um card do serial.
+
+## 9. Flutter interoperability
+
+Compatibilidade significa produzir/consumir o mesmo protocolo e preservar o histórico; não significa reproduzir workers, buffers de RAM, Job Object ou filas do desktop.
+
+Requisitos para a implementação mobile:
+
+1. Acrescentar os campos novos aos modelos e persistência. Preservar `versions` integralmente em qualquer alteração do metadata, inclusive favorito, rename, move, lixeira e sincronização.
+2. Tratar `versionId` como string opaca. Para dados antigos sem ID, gerar um ID estável ao arquivar e persistir antes de publicar; não é necessário reproduzir o prefixo/hash `legacy-` usado pelo desktop.
+3. Criar snapshots sem `versions` aninhado, com o mesmo `fileId`, os valores de criptografia originais e todas as referências de conteúdo/prévia.
+4. Substituir por upload no mesmo post, com salt/lote novos. Atualizar somente a mensagem de metadata após completar e validar o payload novo.
+5. Continuar usando encrypted metadata V1 e ORGAESGC V1 conforme as especificações existentes. O envelope criptográfico não mudou por causa do histórico.
+6. Suportar `chunkRefs` e `chunks` legados por versão. Somente `index` define a ordem dos chunks; IDs são strings.
+7. Ler/validar a versão escolhida antes de iniciar download e persistir esse snapshot na retomada.
+8. Atualizar o serial e invalidar caches de thumbnail/prévia depois da publicação. Não apagar o serial ao abrir uma aba.
+9. Exibir as mesmas datas, localização e soma de espaço. Mostrar Versões apenas se houver histórico.
+10. Usar concorrência e tamanho de lote adequados à memória mobile. Batches menores são compatíveis: o leitor resolve attachments por ID, não exige dez por mensagem. Nenhum snapshot exige baixar todas as versões para listar o histórico.
+
+Pseudocódigo de substituição:
 
 ```text
-ler checkpoint e seu layout
-preservar fileId, salt, threadId, batchId, tamanho de chunk e quantidade global
-validar os índices confirmados; referências parciais podem ter lacunas
-pendentes = 0..totalChunks-1 menos confirmados
-layout 1: continuar unitário, sem fabricar attachmentId
-layout 2: agrupar apenas pendentes e conservar IDs confirmados
+base = readFullMetadata(file)
+checkpoint = persist(base, stableNewVersionId, freshSalt)
+newPayload = uploadInto(base.threadId, base.fileId, freshSalt, freshBatchId)
+validateAllReferences(newPayload)
+latest = readFullMetadata(file)
+if latest.versionId == checkpoint.newVersionId: return latest
+if contentIdentity(latest) != contentIdentity(base): reportConflict
+history = copy(latest.versions)
+history.append(snapshotWithoutNestedHistory(latest))
+next = newPayload + currentOrganization(latest) + history
+next.uploadedAt = latest.uploadedAt
+next.versionUploadedAt = nowUtc
+next.modifiedAt = nowUtc
+patchEncryptedMetadata(existingMessageId, next)
+updateCacheAndSerialAndUI(next)
 ```
 
-Uploads antigos parcialmente enviados não são repartidos usando o limite atual. Downloads retomados reaproveitam partes locais somente quando mensagem e attachment correspondem à referência esperada. O contexto de autenticação continua usando a quantidade global, mesmo quando resta apenas um chunk.
+O código Flutter não foi alterado nesta tarefa. Uma versão mobile que não preserva os campos novos deve ser atualizada antes de editar arquivos com histórico. O diário de sincronização entre PCs é outro contrato, com revisões e retenção independentes; não tratar seus IDs de revisão como IDs de versão de UI nem apagar posts referenciados por histórico ao realizar manutenção.
 
-O estado mantém `videoPreview480pChunkRefs` para uma prévia agrupada concluída; `videoPreview480pChunks` continua como representação legada. Uma geração/upload parcial de prévia ainda não constitui um checkpoint completo por batch da prévia: a retomada pode gerar e enviar novamente essa etapa se ela não tiver sido concluída. Não há alegação de exatamente uma publicação remota em uma falha após o Discord confirmar mas antes da persistência local.
+## 10. Verificação implementada
 
-## Memória, concorrência, retries e limites
+- `fileVersionsLifecycle`: usa controller, uploader, registry, metadata criptografado, cache SQLite e downloader reais, com somente HTTP simulado. Publica três conteúdos no mesmo post, baixa os três, verifica cópia independente, preservação após rename/favorito/move/reabertura e falha de commit sem apagar o conteúdo anterior.
+- `fileActionsHiddenBrowser`: carrega a interface real em WebView2 hospedado em HWND invisível. Verifica ações/textos, informações, download histórico, glyphs Google, cinza por tema e limites do diálogo em viewport menor. Não abre janela em tela.
 
-O agendador de produção mantém dez attachments por mensagem. `DiscordLimits.UploadMessageTargetBytes = AttachmentsPerMessage * AttachmentBytes` corresponde a 200 MiB com a configuração atual. Não há buffer de 200 MiB por mensagem: os conteúdos HTTP são descritores de anexos preparados sob demanda. ORGAESGC, offsets, tamanho dos chunks, `chunkRefs`, checkpoint e limites da API não mudaram.
-
-Em `DiscordRequestLimiter`, uploads multipart não serializados têm reservas com sequência. Headers novos marcam a sequência da requisição respondida como limite do snapshot; reservas posteriores ainda ocupam vagas, e respostas antigas não devolvem cotas. Expirar uma janela renova a cota de uploads sem descontar reservas que pertencem à janela anterior. As demais chamadas conservam o desconto de todas as requisições em andamento. O mecanismo não ignora `Remaining = 0`, backoff global/local, `retry_after`, cancelamento nem os 45 requests/s globais configurados.
-
-`UploadMemoryCoordinator.PreparePartAsync(..., deferBuffers: true)` devolve um `PreparedUploadPart` com filename técnico, comprimento cifrado, tamanho lógico, contexto/fábrica de preparação e estado de replay pequeno. `UploadPartContent` declara o comprimento antes de transmitir, mas só lê/cifra quando `SerializeToStreamAsync` consome aquele anexo. `PreparedUploadPart.CopyToAsync` reserva seus bytes, prepara o chunk, transmite em blocos de até 64 KiB e libera/zera o buffer imediatamente após a cópia. Não espera a resposta da mensagem. Não há fallback de ciphertext temporário no SSD.
-
-`RamUploadBudget` continua compartilhado entre biblioteca, retomadas, sincronização e descriptografia de downloads. Dois workers de leitura/cifra limitam o plaintext transitório. Reservas por bytes incluem headroom para esses dois buffers e ajustam-se ao consumo de C#/WebView2; o orçamento de ciphertext permanece em torno de 400 MiB, não aumenta com a quantidade de mensagens pendentes. Os caminhos unitários/materializados conservam as reservas anteriores de batch; o upload agrupado usa `streamPreparedParts: true` e não faz essa reserva de 200 MiB. `maxPreparedPartBytes` continua validando o limite superior do anexo cifrado, incluindo os 70 bytes ORGAESGC.
-
-Há três limites independentes: até 16 workers de transmissão configurados/adaptativos, dois preparadores de chunks e `DiscordLimits.MaxPendingUploadMessages = 64` vagas globais para mensagens em preparação/envio/confirmação. A fila por arquivo contém um batch de descritores. `UploadBodySlot` adquire a vaga de transmissão antes do rate limiter/request e devolve-a ao terminar o último anexo; a resposta pode continuar pendente. Uma mensagem ocupa sua vaga global até confirmar/persistir ou falhar/cancelar. Esses limites impedem filas e conexões pendentes ilimitadas, sem manter centenas de MiB por ACK. A quantidade de workers regula corpos em transmissão, não o número de respostas pendentes. Cada retry recebe outro slot de transmissão e passa novamente pela fila REST.
-
-Na execução normal/background, `AppMemoryBudget` configura um Windows Job Object com `JOB_OBJECT_LIMIT_JOB_MEMORY = 1.000.000.000` bytes, incluindo processos WebView2 registrados. Esse limite controla memória privada comprometida, conforme [a definição do Windows](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information), não páginas compartilhadas/GPU ou cache de disco. O runtime configura `System.GC.HeapHardLimit = 536870912` bytes. A admissão utiliza alvos inferiores: 800 MiB totais e 448 MiB gerenciados. Sob pressão, aguarda de maneira assíncrona e cancelável em vez de criar ciphertext no disco ou aumentar a reserva sem limite. O sistema operacional ainda pode paginar RAM, independentemente do app.
-
-`Forçar 16 workers (RAM até 1 GB)` ignora somente a redução dinâmica de workers por vazão. `UploadConcurrencyRegistry` reconfigura os gates registrados por biblioteca, retomadas e sincronizador ao salvar a opção. Vagas adicionais passam a estar disponíveis no upload atual, sem reinício. Desativar afeta admissões seguintes, sem abortar requests em andamento. Memória, limites de attachments, rate limits e HTTP 429 nunca são ignorados. Abertura, leitura, cifra e montagem executam fora do Dispatcher WPF; armazenamento lento não bloqueia a thread da interface.
-
-`MultipartFormDataContent` usa `UploadPartContent` nos anexos sob demanda e `StreamContent` nos caminhos já materializados, sem byte array para o multipart inteiro. Durante um ACK lento, o primeiro caminho mantém apenas estado técnico pequeno por chunk. Faststart, geração de prévias, snapshot estável da sincronização, checkpoints e arquivos de destino do download conservam o I/O existente; não são temporários de criptografia do upload.
-
-HTTP 429, headers de buckets, alvo global de 45 requests/s, backoff e cancelamento continuam no cliente Discord. Um batch é uma chamada REST, não uma chamada por attachment. Cada retry cria outro multipart. Para anexos sob demanda, relê a origem e regenera o ciphertext autenticado após validar sua identidade; caminhos materializados reabrem os bytes anteriores. Backoff não mantém o buffer do anexo. Reproduzir os bytes de uma tentativa não autoriza utilizar o mesmo nonce com outro conteúdo.
-
-### Regeneração segura em retry
-
-O estado de replay é local, volátil e não pertence ao metadata/checkpoint. Para cada chunk, a primeira tentativa guarda nonce aleatório de 12 bytes e digest de 32 bytes. A definição exata é `D = SHA256(H || K || P)`: `H` são os primeiros 42 bytes do header ORGAESGC (todos os campos anteriores ao nonce); `K` é a chave derivada do arquivo, 32 bytes; `P` são os bytes plaintext exatos da faixa. Os comprimentos fixos de H/K tornam a concatenação inequívoca. A primeira tentativa cifra com nonce CSPRNG. Uma tentativa posterior calcula D novamente e usa comparação em tempo constante; se o digest diferir, falha antes de AES-GCM, sem enviar bytes desse anexo. Assim conteúdo, chave, salt, papel, posição, contagem e tamanho precisam permanecer iguais para reproduzir nonce/ciphertext/tag. Não persistir D, K ou P; zerar D/nonce ao descartar o descriptor. A chave é derivada e zerada na rotina existente, sem ser retida no estado de replay. Após reiniciar o app, chunks não confirmados podem receber novos nonces; os chunks confirmados e seus IDs continuam no checkpoint.
-
-HTTP 413, code 40005 ou HTTP 400/code 50035 com erro específico de quantidade/tamanho em `attachments`/`files` reduzem o batch pela metade, até um attachment, mantendo ciphertext e `chunkRefs`. Outros HTTP 400 não acionam essa redução. O teto aprendido é respeitado também por lotes já preparados.
-
-`UploadWireProgressStream` conta bytes após escrita no stream de destino HTTP. `UploadByteProgress` separa bytes de transmissão (incluindo retries) de progresso lógico único, com callbacks limitados e publicação final na confirmação. O contador `Partes confirmadas X/Y` só avança após validar/persistir a resposta. A UI recebe um oitavo argumento opcional em `_opsTransferMetrics` para o contador de transmissão, sem confundir bytes repetidos com conclusão lógica. A velocidade e a estimativa aparecem durante o corpo do request, não somente no ACK; atualizações atrasadas não substituem uma conclusão por estado ativo.
-
-A preparação de anexos em diferentes requests se sobrepõe à rede e as confirmações ficam desacopladas dos workers. Isso não garante ocupação de rede de 100%: storage mais lento que a rede, pressão de memória, saturação das 64 confirmações pendentes, rate limits e falhas podem exigir esperas. A criação do thread e a confirmação final continuam sendo etapas reais. A estimativa de bytes restantes não inclui futuras esperas nem fases posteriores de prévias/metadados.
-
-## Integração com biblioteca, cache e sincronização
-
-- `AppEntry.ChunkReferences` e `VideoPreviewChunkReferences` carregam as novas referências internas; `ChunkMessageIds` fica reservado ao legado.
-- SQLite `app_entries` recebeu colunas opcionais `chunk_refs_json` e `video_preview_chunk_refs_json`. Instalações antigas recebem colunas por migração aditiva, sem apagar registros.
-- O cache local continua operacional e pode conter metadata em claro. A cifra remota não protege os arquivos locais de um usuário com acesso ao perfil.
-- OSER não foi alterado: continua guardando o resumo do card, não a lista completa de chunks. Quando faltam detalhes, o desktop carrega o metadata completo antes do download/preview.
-- Copies e hidratação preservam referências de original e 480p, inclusive entre cache, serial e telas especiais.
-- Favorito, move, rename, Lixeira/restauração preservam os IDs de attachment. Não reuploadam payloads para mudar organização.
-- `CloudSyncRepository` usa o mesmo transporte novo e preserva `chunkRefs` no payload das revisões. Comparação de hashes, ancestralidade, conflitos, tombstones, atomicidade de download e bytes do original permanecem inalterados.
-- Imagens Markdown unitárias continuam com seu transporte de preview existente. A atualização do documento Markdown utiliza o novo resultado com referências.
-
-## Erros e integridade
-
-Falhar explicitamente quando a referência é inválida, a versão do checkpoint é desconhecida, falta mensagem/attachment, a resposta não confirma exatamente os arquivos enviados ou a autenticação do payload falha. Não devolver arquivo vazio, omitir chunks inválidos, escolher outro anexo pelo nome ou degradar `chunkRefs` para legado.
-
-A resposta HTTP confirma transporte; a autenticação GCM confirma conteúdo e contexto ao ler. IDs corretos não dispensam GCM. A publicação de metadata preserva a cifra V1 e a estratégia existente de atualização da mensagem. Falha de tag não expõe plaintext; campos inválidos usam as mensagens de erro existentes, sem redesenho da interface.
-
-Não adicionados logs de INFO/DEBUG ou logs contendo metadados completos, chaves ou plaintext. IDs dos exemplos são fictícios.
-
-## Flutter interoperability - multi-attachment
-
-Esta seção especifica compatibilidade de dados e transporte, não uma reprodução da arquitetura de desempenho do desktop. O transporte descrito aqui está implementado e testado no desktop; o código Flutter não foi alterado. Clientes móveis sem suporte a `chunkRefs` ainda precisam implementar esse contrato para abrir os payloads agrupados. Os resultados de vazão/RAM do desktop não são metas nem validação do mobile.
-
-### Contratos obrigatórios para interoperabilidade
-
-A implementação Dart deve reproduzir exatamente os contratos de dados abaixo, independentemente de sua concorrência ou estratégia de buffers:
-
-1. Ler encrypted metadata V1 usando a especificação de [implementation old.md](<implementation old.md>), antes de interpretar arquivo/preview.
-2. Testar presença real da chave JSON `chunkRefs`; não confundir ausente com `null`, nem tentar `chunks` após detectar referências inválidas.
-3. Manter IDs como strings, validar índices e pares únicos, ordenar por `index`, deduplicar consultas por `messageId` e selecionar o anexo por `attachmentId`.
-4. Usar `ChunkIndex = index` zero-based no contexto e o número global do array completo como `ChunkCount`. O header ORGAESGC continua one-based internamente.
-5. Preservar os protocolos de cifra existentes. Ciphertext de cada attachment deve ser byte-compatible com o leitor C#; não cifrar o conjunto como um único payload.
-6. Criar forum post novo com um attachment inicial, depois multipart `payload_json` e `files[n]` com IDs locais correspondentes. O leitor aceita mensagens com um a dez anexos; o mobile pode publicar lotes menores que os dez utilizados pelo desktop, conforme seus recursos.
-7. Validar toda a resposta por filename/tamanho/IDs, sem depender da ordem retornada. Persistir checkpoints inteiros de batch com layout versionado e referências completas.
-8. Preservar checkpoints e metadata unitários antigos. Não produzir `chunks` com IDs repetidos, nem migrar ao ler.
-9. Aplicar as mesmas regras à lista independente `preview.video480p.chunkRefs`; conservar thumbnails unitários, seek/prefetch e renovação por ID.
-10. Garantir comprimento correto dos anexos, retry/cancelamento íntegros e consumo limitado de memória. Streams sob demanda, retenção de um pequeno lote ou regeneração validada são estratégias locais, não formatos remotos diferentes.
-
-Uma mensagem com somente um anexo também pode usar o layout novo com `chunkRefs`. Não escrever `chunks` legado apenas porque o batch móvel possui um arquivo. No sentido inverso, receber uma mensagem desktop com dez anexos não exige baixar seus 200 MiB juntos: buscar o JSON da mensagem, resolver os IDs e baixar/autenticar cada attachment necessário separadamente, em ordem lógica ou com concorrência limitada. Os dez anexos não formam um único blob criptográfico.
-
-### Políticas do desktop que não são exigências do mobile
-
-| Aspecto | Desktop atual | Exigência de compatibilidade no mobile |
-| --- | --- | --- |
-| Anexos por mensagem | Dez, salvo lote final/rejeição específica | Aceitar até dez ao ler; escrever de um a dez conforme orçamento local |
-| Corpos simultâneos | Até 16 workers | Concorrência baixa é válida, inclusive um corpo por vez |
-| Mensagens pendentes | Teto global de 64 | Fila pequena ou nenhuma sobreposição de ACK é válida |
-| Preparadores de cifra | Dois | Um preparador é válido; não duplicar buffers para copiar essa quantidade |
-| Limite de RAM | Job Object de 1 GB e headroom desktop | Definir orçamento adequado ao dispositivo; 1 GB não é orçamento recomendado para mobile |
-| Regeneração em retry | Nonce/digest voláteis, releitura e cifra validada | Pode reabrir ciphertext de um pequeno lote retido ou implementar regeneração validada |
-| Modo forçado | Opção de 16 workers | Não é necessário portar o botão ou ignorar limites adaptativos |
-
-Limites globais de requisição e cotas retornadas pelo Discord continuam obrigatórios em ambas as plataformas. Não usar mais threads, isolates ou conexões para contornar HTTP 429. O celular não precisa saturar a conexão nem manter transmissão ininterrupta para ser compatível.
-
-### Estratégia móvel conservadora
-
-Como ponto de partida para implementação posterior, usar um arquivo ativo, um preparador e um request em transmissão; escolher um batch pequeno que caiba no orçamento. Esses valores são sugestões iniciais, não parâmetros já medidos em aparelho. Aumentar somente após medir RAM total, jank, temperatura, bateria e comportamento em segundo plano. O orçamento precisa incluir plaintext, ciphertext, cópias feitas pela biblioteca de cifra/HTTP, buffers de rede e memória da UI, não somente o tamanho do arquivo enviado.
-
-Ler somente as faixas necessárias, sem carregar o arquivo inteiro e sem montar um multipart de 200 MiB em RAM. Usar backpressure e cancelamento na preparação/transmissão. Só devolver/zerar o buffer depois que o consumidor HTTP terminar de utilizar seus bytes; não zerar um `Uint8List` ainda referenciado por eventos pendentes. Preparação lenta não pode bloquear o isolate responsável pela UI; ao separar processamento, considerar também o custo de transferir/copiar buffers entre isolates.
-
-O mobile pode aguardar o ACK de seu único batch antes de preparar outro, se isso for necessário para controlar memória e estabilidade. A separação entre workers de corpo e respostas pendentes é uma otimização opcional: se adotada, ambas as filas precisam de tetos baixos explícitos. Não copiar o teto de 64 mensagens do desktop nem exigir dez anexos por mensagem móvel.
-
-Para retries, recriar o multipart e respeitar a cota. Uma implementação simples pode manter somente o ciphertext do pequeno batch atual até confirmar/falhar/cancelar e reabrir esses mesmos bytes, sem recifrar. Se optar por liberar antes do ACK e regenerar, aplicar a seção de regeneração segura: H/K/P idênticos antes de reaplicar o nonce. O digest e o estado de replay não integram o formato remoto e não são obrigatórios quando os bytes cifrados são mantidos. Nunca reutilizar nonce com plaintext, chave ou AAD diferentes; não registrar estado dependente de chave nem dados privados em logs.
-
-Não alterar tamanhos/posições dos chunks de arquivos já publicados ou checkpoints existentes para economizar RAM. Reduzir quantidade de anexos por request e concorrência é independente disso. Esta especificação não presume que mudanças no tamanho lógico dos chunks sejam compatíveis com todos os caminhos de vídeo/seek; isso exige validação separada do protocolo, não uma adaptação silenciosa de desempenho.
-
-Exemplo conservador de agendamento, sem obrigação de sobrepor ACKs:
-
-```text
-abrir contexto e checkpoint compatíveis
-enquanto existem índices não confirmados:
-    selecionar de um a dez anexos que caibam na política móvel
-    preparar somente esse pequeno lote ou seus streams sob demanda
-    respeitar workers/cotas e transmitir com progresso e cancelamento
-    aguardar ACK; em falha transitória/429, aplicar backoff e retry íntegro
-    validar todos os IDs/tamanhos; persistir referências do batch atomicamente
-    liberar buffers/estado antes de avançar para o próximo lote
-publicar metadata compatível somente após confirmar o payload completo
-```
-
-Aplicar os mesmos contratos aos recursos que existirem no mobile, incluindo retomadas layout 2 e prévias 480p. Não é requisito portar sincronização de pastas entre PCs, salvamento de Markdown ou controles de paralelismo exclusivos do desktop. Layout unitário antigo e downloads permanecem como descritos nas seções de compatibilidade.
-
-Testes futuros entre plataformas: mensagem desktop com dez anexos -> mobile download/preview/seek sem baixar o batch inteiro para RAM; mobile upload com um/dois anexos por mensagem -> desktop download/preview/seek; retomada com chunks confirmados; metadados antigos nas duas versões; corrupção e attachment ausente sem fallback inseguro. Usar o vetor criptográfico anterior para verificar cifra e os exemplos/fixtures de referências para verificar transporte. Validar em aparelhos reais de memória limitada, inclusive pausa/cancelamento, falhas de rede e retorno do segundo plano, sem tratar o benchmark desktop como evidência mobile.
-
-## Validação e arquivos relacionados
-
-`UploadCadenceDiagnostics.cs` acrescenta um cenário local de resposta fora de ordem que valida o cliente HTTP real, vagas renovadas com um upload anterior pendente, reserva única da vaga e proteção contra headers atrasados. O comando manual `--live-upload-cadence` fica fora da lista automática: lê somente as configurações necessárias pelo SQLite em modo read-only, cria uma origem sintética e um post temporário, utiliza os services de upload/criptografia, amostra o avanço durante a transmissão e remove somente o post criado. Requer autorização humana para cada sessão de teste. Não imprime token, proxy secreto, IDs privados, conteúdo de resposta ou metadata. Não abre a janela do app.
-
-O diagnóstico distingue `bodyEnd` de `reply` e separa espera inicial de criação do post de lacunas durante o envio. `mainIdle` mede o maior intervalo entre escritas HTTP após iniciar o upload das mensagens; a espera final depois de transferir todos os bytes não entra nesse intervalo. Esses valores são medidos no stream HTTP do cliente, não equivalem a garantia de vazão contínua da placa de rede.
-
-Os testes de comportamento estão em `tests/Organessonium.NetworkTests/MultiAttachmentTests.cs` e na integração Discord de `SyncIntegrationTests.cs`. Exercitam o uploader, cliente HTTP, criptografia real, metadata cifrado, checkpoints em disco, SQLite, download e vídeo com respostas HTTP simuladas. Não abrem interface nem acessam a conta do usuário.
-
-Cobertura relevante: multipart 1/2/10 e rejeição local de 0/11; soma acima de 25 MiB; 26 chunks interrompidos/retomados; resposta fora de ordem; reconstrução byte a byte; array novo/legado; preview 480p com 13 chunks; mensagens deduplicadas; attachment ausente; cancelamento/limpeza; retries de rede/429; redução de batch; checkpoint unitário antigo; streaming, seek e renovação com filenames iguais; sincronização com três chunks, sendo dois na mesma mensagem.
-
-O teste manual do pipeline de dez anexos utilizou origem sintética de 2 GiB e até onze mensagens concorrentes após o post inicial. A transmissão terminou em torno de 92,62 s; a última confirmação chegou em 127,31 s. A maior lacuna entre escritas HTTP durante o envio foi 0,06 s; pico de memória privada do Job Object: 283,5 MiB; nenhum HTTP 429. Uma amostragem da placa física durante a transmissão mediu aproximadamente 200 a 212 Mbps; esses contadores incluem todo o tráfego do adaptador. Dois posts temporários da comparação foram removidos, sem alterar a biblioteca e sem abrir janelas. Há espera inicial de cerca de quatro segundos para obter o thread e uma cauda de confirmação depois de transmitir todos os bytes. Os números são observados nessa conexão, não garantia para outra rede/horário nem teste de internet real de 1 Gbps.
-
-`UploadBudgetTests.cs` cobre upload real de faixas de uma origem de 1 GiB com criptografia e transporte HTTP simulado, bytes durante o request, chunks confirmados, teto do Job Object e ausência de ciphertext em disco. Outro cenário mantém uma requisição ativa e verifica que o sucessor já está pronto, que a fila não lê além do limite e que o cancelamento zera ambos os conjuntos de buffers. A alteração de workers é exercitada no upload em andamento com storage lento simulado e heartbeat do Dispatcher. A WebView2 real carrega os assets do app em um host nunca visível, validando botão, velocidade, estimativa e descarte de updates atrasados, sem abrir a janela principal.
-
-Na verificação atual, as 12 famílias selecionadas de upload, retomada/download, streaming, limites e publicação/recuperação do upload sincronizado passaram. `StreamingUploadTests.cs` transmite três mensagens completas de 200 MiB com apenas um worker de corpo enquanto todas as respostas ficam retidas, validando a separação das confirmações. Também verifica retries byte a byte e rejeição de uma origem alterada, sem ciphertext em disco. O teste local de preparação/cifra/cópia para receptor simulado mediu 567,8 MiB/s; não representa vazão da internet. A fixture de origem de 1 GiB mediu pico de 117,0 MiB. A solução desktop compilou sem warnings/erros; a compilação limpa do projeto de testes conserva dois CS0436 conhecidos do Windows App SDK, sem erros. Somente o diagnóstico manual autorizado acessa a conta; os testes automáticos usam HTTP simulado.
-
-Arquivos da implementação:
-
-- `Models/ChunkReference.cs`, `AppEntry.cs`, `MetadataModels.cs`, `TransferState.cs`.
-- `Services/ForumUploader.cs`, `ForumUploader.MultiAttachment.cs`, `DiscordApiClient.cs`, `DiscordLimits.cs`, `UploadMemoryPipeline.cs`.
-- `Services/ForumDownloader.cs`, `DiscordVideoChunkProvider.cs`.
-- `Services/MetadataService.cs`, `SettingsStore.cs`, `AppRegistry.cs`, `AppRegistry.Trash.cs`, `SerialIndexService.cs`, `DebugNamesScanner.cs`.
-- `Services/AppMemoryBudget.cs`, `RamUploadBudget.cs`, `UploadByteProgress.cs`, `UploadWireProgressStream.cs`, `UploadConcurrencyRegistry.cs`.
-- `Services/UploadPartContent.cs`, `UploadBodySlot.cs` e a regeneração validada em `EncryptionService.cs`.
-- `Services/TransferManager.cs`, `TransferStateRepository.cs`, `Sync/CloudSyncRepository.cs`, `Bridge/AppController.cs`.
-- `tests/Organessonium.NetworkTests/Program.cs`, `UploadBudgetTests.cs`, `MultiAttachmentTests.cs`, `SyncIntegrationTests.cs`, `TrashTests.cs`.
-- `tests/Organessonium.NetworkTests/StreamingUploadTests.cs` e `UploadCadenceDiagnostics.cs`.
-- `README.md`, `migration.md`, este `implementation.md` e `release/Build-Releases.ps1`.
-
-Os caminhos `Models`, `Services` e `Bridge` são relativos a `Organessonium/Organessonium`. O arquivo arquivado da criptografia não recebeu edição; o ZIP de fontes passa a incluir as duas especificações.
+Esses testes não publicam dados na conta e não substituem validação posterior com dispositivos e clientes mobile reais. O teste de cópia valida o fluxo independente de payload; não automatiza o seletor nativo de destino do download.

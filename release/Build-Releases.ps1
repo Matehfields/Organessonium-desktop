@@ -354,7 +354,7 @@ function Test-SourceZip {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
         $entries = @($archive.Entries | ForEach-Object { $_.FullName })
-        foreach ($required in @('Organessonium.slnx', 'Organessonium/Organessonium.csproj', 'README.md', 'implementation.md', 'implementation old.md', 'migration.md')) {
+        foreach ($required in @('Organessonium.slnx', 'Organessonium/Organessonium.csproj', 'README.md', 'implementation.md', 'implementation old.md', 'implementation old 2.md', 'migration.md')) {
             if ($required -notin $entries) {
                 throw "O ZIP de código-fonte não contém $required."
             }
@@ -664,7 +664,7 @@ foreach ($architecture in $architectures) {
 }
 
 Write-Step 'Verificando e gerando o código-fonte público'
-$trackedFiles = @(& git -C $repoRoot ls-files -- 'Organessonium/Organessonium.slnx' 'Organessonium/Organessonium/**' 'README.md' 'implementation.md' 'implementation old.md' 'migration.md')
+$trackedFiles = @(& git -C $repoRoot ls-files -- 'Organessonium/Organessonium.slnx' 'Organessonium/Organessonium/**' 'README.md' 'implementation.md' 'implementation old.md' 'implementation old 2.md' 'migration.md')
 if ($LASTEXITCODE -ne 0 -or $trackedFiles.Count -eq 0) {
     throw 'Git não conseguiu enumerar os arquivos necessários do código-fonte.'
 }

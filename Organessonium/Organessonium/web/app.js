@@ -515,7 +515,9 @@ function applyI18n() {
     setText('sel-download-text', 'download');
     setText('sel-move-text', 'move');
     setText('sel-delete-text', 'delete');
-    setText('ctx-open-text', 'open');
+    setText('ctx-copy-text', 'makeCopy');
+    setText('ctx-info-text', 'viewInformation');
+    setText('ctx-versions-text', 'versions');
     setText('ctx-move-text', 'move');
     setText('ctx-rename-text', 'rename');
     setText('ctx-delete-text', 'delete');
@@ -2778,7 +2780,9 @@ document.addEventListener('DOMContentLoaded', () => {
     $('background-activity-close').addEventListener('click', () => $('background-activity').classList.add('hidden'));
 
     // Context
-    $('ctx-open').addEventListener('click', () => { openContextTarget(); hideCtx(); });
+    $('ctx-copy').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) window.bridge.copyFile(app.metadataMessageId); });
+    $('ctx-info').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) openFileDetails(app, false); });
+    $('ctx-versions').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) openFileDetails(app, true); });
     $('ctx-download').addEventListener('click', () => { if (ctxTarget) window.bridge.startDownload(ctxTarget.threadId, ctxTarget.name); hideCtx(); });
     $('ctx-rename').addEventListener('click', () => { const app = ctxTarget; hideCtx(); openRenameModal(app); });
     $('ctx-favorite').addEventListener('click', () => {
@@ -3057,6 +3061,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         if (e.key==='Escape') {
+            if (closeFileDetails()) return;
             if (!previewOverlay.classList.contains('hidden')) { closePreview(); return; }
             if (selectedKeys.size) { clearSelection(); return; }
             closeSidebarNewMenu(); sortMenu.classList.add('hidden'); typeFilterMenu.classList.add('hidden'); dateFilterMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
@@ -3575,17 +3580,17 @@ function createMarkdownEditor(markdown, entry, name) {
         <div class="editor-toolbar-groups">
             <div class="editor-tool-group" aria-label="${esc(t('editorHeading'))}">
                 <span class="editor-group-label" data-editor-label="editorHeading">${esc(t('editorHeading'))}</span>
-                <button data-cmd="formatBlock:h1" title="${esc(t('editorHeading'))} 1">H1</button>
-                <button data-cmd="formatBlock:h2" title="${esc(t('editorHeading'))} 2">H2</button>
-                <button data-cmd="formatBlock:h3" title="${esc(t('editorHeading'))} 3">H3</button>
-                <button data-cmd="formatBlock:h4" title="${esc(t('editorHeading'))} 4">H4</button>
-                <button data-cmd="formatBlock:h5" title="${esc(t('editorHeading'))} 5">H5</button>
-                <button data-cmd="formatBlock:h6" title="${esc(t('editorHeading'))} 6">H6</button>
+                <button data-cmd="formatBlock:h1" title="${esc(t('editorHeading'))} 1">${icon('format_h1',20)}</button>
+                <button data-cmd="formatBlock:h2" title="${esc(t('editorHeading'))} 2">${icon('format_h2',20)}</button>
+                <button data-cmd="formatBlock:h3" title="${esc(t('editorHeading'))} 3">${icon('format_h3',20)}</button>
+                <button data-cmd="formatBlock:h4" title="${esc(t('editorHeading'))} 4">${icon('format_h4',20)}</button>
+                <button data-cmd="formatBlock:h5" title="${esc(t('editorHeading'))} 5">${icon('format_h5',20)}</button>
+                <button data-cmd="formatBlock:h6" title="${esc(t('editorHeading'))} 6">${icon('format_h6',20)}</button>
             </div>
             <div class="editor-tool-group" aria-label="${esc(t('editorFormat'))}">
                 <span class="editor-group-label" data-editor-label="editorFormat">${esc(t('editorFormat'))}</span>
-                <button data-cmd="bold" data-title-key="editorBold" title="${esc(t('editorBold'))} Ctrl+B"><strong>B</strong><span data-editor-label="editorBold">${esc(t('editorBold'))}</span></button>
-                <button data-cmd="italic" data-title-key="editorItalic" title="${esc(t('editorItalic'))} Ctrl+I"><em>I</em><span data-editor-label="editorItalic">${esc(t('editorItalic'))}</span></button>
+                <button data-cmd="bold" data-title-key="editorBold" title="${esc(t('editorBold'))} Ctrl+B">${icon('format_bold',20)}<span data-editor-label="editorBold">${esc(t('editorBold'))}</span></button>
+                <button data-cmd="italic" data-title-key="editorItalic" title="${esc(t('editorItalic'))} Ctrl+I">${icon('format_italic',20)}<span data-editor-label="editorItalic">${esc(t('editorItalic'))}</span></button>
                 <button data-cmd="formatBlock:blockquote" data-title-key="editorQuote" title="${esc(t('editorQuote'))}">${icon('format_quote',16)}<span data-editor-label="editorQuote">${esc(t('editorQuote'))}</span></button>
                 <button data-cmd="formatBlock:pre" data-title-key="editorCode" title="${esc(t('editorCode'))}">${icon('code',16)}<span data-editor-label="editorCode">${esc(t('editorCode'))}</span></button>
             </div>
@@ -5823,6 +5828,12 @@ function showCtx(e, app) {
     const x = e.clientX || (r ? r.right - 160 : 12);
     const y = e.clientY || (r ? r.bottom + 4 : 12);
     positionContextMenu(x, y);
+    if (!isFolderApp(app) && app.metadataMessageId) requestFileInformation(app, info => {
+        if (ctxTarget !== app || ctxMode !== 'item' || ctxMenu.classList.contains('hidden')) return;
+        app.versions = info.entry.versions || [];
+        configureContextMenu('item', app);
+        positionContextMenu(x, y);
+    });
 }
 
 function showBackgroundCtx(e) {
@@ -5894,7 +5905,9 @@ function configureContextMenu(mode, app = null) {
     const isFilesTab = mode === 'files-tab';
     const hasOtherTabs = markdownTabs.size > (ctxTabTarget && ctxTabTarget !== 'files' ? 1 : 0);
 
-    showCtxPart('ctx-open', isItem);
+    showCtxPart('ctx-copy', isItem && !isFolder && !inTrash && !!app.metadataMessageId);
+    showCtxPart('ctx-info', isItem && !!app.metadataMessageId);
+    showCtxPart('ctx-versions', isItem && !isFolder && Array.isArray(app.versions) && app.versions.length > 0);
     showCtxPart('ctx-download', isItem && !!app.threadId);
     showCtxPart('ctx-move', isItem && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-rename', isItem && !inTrash && !!app.metadataMessageId);
@@ -5919,9 +5932,8 @@ function configureContextMenu(mode, app = null) {
 
     if (isItem) {
         $('ctx-delete-text').textContent = t(inTrash ? 'permanentDelete' : 'moveToTrash');
-        $('ctx-open-text').textContent = isFolder ? t('open') : (canPreview(app.name) ? t('preview') : t('open'));
-        $('ctx-dl-label').textContent = isFolder ? t('downloadFolderAction') : t('download');
-        $('ctx-favorite-text').textContent = app.favorite ? t('removeFavorite') : t('addFavorite');
+        $('ctx-dl-label').textContent = t('makeDownload');
+        $('ctx-favorite-text').textContent = t(app.favorite ? 'removeStarred' : 'addStarred');
         $('ctx-favorite-icon').innerHTML = icon(app.favorite ? 'star' : 'star_border', 17);
     }
 }
@@ -5957,17 +5969,6 @@ function isFolderApp(app) {
 function folderPathForApp(app) {
     const base = (app && app.path) || currentPath || '/';
     return base === '/' ? '/' + app.name : base + '/' + app.name;
-}
-
-function openContextTarget() {
-    if (!ctxTarget) return;
-    if (isFolderApp(ctxTarget)) {
-        navigate(folderPathForApp(ctxTarget));
-    } else if (settings.previewEnabled && canPreview(ctxTarget.name)) {
-        openPreview(ctxTarget);
-    } else {
-        window.bridge.startDownload(ctxTarget.threadId, ctxTarget.name);
-    }
 }
 
 function deleteContextTarget() {

@@ -277,6 +277,9 @@ public sealed partial class AppController : IAsyncDisposable
             case "moveItem": _ = RunAsync(() => MoveItemsAsync(JsonSerializer.Serialize(new[] { ArgString(args, 0) }), ArgString(args, 1))); return Task.CompletedTask;
             case "updateFolderColor": _ = RunAsync(() => UpdateFolderColorAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "renameItem": _ = RunAsync(() => RenameItemAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "requestFileInformation": _ = RunAsync(() => SendFileInformationAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "copyFile": _ = RunAsync(() => CopyFileAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "downloadVersion": _ = RunAsync(() => StartVersionDownloadAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "startUpload": return StartUploadDialogAsync();
             case "startFolderUpload": return StartFolderUploadDialogAsync();
             case "resolveUploadConflict": ResolveUploadConflict(args); return Task.CompletedTask;
@@ -1991,6 +1994,7 @@ public sealed partial class AppController : IAsyncDisposable
             var parentPath = PathRules.Normalize(entry.Path);
             var newFolderPath = PathRules.Normalize(parentPath == "/" ? "/" + clean : parentPath + "/" + clean);
             entry.Name = clean;
+            entry.ModifiedAt = TransferState.Now();
             await registry.UpdateEntryAsync(entry);
             foreach (var child in all.Where(child => !ReferenceEquals(child, entry) && IsInsideFolder(child, oldFolderPath)))
             {
@@ -1999,7 +2003,10 @@ public sealed partial class AppController : IAsyncDisposable
         }
         else
         {
+            entry = await registry.LoadFileDetailsAsync(entry, forceRefresh: true);
+            ReplaceLocalEntry(all, entry);
             entry.Name = clean;
+            entry.ModifiedAt = TransferState.Now();
             await registry.UpdateEntryAsync(entry);
         }
 
@@ -2094,11 +2101,6 @@ public sealed partial class AppController : IAsyncDisposable
 
         var resolved = await ResolveUploadConflictsAsync(tasks, all);
         tasks = resolved.Tasks;
-        if (resolved.OverwriteEntries.Count > 0)
-        {
-            await _bridge.CallAsync("_onStatus", "Substituindo arquivo(s) existente(s)...", true);
-            await DeleteUploadConflictEntriesAsync(registry, resolved.OverwriteEntries, serialFolderIds);
-        }
 
         if (tasks.Count == 0)
         {
@@ -2162,12 +2164,11 @@ public sealed partial class AppController : IAsyncDisposable
         var conflictTotal = CountUploadConflicts(input, existingByKey);
         if (conflictTotal == 0)
         {
-            return new UploadConflictResolution(input.ToList(), []);
+            return new UploadConflictResolution(input.ToList());
         }
 
         var tasks = new List<UploadTask>();
         var acceptedByKey = new Dictionary<string, List<UploadTask>>(StringComparer.OrdinalIgnoreCase);
-        var overwriteEntries = new List<AppEntry>();
         string? applyAllAction = null;
         var conflictIndex = 0;
 
@@ -2218,10 +2219,11 @@ public sealed partial class AppController : IAsyncDisposable
 
             if (action == "overwrite")
             {
+                FileReplacement? replacement = batchConflicts.LastOrDefault()?.Replacement;
                 if (existing.Count > 0)
                 {
-                    overwriteEntries.AddRange(existing);
-                    existingByKey.Remove(key);
+                    var current = await Registry().LoadFileDetailsAsync(existing[0], forceRefresh: true);
+                    replacement = FileVersioning.PrepareReplacement(current);
                 }
 
                 if (batchConflicts.Count > 0)
@@ -2230,7 +2232,7 @@ public sealed partial class AppController : IAsyncDisposable
                     batchConflicts.Clear();
                 }
 
-                Accept(key, task);
+                Accept(key, task with { Replacement = replacement });
             }
             else if (action == "keep")
             {
@@ -2238,12 +2240,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
 
-        var uniqueOverwriteEntries = overwriteEntries
-            .Where(entry => !string.IsNullOrWhiteSpace(entry.MetadataMessageId))
-            .GroupBy(entry => entry.MetadataMessageId, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.First())
-            .ToList();
-        return new UploadConflictResolution(tasks, uniqueOverwriteEntries);
+        return new UploadConflictResolution(tasks);
     }
 
     private async Task<UploadConflictResponse> AskUploadConflictAsync(
@@ -2277,27 +2274,6 @@ public sealed partial class AppController : IAsyncDisposable
 
         _uploadConflictResponses.TryRemove(requestId, out _);
         return new UploadConflictResponse("skip", false);
-    }
-
-    private async Task DeleteUploadConflictEntriesAsync(
-        AppRegistry registry,
-        IReadOnlyList<AppEntry> entries,
-        ISet<string> serialFolderIds)
-    {
-        foreach (var entry in entries)
-        {
-            try
-            {
-                ClosePreview(entry.ThreadId);
-                await DeleteStoredEntryAsync(registry, entry, synchronizeSerials: false);
-                TrackFolderSerial(serialFolderIds, entry.ParentFolderId);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("[UploadConflictDelete] " + ex.Message);
-                AppLogger.Error("UploadConflictDelete", ex, entry.Name);
-            }
-        }
     }
 
     private static int CountUploadConflicts(
@@ -2412,7 +2388,8 @@ public sealed partial class AppController : IAsyncDisposable
                                 currentWireBytes);
                         },
                         transferActivity: transferActivity,
-                        deferSerialSynchronization: true), cancellationToken);
+                        deferSerialSynchronization: true,
+                        replacement: task.Replacement), cancellationToken);
                     uploadedEntries[index] = uploaded;
                     var completed = Interlocked.Increment(ref done);
                     await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
@@ -2526,7 +2503,8 @@ public sealed partial class AppController : IAsyncDisposable
         bool useBatchUi = false,
         Func<long, long, Task>? onBytesUploaded = null,
         TransferActivityClock? transferActivity = null,
-        bool deferSerialSynchronization = false)
+        bool deferSerialSynchronization = false,
+        FileReplacement? replacement = null)
     {
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2597,7 +2575,9 @@ public sealed partial class AppController : IAsyncDisposable
                     chunkSizeBytes,
                     totalChunks,
                     cancellationToken);
-                transferState.FileId = Guid.NewGuid().ToString("N");
+                transferState.Replacement = replacement;
+                transferState.FileId = replacement?.Metadata.FileId ?? Guid.NewGuid().ToString("N");
+                transferState.ThreadId = replacement?.Metadata.ThreadId ?? "";
                 transferState.Encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
             }
             else
@@ -2840,8 +2820,11 @@ public sealed partial class AppController : IAsyncDisposable
                 true,
                 useBatchUi,
                 progressTracker: progressTracker);
-            var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
             var entry = AppEntry.File(name, threadId, now, sourceLength, targetPath);
+            entry.VersionId = transferState.TransferId;
+            entry.VersionUploadedAt = now;
+            entry.ModifiedAt = now;
             entry.FileId = transferState.FileId;
             entry.Encryption = transferState.Encryption?.Clone();
             entry.ParentFolderId = parentFolderId;
@@ -2855,11 +2838,11 @@ public sealed partial class AppController : IAsyncDisposable
             entry.VideoPreviewChunkMessageIds = previewIds.VideoPreviewChunkMessageIds.ToList();
             entry.VideoPreviewChunkReferences = previewIds.VideoPreviewChunkReferences?.ToList();
             entry.VideoPreviewSizeBytes = previewIds.VideoPreviewSizeBytes;
-            await registry.AddEntryAsync(
-                entry,
-                cancellationToken,
-                ReportRateLimitWaitAsync,
-                synchronizeSerials: !deferSerialSynchronization);
+            if (transferState.Replacement != null)
+                entry = await PublishFileVersionAsync(registry, transferState.Replacement, entry, cancellationToken, ReportRateLimitWaitAsync);
+            else
+                await registry.AddEntryAsync(entry, cancellationToken, ReportRateLimitWaitAsync,
+                    synchronizeSerials: !deferSerialSynchronization);
             await ReportUploadItemProgressAsync(
                 opId,
                 fileIndex,
@@ -2901,7 +2884,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            if (!string.IsNullOrWhiteSpace(threadId))
+            if (!string.IsNullOrWhiteSpace(threadId) && transferState?.Replacement == null)
             {
                 try { await Downloader().DeleteThreadAsync(threadId); } catch { }
             }
@@ -3384,7 +3367,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private async Task StartDownloadAsync(string threadId, string name, DirectoryInfo? selectedDestination = null)
+    private async Task StartDownloadAsync(string threadId, string name, DirectoryInfo? selectedDestination = null, AppEntry? selectedVersion = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || threadId.StartsWith("folder_", StringComparison.Ordinal))
         {
@@ -3408,9 +3391,9 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
-                var entry = LoadedEntriesForLookup()
+                var entry = selectedVersion ?? LoadedEntriesForLookup()
                     .FirstOrDefault(app => app.ThreadId == threadId);
-                if (entry != null)
+                if (entry != null && selectedVersion == null)
                 {
                     entry = await Registry().LoadFileDetailsAsync(entry, cancellationToken);
                 }
@@ -3480,7 +3463,7 @@ public sealed partial class AppController : IAsyncDisposable
                 if (ex is EncryptedPayloadIntegrityException integrity &&
                     await OfferRetryEncryptedDownloadAsync(integrity))
                 {
-                    await StartDownloadAsync(threadId, name, dest);
+                    await StartDownloadAsync(threadId, name, dest, selectedVersion);
                 }
             }
             finally
@@ -4060,8 +4043,13 @@ public sealed partial class AppController : IAsyncDisposable
             await File.WriteAllTextAsync(file.FullName, markdown ?? "", Encoding.UTF8);
 
             var settings = _store.Load();
+            var registry = Registry();
+            var all = CurrentLocalEntries();
+            var existing = all.FirstOrDefault(app => app.MetadataMessageId == metadataMessageId && app.Type == "file");
+            if (existing != null) existing = await registry.LoadFileDetailsAsync(existing, forceRefresh: true);
+            var replacement = existing == null ? null : FileVersioning.PrepareReplacement(existing);
             var encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
-            var fileId = Guid.NewGuid().ToString("N");
+            var fileId = existing?.FileId ?? Guid.NewGuid().ToString("N");
             var parts = await ArchiveSplitter.SplitAsync(
                 file,
                 cancellationToken: default,
@@ -4071,18 +4059,20 @@ public sealed partial class AppController : IAsyncDisposable
                 using var memory = new UploadMemoryCoordinator(settings.EffectiveUploadThreads);
                 var encryptedPayload = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.Original, 0, parts.Count);
                 var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
-                var canReuseThread = !string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal);
+                var uploadThread = existing?.ThreadId ??
+                    (!string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal) ? threadId : "");
                 ForumUploadResult uploadResult;
                 try
                 {
                     uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
                         index => memory.PreparePartAsync(_encryption, file, file.Length,
                             EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
-                        canReuseThread ? threadId : "", "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
+                        uploadThread, "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
                         useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
                 }
-                catch (DiscordApiException ex) when (canReuseThread && ((int)ex.StatusCode == 403 || (int)ex.StatusCode == 404))
+                catch (DiscordApiException ex) when (!string.IsNullOrEmpty(uploadThread) && (int)ex.StatusCode is 403 or 404)
                 {
+                    // Preserve the editor's existing recovery path, without deleting previous content.
                     uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
                         index => memory.PreparePartAsync(_encryption, file, file.Length,
                             EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
@@ -4090,35 +4080,27 @@ public sealed partial class AppController : IAsyncDisposable
                         useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
                 }
                 var newThreadId = uploadResult.ThreadId;
-                var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+                var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
                 var updated = AppEntry.File(safeName, newThreadId, now, file.Length, path);
+                updated.VersionId = Guid.NewGuid().ToString("N");
+                updated.VersionUploadedAt = now;
+                updated.ModifiedAt = now;
                 updated.FileId = fileId;
                 updated.Encryption = encryption;
                 updated.BatchId = uploadResult.BatchId;
                 updated.ChunkCount = uploadResult.ChunkCount;
                 updated.ChunkMessageIds = uploadResult.ChunkMessageIds.ToList();
                 updated.ChunkReferences = uploadResult.ChunkReferences?.ToList();
-                var registry = Registry();
-                var all = CurrentLocalEntries();
                 updated.ParentFolderId = FolderIdForPath(all, path) ?? AppRegistry.RootFolderId;
-                var existing = all.FirstOrDefault(app => app.MetadataMessageId == metadataMessageId);
-                if (existing != null)
+                if (replacement != null)
                 {
-                    updated.MetadataMessageId = existing.MetadataMessageId;
-                    await registry.UpdateEntryAsync(updated);
-                    all.Remove(existing);
+                    updated = await PublishFileVersionAsync(registry, replacement, updated);
                 }
                 else
                 {
                     await registry.AddEntryAsync(updated);
                 }
-                all.Add(updated);
-
-                if (!string.IsNullOrWhiteSpace(threadId) && threadId != newThreadId)
-                {
-                    try { await Downloader().DeleteThreadAsync(threadId); } catch { }
-                    ThumbnailCache.Remove(threadId);
-                }
+                ReplaceLocalEntry(all, updated);
 
                 await PublishLocalRegistryAsync(registry, all);
                 try
@@ -4929,7 +4911,10 @@ public sealed partial class AppController : IAsyncDisposable
                     {
                         throw new InvalidOperationException("Arquivo não encontrado na listagem atual para retomar download.");
                     }
-                    entry = await registry.LoadFileDetailsAsync(entry, cancellationToken);
+                    entry = state.DownloadMetadata == null
+                        ? await registry.LoadFileDetailsAsync(entry, cancellationToken)
+                        : new MetadataService().ToAppEntry(new MetadataEnvelope(entry.MetadataMessageId, state.DownloadMetadata))
+                          ?? throw new InvalidDataException("Metadados do download interrompido inválidos.");
 
                     var destination = new DirectoryInfo(string.IsNullOrWhiteSpace(state.DestinationPath)
                         ? (settings.DownloadPath.Trim().Length > 0 ? settings.DownloadPath : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
@@ -7175,9 +7160,9 @@ private static string ClassifyConnectError(Exception ex)
         [property: JsonPropertyName("method")] string Method,
         [property: JsonPropertyName("args")] JsonElement[] Args);
     private sealed record ResolvedDiscordChannels(string NamesChannelId, string FoldersForumId, string AppsForumId, string SerialChannelId);
-    private sealed record UploadTask(FileInfo File, string Path);
+    private sealed record UploadTask(FileInfo File, string Path, FileReplacement? Replacement = null);
     private sealed record UploadConflictResponse(string Action, bool ApplyToAll);
-    private sealed record UploadConflictResolution(List<UploadTask> Tasks, List<AppEntry> OverwriteEntries);
+    private sealed record UploadConflictResolution(List<UploadTask> Tasks);
     private sealed record PreviewUploadIds(
         string PreviewMessageId,
         string VideoPreviewMessageId,

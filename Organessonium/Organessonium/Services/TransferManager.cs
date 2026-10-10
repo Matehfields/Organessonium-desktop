@@ -62,6 +62,7 @@ public sealed class TransferManager
         var state = new TransferState
         {
             TransferType = TransferTypes.Download,
+            DownloadMetadata = MetadataService.CreateFileMetadata(entry),
             PayloadLayoutVersion = entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment,
             Status = TransferStatuses.Downloading,
             FileId = entry.FileId,

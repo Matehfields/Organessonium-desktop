@@ -261,7 +261,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
                        encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
-                       chunk_refs_json, video_preview_chunk_refs_json
+                       chunk_refs_json, video_preview_chunk_refs_json, modified_at, version_id, version_uploaded_at, versions_json
                 FROM app_entries
                 WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
                 ORDER BY rowid
@@ -298,7 +298,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        video_preview_message_id, video_preview_chunk_message_ids, video_preview_size_bytes,
                        file_id, folder_id, COALESCE(parent_folder_id, ''), encryption_version,
                        encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
-                       chunk_refs_json, video_preview_chunk_refs_json
+                       chunk_refs_json, video_preview_chunk_refs_json, modified_at, version_id, version_uploaded_at, versions_json
                 FROM app_entries
                 WHERE folder_id = $folderId AND type = 'folder'
                 LIMIT 1
@@ -375,6 +375,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
             entry.VideoPreviewChunkReferences = reader.IsDBNull(27) ? null :
                 System.Text.Json.JsonSerializer.Deserialize<List<ChunkReference>>(reader.GetString(27), JsonOptions.Web)
                 ?? throw new InvalidDataException("Cache de referências da prévia inválido.");
+            entry.ModifiedAt = reader.GetString(28);
+            entry.VersionId = reader.GetString(29);
+            entry.VersionUploadedAt = reader.GetString(30);
+            entry.Versions = System.Text.Json.JsonSerializer.Deserialize<List<FileVersion>>(reader.GetString(31), JsonOptions.Web) ?? [];
             if (string.IsNullOrWhiteSpace(entry.VideoPreviewMessageId))
             {
                 entry.VideoPreviewMessageId = entry.VideoPreviewChunkReferences?.FirstOrDefault()?.MessageId ??
@@ -460,6 +464,17 @@ public sealed class SettingsStore : IEncryptionSecretStore
         lock (_lock)
         {
             return PreviewCacheFile(threadId, slot, name, true);
+        }
+    }
+
+    public void RemoveFilePreviewCache(string threadId)
+    {
+        lock (_lock)
+        {
+            if (!PreviewCacheDirectory.Exists) return;
+            var prefix = "file_" + SafeCachePart(threadId, "item") + "_";
+            foreach (var file in PreviewCacheDirectory.EnumerateFiles().Where(file => file.Name.StartsWith(prefix, StringComparison.Ordinal)))
+                TryDelete(file);
         }
     }
 
@@ -569,6 +584,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
         EnsureColumn(connection, "app_entries", "sync_device_json", "TEXT NOT NULL DEFAULT ''");
         EnsureColumn(connection, "app_entries", "chunk_refs_json", "TEXT");
         EnsureColumn(connection, "app_entries", "video_preview_chunk_refs_json", "TEXT");
+        EnsureColumn(connection, "app_entries", "modified_at", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "version_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "version_uploaded_at", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn(connection, "app_entries", "versions_json", "TEXT NOT NULL DEFAULT '[]'");
     }
 
     private void MigrateIniIfNeeded()
@@ -686,12 +705,12 @@ public sealed class SettingsStore : IEncryptionSecretStore
              mime_type, chunk_message_ids, chunk_count, batch_id, preview_message_id, video_preview_message_id,
              video_preview_chunk_message_ids, video_preview_size_bytes, file_id, folder_id, parent_folder_id,
              encryption_version, encryption_mode, encryption_salt, favorite, device_type, sync_json, sync_device_json,
-             chunk_refs_json, video_preview_chunk_refs_json)
+             chunk_refs_json, video_preview_chunk_refs_json, modified_at, version_id, version_uploaded_at, versions_json)
             VALUES ($name, $threadId, $uploadedAt, $sizeBytes, $metadataMessageId, $path, $folderColor, $type,
              $mimeType, $chunkMessageIds, $chunkCount, $batchId, $previewMessageId, $videoPreviewMessageId,
              $videoPreviewChunkMessageIds, $videoPreviewSizeBytes, $filedd, $folderdd, $parentFolderId,
              $encryptionVersion, $encryptionMode, $encryptionSalt, $favorite, $deviceType, $syncJson, $syncDeviceJson,
-             $chunkRefs, $videoChunkRefs)
+             $chunkRefs, $videoChunkRefs, $modifiedAt, $versionId, $versionUploadedAt, $versions)
             """;
         insert.Parameters.AddWithValue("$name", entry.Name);
         insert.Parameters.AddWithValue("$threadId", entry.ThreadId);
@@ -723,6 +742,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
             (object)System.Text.Json.JsonSerializer.Serialize(entry.ChunkReferences, JsonOptions.Web));
         insert.Parameters.AddWithValue("$videoChunkRefs", entry.VideoPreviewChunkReferences == null ? DBNull.Value :
             (object)System.Text.Json.JsonSerializer.Serialize(entry.VideoPreviewChunkReferences, JsonOptions.Web));
+        insert.Parameters.AddWithValue("$modifiedAt", entry.ModifiedAt);
+        insert.Parameters.AddWithValue("$versionId", entry.VersionId);
+        insert.Parameters.AddWithValue("$versionUploadedAt", entry.VersionUploadedAt);
+        insert.Parameters.AddWithValue("$versions", System.Text.Json.JsonSerializer.Serialize(entry.Versions, JsonOptions.Web));
         insert.ExecuteNonQuery();
     }
 

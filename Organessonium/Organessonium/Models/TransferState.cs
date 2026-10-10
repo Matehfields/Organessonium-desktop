@@ -40,6 +40,14 @@ public static class TransferPayloadLayouts
 
 public sealed class TransferState
 {
+    [JsonPropertyName("replacement")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public FileReplacement? Replacement { get; set; }
+
+    [JsonPropertyName("downloadMetadata")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public FileMetadata? DownloadMetadata { get; set; }
+
     [JsonPropertyName("payloadLayoutVersion")]
     public int PayloadLayoutVersion { get; set; } = TransferPayloadLayouts.SingleAttachment;
 

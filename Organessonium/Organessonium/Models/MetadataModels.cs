@@ -4,6 +4,9 @@ namespace Organessonium.Models;
 
 public abstract class MetadataEntry
 {
+    [JsonPropertyName("modifiedAt")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ModifiedAt { get; set; }
     [JsonPropertyName("schemaVersion")]
     public int SchemaVersion { get; set; } = 2;
 
@@ -34,6 +37,17 @@ public sealed class TrashMetadata
 
 public sealed class FileMetadata : MetadataEntry
 {
+    [JsonPropertyName("versionId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? VersionId { get; set; }
+
+    [JsonPropertyName("versionUploadedAt")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? VersionUploadedAt { get; set; }
+
+    [JsonPropertyName("versions")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<FileVersion>? Versions { get; set; }
     public FileMetadata()
     {
         EntryType = "file";
@@ -79,6 +93,30 @@ public sealed class FileMetadata : MetadataEntry
     [JsonPropertyName("fav")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Favorite { get; set; }
+}
+
+public sealed class FileVersion
+{
+    [JsonPropertyName("versionId")]
+    public string VersionId { get; set; } = "";
+
+    [JsonPropertyName("archivedAt")]
+    public string ArchivedAt { get; set; } = "";
+
+    [JsonPropertyName("payload")]
+    public FileMetadata Payload { get; set; } = new();
+}
+
+public sealed class FileReplacement
+{
+    [JsonPropertyName("metadataMessageId")]
+    public string MetadataMessageId { get; set; } = "";
+
+    [JsonPropertyName("path")]
+    public string Path { get; set; } = "/";
+
+    [JsonPropertyName("metadata")]
+    public FileMetadata Metadata { get; set; } = new();
 }
 
 public sealed class FolderMetadata : MetadataEntry

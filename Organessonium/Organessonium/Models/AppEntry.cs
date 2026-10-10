@@ -4,6 +4,18 @@ namespace Organessonium.Models;
 
 public sealed class AppEntry
 {
+    [JsonPropertyName("modifiedAt")]
+    public string ModifiedAt { get; set; } = "";
+
+    [JsonPropertyName("versionId")]
+    public string VersionId { get; set; } = "";
+
+    [JsonPropertyName("versionUploadedAt")]
+    public string VersionUploadedAt { get; set; } = "";
+
+    [JsonPropertyName("versions")]
+    public List<FileVersion> Versions { get; set; } = [];
+
     [JsonPropertyName("name")]
     public string Name { get; set; } = "";
 
