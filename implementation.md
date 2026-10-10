@@ -2,6 +2,8 @@
 
 Especificação do transporte implementado no desktop C# WPF + WebView2. Este documento descreve o agrupamento de payloads e as referências necessárias para outro cliente ler, escrever e retomar o mesmo formato.
 
+Para o mobile, o objetivo é compatibilidade do protocolo, não copiar workers, buffers, filas ou metas de vazão do desktop. A seção `Flutter interoperability - multi-attachment` separa os contratos obrigatórios das políticas de desempenho adaptáveis a aparelhos com memória e processamento limitados.
+
 A especificação criptográfica anterior foi preservada, sem alterações, em [implementation old.md](<implementation old.md>). Encrypted metadata V1, conteúdo ORGAESGC V1, master keys standard/custom, KDF, AES-GCM e OSER não mudaram. Este documento complementa esses contratos, não os substitui.
 
 ## Multi-attachment payload transport
@@ -352,51 +354,68 @@ Não adicionados logs de INFO/DEBUG ou logs contendo metadados completos, chaves
 
 ## Flutter interoperability - multi-attachment
 
-O transporte descrito aqui está implementado e testado no desktop. Esta tarefa não alterou o código Flutter. Clientes móveis sem suporte a `chunkRefs` ainda precisam implementar este contrato para abrir os novos payloads agrupados; o fallback desktop não transforma o formato novo em algo que um leitor antigo entenda.
+Esta seção especifica compatibilidade de dados e transporte, não uma reprodução da arquitetura de desempenho do desktop. O transporte descrito aqui está implementado e testado no desktop; o código Flutter não foi alterado. Clientes móveis sem suporte a `chunkRefs` ainda precisam implementar esse contrato para abrir os payloads agrupados. Os resultados de vazão/RAM do desktop não são metas nem validação do mobile.
 
-A implementação Dart deve reproduzir exatamente:
+### Contratos obrigatórios para interoperabilidade
+
+A implementação Dart deve reproduzir exatamente os contratos de dados abaixo, independentemente de sua concorrência ou estratégia de buffers:
 
 1. Ler encrypted metadata V1 usando a especificação de [implementation old.md](<implementation old.md>), antes de interpretar arquivo/preview.
 2. Testar presença real da chave JSON `chunkRefs`; não confundir ausente com `null`, nem tentar `chunks` após detectar referências inválidas.
 3. Manter IDs como strings, validar índices e pares únicos, ordenar por `index`, deduplicar consultas por `messageId` e selecionar o anexo por `attachmentId`.
 4. Usar `ChunkIndex = index` zero-based no contexto e o número global do array completo como `ChunkCount`. O header ORGAESGC continua one-based internamente.
 5. Preservar os protocolos de cifra existentes. Ciphertext de cada attachment deve ser byte-compatible com o leitor C#; não cifrar o conjunto como um único payload.
-6. Criar forum post novo com um attachment inicial, depois multipart `payload_json` e `files[n]` com dez anexos, exceto o lote final incompleto/rejeição específica do servidor, com IDs locais correspondentes.
+6. Criar forum post novo com um attachment inicial, depois multipart `payload_json` e `files[n]` com IDs locais correspondentes. O leitor aceita mensagens com um a dez anexos; o mobile pode publicar lotes menores que os dez utilizados pelo desktop, conforme seus recursos.
 7. Validar toda a resposta por filename/tamanho/IDs, sem depender da ordem retornada. Persistir checkpoints inteiros de batch com layout versionado e referências completas.
 8. Preservar checkpoints e metadata unitários antigos. Não produzir `chunks` com IDs repetidos, nem migrar ao ler.
 9. Aplicar as mesmas regras à lista independente `preview.video480p.chunkRefs`; conservar thumbnails unitários, seek/prefetch e renovação por ID.
-10. Usar conteúdos de comprimento conhecido e streams assíncronos sob demanda, em vez de preparar dez byte arrays antes de criar cada request. A política local de memória pode ser diferente, sem alterar o protocolo.
+10. Garantir comprimento correto dos anexos, retry/cancelamento íntegros e consumo limitado de memória. Streams sob demanda, retenção de um pequeno lote ou regeneração validada são estratégias locais, não formatos remotos diferentes.
 
-### Pipeline a reproduzir no mobile
+Uma mensagem com somente um anexo também pode usar o layout novo com `chunkRefs`. Não escrever `chunks` legado apenas porque o batch móvel possui um arquivo. No sentido inverso, receber uma mensagem desktop com dez anexos não exige baixar seus 200 MiB juntos: buscar o JSON da mensagem, resolver os IDs e baixar/autenticar cada attachment necessário separadamente, em ordem lógica ou com concorrência limitada. Os dez anexos não formam um único blob criptográfico.
 
-Separar o número de corpos em transmissão do número de mensagens aguardando ACK. A vaga de transmissão deve ser adquirida antes de iniciar o request e liberada após consumir o último arquivo do multipart, inclusive em falha/cancelamento. A vaga de mensagem pendente permanece até validar/persistir a resposta. Usar filas limitadas e teto explícito de mensagens pendentes; o desktop usa 64, mas o mobile pode ter um orçamento menor de conexões e RAM. A contagem de anexos não depende desse orçamento: um request continua com dez descritores mesmo quando só existe RAM para um chunk em cada corpo ativo.
+### Políticas do desktop que não são exigências do mobile
 
-Cada stream de anexo deve aguardar admissão de memória, ler somente sua faixa, produzir ORGAESGC e alimentar o HTTP com backpressure. Só devolver/zerar o buffer depois que o consumidor HTTP terminar de utilizar seus bytes; não zerar um `Uint8List` ainda referenciado por eventos pendentes. Não montar o multipart inteiro nem gravar ciphertext temporário. Preparação lenta deve executar sem bloquear o isolate responsável pela UI.
+| Aspecto | Desktop atual | Exigência de compatibilidade no mobile |
+| --- | --- | --- |
+| Anexos por mensagem | Dez, salvo lote final/rejeição específica | Aceitar até dez ao ler; escrever de um a dez conforme orçamento local |
+| Corpos simultâneos | Até 16 workers | Concorrência baixa é válida, inclusive um corpo por vez |
+| Mensagens pendentes | Teto global de 64 | Fila pequena ou nenhuma sobreposição de ACK é válida |
+| Preparadores de cifra | Dois | Um preparador é válido; não duplicar buffers para copiar essa quantidade |
+| Limite de RAM | Job Object de 1 GB e headroom desktop | Definir orçamento adequado ao dispositivo; 1 GB não é orçamento recomendado para mobile |
+| Regeneração em retry | Nonce/digest voláteis, releitura e cifra validada | Pode reabrir ciphertext de um pequeno lote retido ou implementar regeneração validada |
+| Modo forçado | Opção de 16 workers | Não é necessário portar o botão ou ignorar limites adaptativos |
 
-No retry, recriar os conteúdos HTTP e readquirir worker/cota. Para reproduzir o comportamento desktop, guardar somente D/nonce por chunk e aplicar a regra da seção de regeneração segura. H/K/P precisam ser idênticos antes de reaplicar o nonce. Esses dados de replay não são enviados ao Discord nem adicionados a `chunkRefs`; a interoperabilidade remota continua baseada no envelope ORGAESGC e nos IDs de attachment. Não registrar digest dependente de chave, nonce acompanhado de contexto privado, chave ou plaintext em logs.
+Limites globais de requisição e cotas retornadas pelo Discord continuam obrigatórios em ambas as plataformas. Não usar mais threads, isolates ou conexões para contornar HTTP 429. O celular não precisa saturar a conexão nem manter transmissão ininterrupta para ser compatível.
 
-Exemplo de agendamento independente de biblioteca HTTP:
+### Estratégia móvel conservadora
+
+Como ponto de partida para implementação posterior, usar um arquivo ativo, um preparador e um request em transmissão; escolher um batch pequeno que caiba no orçamento. Esses valores são sugestões iniciais, não parâmetros já medidos em aparelho. Aumentar somente após medir RAM total, jank, temperatura, bateria e comportamento em segundo plano. O orçamento precisa incluir plaintext, ciphertext, cópias feitas pela biblioteca de cifra/HTTP, buffers de rede e memória da UI, não somente o tamanho do arquivo enviado.
+
+Ler somente as faixas necessárias, sem carregar o arquivo inteiro e sem montar um multipart de 200 MiB em RAM. Usar backpressure e cancelamento na preparação/transmissão. Só devolver/zerar o buffer depois que o consumidor HTTP terminar de utilizar seus bytes; não zerar um `Uint8List` ainda referenciado por eventos pendentes. Preparação lenta não pode bloquear o isolate responsável pela UI; ao separar processamento, considerar também o custo de transferir/copiar buffers entre isolates.
+
+O mobile pode aguardar o ACK de seu único batch antes de preparar outro, se isso for necessário para controlar memória e estabilidade. A separação entre workers de corpo e respostas pendentes é uma otimização opcional: se adotada, ambas as filas precisam de tetos baixos explícitos. Não copiar o teto de 64 mensagens do desktop nem exigir dez anexos por mensagem móvel.
+
+Para retries, recriar o multipart e respeitar a cota. Uma implementação simples pode manter somente o ciphertext do pequeno batch atual até confirmar/falhar/cancelar e reabrir esses mesmos bytes, sem recifrar. Se optar por liberar antes do ACK e regenerar, aplicar a seção de regeneração segura: H/K/P idênticos antes de reaplicar o nonce. O digest e o estado de replay não integram o formato remoto e não são obrigatórios quando os bytes cifrados são mantidos. Nunca reutilizar nonce com plaintext, chave ou AAD diferentes; não registrar estado dependente de chave nem dados privados em logs.
+
+Não alterar tamanhos/posições dos chunks de arquivos já publicados ou checkpoints existentes para economizar RAM. Reduzir quantidade de anexos por request e concorrência é independente disso. Esta especificação não presume que mudanças no tamanho lógico dos chunks sejam compatíveis com todos os caminhos de vídeo/seek; isso exige validação separada do protocolo, não uma adaptação silenciosa de desempenho.
+
+Exemplo conservador de agendamento, sem obrigação de sobrepor ACKs:
 
 ```text
-mensagem = adquirir vaga limitada de ACK pendente
-descritores = próximos dez índices não confirmados
-para cada tentativa:
-    transmissão = adquirir worker e respeitar cotas Discord
-    criar multipart reabrível de comprimentos conhecidos
-    para cada anexo solicitado pelo HTTP:
-        aguardar orçamento de RAM
-        ler faixa; validar estado de replay; cifrar ORGAESGC
-        emitir bytes com backpressure e progresso
-        zerar/devolver buffers e orçamento
-    devolver worker de transmissão, antes de esperar ACK
-    em 429/falha transitória: aguardar política existente e repetir tentativa
-    em sucesso: validar todos os IDs/tamanhos; persistir batch atomicamente
-descartar replay e devolver vaga de mensagem
+abrir contexto e checkpoint compatíveis
+enquanto existem índices não confirmados:
+    selecionar de um a dez anexos que caibam na política móvel
+    preparar somente esse pequeno lote ou seus streams sob demanda
+    respeitar workers/cotas e transmitir com progresso e cancelamento
+    aguardar ACK; em falha transitória/429, aplicar backoff e retry íntegro
+    validar todos os IDs/tamanhos; persistir referências do batch atomicamente
+    liberar buffers/estado antes de avançar para o próximo lote
+publicar metadata compatível somente após confirmar o payload completo
 ```
 
-Aplicar também em arquivos retomados layout 2, prévias 480p, salvamento de Markdown agrupado e uploads sincronizados. Layout unitário antigo e downloads permanecem como descritos nas seções de compatibilidade. Um ACK pendente não deve impedir o envio de outros batches se existir worker, memória e cota disponíveis. Testar ativação/desativação do modo forçado durante uma transferência, mantendo os limites reais mesmo no modo forçado.
+Aplicar os mesmos contratos aos recursos que existirem no mobile, incluindo retomadas layout 2 e prévias 480p. Não é requisito portar sincronização de pastas entre PCs, salvamento de Markdown ou controles de paralelismo exclusivos do desktop. Layout unitário antigo e downloads permanecem como descritos nas seções de compatibilidade.
 
-Testes futuros entre plataformas: desktop upload -> mobile download/preview/seek; mobile upload -> desktop download/preview/seek; retomada com chunks confirmados; metadados antigos nas duas versões; corrupção e attachment ausente sem fallback inseguro. Usar o vetor criptográfico anterior para verificar cifra, e os exemplos/fixtures de referências desta especificação para verificar o transporte.
+Testes futuros entre plataformas: mensagem desktop com dez anexos -> mobile download/preview/seek sem baixar o batch inteiro para RAM; mobile upload com um/dois anexos por mensagem -> desktop download/preview/seek; retomada com chunks confirmados; metadados antigos nas duas versões; corrupção e attachment ausente sem fallback inseguro. Usar o vetor criptográfico anterior para verificar cifra e os exemplos/fixtures de referências para verificar transporte. Validar em aparelhos reais de memória limitada, inclusive pausa/cancelamento, falhas de rede e retorno do segundo plano, sem tratar o benchmark desktop como evidência mobile.
 
 ## Validação e arquivos relacionados
 
