@@ -113,19 +113,20 @@ internal static partial class Program
             api = new DiscordApiClient(Read("botToken"), new HttpClient(trace));
             var crypto = CreateEncryptionService(out _);
             var source = new FileInfo(Path.Combine(directory.FullName, "test-source.bin"));
-            await using (var file = source.Create()) file.SetLength(1024L * 1024 * 1024);
+            await using (var file = source.Create()) file.SetLength(2L * 1024 * 1024 * 1024);
             var count = ArchiveSplitter.GetPartCount(source.Length, EncryptionService.MaximumPlaintextPayloadBytes);
             var context = new EncryptedPayloadContext(Guid.NewGuid().ToString("N"), crypto.CreateFileEncryption(EncryptionModes.Standard), EncryptedPayloadRoles.Original, 0, count);
             using var memory = new UploadMemoryCoordinator(workers, forceParallelism: force);
             using var gate = new AdaptiveUploadGate(workers, !force);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             var uploader = new ForumUploader(api, Read("appsForumId"));
             Console.WriteLine($"CADENCE workers={workers} force={force} batchLimit={RamUploadBudget.PipelineBatchChunks(DiscordLimits.AttachmentBytes)}");
             var upload = uploader.UploadResumableGeneratedAsync("test-source.bin", count,
-                index => memory.PreparePartAsync(crypto, source, source.Length, EncryptionService.MaximumPlaintextPayloadBytes, context.WithChunkIndex(index), timeout.Token),
+                index => memory.PreparePartAsync(crypto, source, source.Length, EncryptionService.MaximumPlaintextPayloadBytes, context.WithChunkIndex(index), timeout.Token, deferBuffers: true),
                 "", "", new Dictionary<int, string>(), cancellationToken: timeout.Token, maxParallelParts: workers,
                 adaptiveUploadGate: gate, encryptedPayload: context, useAttachmentReferences: true,
                 batchPreparationGate: memory.BatchPreparationGate,
+                streamPreparedParts: true,
                 onPartTransferProgress: trace.OnWire,
                 onRateLimitWait: wait => { Console.WriteLine($"WAIT {wait.TotalSeconds:F2}s"); return Task.CompletedTask; });
             await trace.SampleUntilAsync(upload);

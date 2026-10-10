@@ -5,6 +5,7 @@ internal static class RamUploadBudget
     internal const int MaxResidentChunks = 20;
     internal static readonly UploadChunkBufferPool Pool = new();
     internal static readonly SemaphoreSlim Batches = new(16, 16);
+    internal static readonly SemaphoreSlim PendingMessages = new(DiscordLimits.MaxPendingUploadMessages, DiscordLimits.MaxPendingUploadMessages);
     internal static readonly SemaphoreSlim Chunks = new(16 * DiscordLimits.AttachmentsPerMessage, 16 * DiscordLimits.AttachmentsPerMessage);
     internal static readonly SemaphoreSlim Preparation = new(2, 2);
     private const long ManagedAdmissionBytes = 448L * 1024 * 1024;

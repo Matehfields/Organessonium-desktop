@@ -67,6 +67,8 @@ internal static partial class Program
         ("ramOnlyLargeUploadAndMetrics", RamOnlyLargeUploadAndMetricsAsync),
         ("uploadPreparationOverlapsSending", UploadPreparationOverlapsSendingAsync),
         ("uploadQuotaSnapshotsKeepSending", UploadQuotaSnapshotsKeepSendingAsync),
+        ("tenAttachmentUploadsOverlapAcknowledgements", TenAttachmentUploadsOverlapAcknowledgementsAsync),
+        ("streamingUploadReplayAndSourceIntegrity", StreamingUploadReplayAndSourceIntegrityAsync),
         ("liveUploadWorkersAndSlowStorage", LiveUploadWorkersAndSlowStorageAsync),
         ("multiAttachmentEncryptedResumeDownload", MultiAttachmentEncryptedResumeDownloadAsync),
         ("multiAttachmentMetadataCompatibility", MultiAttachmentMetadataCompatibilityAsync),

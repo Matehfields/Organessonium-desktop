@@ -19,7 +19,8 @@ public sealed partial class ForumUploader
         Func<TimeSpan, Task>? onWait, int maxParallelParts, SemaphoreSlim? uploadGate,
         EncryptedPayloadContext? encryption, Action<FileInfo>? cleanupPart,
         AdaptiveUploadGate? adaptiveGate, Action<bool>? onActivity, SemaphoreSlim? preparationGate,
-        Action<int, long>? onPartTransferProgress = null, int maxPreparedPartBytes = DiscordLimits.AttachmentBytes)
+        Action<int, long>? onPartTransferProgress = null, int maxPreparedPartBytes = DiscordLimits.AttachmentBytes,
+        bool streamPreparedParts = false)
     {
         if (encryption == null)
             throw new InvalidDataException("Uploads novos agrupados exigem o contexto de criptografia dos chunks.");
@@ -36,10 +37,13 @@ public sealed partial class ForumUploader
         var progressSync = new object();
         uploadedParts?.Invoke(completed);
         using var localPreparationGate = preparationGate == null ? new SemaphoreSlim(2, 2) : null;
-        var preparationSlots = preparationGate ?? localPreparationGate!;
+        var preparationSlots = streamPreparedParts ? RamUploadBudget.PendingMessages : preparationGate ?? localPreparationGate!;
+        using var localBodyGate = streamPreparedParts && adaptiveGate == null ? new AdaptiveUploadGate(maxParallelParts, false) : null;
+        var bodyGate = streamPreparedParts ? adaptiveGate ?? localBodyGate : null;
 
         async Task InSlotAsync(Func<Task> action, Func<long> sentBytes)
         {
+            if (streamPreparedParts) { await action().ConfigureAwait(false); return; }
             using var lease = adaptiveGate == null ? null : await adaptiveGate.EnterAsync(token);
             if (adaptiveGate == null && uploadGate != null) await uploadGate.WaitAsync(token);
             try
@@ -96,7 +100,8 @@ public sealed partial class ForumUploader
             try
             {
                 var message = await _discord.SendFilesMessageAsync(threadId, _metadata.EncodePayloadReference(content), files,
-                    token, onWait, serializeRoute: false, onTransferActivity: onActivity, waitForTransientNetwork: true);
+                    token, onWait, serializeRoute: false, onTransferActivity: onActivity, waitForTransientNetwork: true,
+                    uploadBodyGate: bodyGate, uploadBodySharedGate: adaptiveGate == null ? uploadGate : null);
                 await ConfirmAsync(message, indices, files);
             }
             catch (DiscordApiException ex) when (files.Count > 1 && IsAttachmentLimitRejection(ex))
@@ -130,12 +135,13 @@ public sealed partial class ForumUploader
             {
                 await InSlotAsync(async () =>
                 {
-                    using var initialReservation = preparationGate == null ? null : await RamUploadBudget.ReserveBytesAsync(maxPreparedPartBytes, token);
+                    using var initialReservation = preparationGate == null || streamPreparedParts ? null : await RamUploadBudget.ReserveBytesAsync(maxPreparedPartBytes, token);
                     initial.Add(await Task.Run(() => preparePart(0), token));
                     initial[0].TransferProgress = bytes => onPartTransferProgress?.Invoke(0, bytes);
                     var post = await _discord.CreateForumPostWithFileDetailedAsync(_forumId, EncryptedThreadTitle(),
                         PayloadMessage(encryption.WithChunkIndex(0), totalParts), initial[0], token, onWait,
-                        serializeRoute: false, onTransferActivity: onActivity, waitForTransientNetwork: true);
+                        serializeRoute: false, onTransferActivity: onActivity, waitForTransientNetwork: true,
+                        uploadBodyGate: bodyGate, uploadBodySharedGate: adaptiveGate == null ? uploadGate : null);
                     threadId = post.ThreadId;
                     var message = post.Attachments is { Count: > 0 }
                         ? new DiscordMessageDto { Id = post.MessageId, Attachments = post.Attachments.ToList() }
@@ -148,12 +154,8 @@ public sealed partial class ForumUploader
 
         var needsInitialChunk = threadId.Length == 0;
         var batchSize = Volatile.Read(ref _attachmentsPerBatch);
-        if (preparationGate != null)
-        {
+        if (preparationGate != null && !streamPreparedParts)
             batchSize = Math.Min(batchSize, RamUploadBudget.PipelineBatchChunks(maxPreparedPartBytes));
-            batchSize = Math.Min(batchSize, Math.Clamp(DiscordLimits.UploadMessageTargetBytes / maxPreparedPartBytes,
-                1, DiscordLimits.AttachmentsPerMessage));
-        }
         var batches = Enumerable.Range(0, totalParts).Where(index => references[index] == null && (!needsInitialChunk || index != 0))
             .Chunk(batchSize).ToArray();
         var ready = Channel.CreateBounded<PreparedBatch>(new BoundedChannelOptions(1)
@@ -178,7 +180,7 @@ public sealed partial class ForumUploader
                     {
                         await preparationSlots.WaitAsync(token).ConfigureAwait(false);
                         reserved = true;
-                        if (preparationGate != null)
+                        if (preparationGate != null && !streamPreparedParts)
                             memoryReservation = await RamUploadBudget.ReserveBytesAsync((long)indices.Length * maxPreparedPartBytes, token).ConfigureAwait(false);
                         foreach (var index in indices)
                         {
@@ -187,7 +189,7 @@ public sealed partial class ForumUploader
                             file.TransferProgress = bytes => onPartTransferProgress?.Invoke(index, bytes);
                             files.Add(file);
                         }
-                        if (preparationGate == null)
+                        if (preparationGate == null && !streamPreparedParts)
                         {
                             preparationSlots.Release();
                             reserved = false;
@@ -228,14 +230,14 @@ public sealed partial class ForumUploader
             finally { while (ready.Reader.TryRead(out var abandoned)) abandoned.Dispose(); }
             throw;
         }
-        var workerLimit = adaptiveGate == null ? Math.Clamp(maxParallelParts, 1, 16) : 16;
+        var workerLimit = streamPreparedParts ? DiscordLimits.MaxPendingUploadMessages : adaptiveGate == null ? Math.Clamp(maxParallelParts, 1, 16) : 16;
         var workers = Enumerable.Range(0, Math.Min(workerLimit, batches.Length)).Select(async workerIndex =>
         {
             try
             {
                 while (true)
                 {
-                    if (adaptiveGate != null && !adaptiveGate.Forced && workerIndex >= Math.Clamp(maxParallelParts, 1, 16))
+                    if (!streamPreparedParts && adaptiveGate != null && !adaptiveGate.Forced && workerIndex >= Math.Clamp(maxParallelParts, 1, 16))
                     {
                         if (ready.Reader.Completion.IsCompleted) return;
                         await Task.Delay(50, token).ConfigureAwait(false);

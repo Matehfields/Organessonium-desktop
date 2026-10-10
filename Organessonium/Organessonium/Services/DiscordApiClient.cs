@@ -388,7 +388,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             title,
             content,
             file.Name,
-            file.OpenRead,
+            _ => BuildFileContent(file.OpenRead),
             cancellationToken,
             onRateLimitWait,
             serializeRoute,
@@ -405,7 +405,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool serializeRoute = true,
         Action<bool>? onTransferActivity = null,
-        bool waitForTransientNetwork = false)
+        bool waitForTransientNetwork = false,
+        AdaptiveUploadGate? uploadBodyGate = null,
+        SemaphoreSlim? uploadBodySharedGate = null)
     {
         ArgumentNullException.ThrowIfNull(file);
         return CreateForumPostWithFileDetailedAsync(
@@ -413,12 +415,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             title,
             content,
             file.FileName,
-            file.OpenRead,
+            slot => BuildUploadPartContent(file, slot == null ? null : slot.Complete),
             cancellationToken,
             onRateLimitWait,
             serializeRoute,
             onTransferActivity,
-            waitForTransientNetwork);
+            waitForTransientNetwork,
+            uploadBodyGate == null && uploadBodySharedGate == null ? null : () => new UploadBodySlot(uploadBodyGate, uploadBodySharedGate, file.Length));
     }
 
     private async Task<DiscordForumPostResult> CreateForumPostWithFileDetailedAsync(
@@ -426,12 +429,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string title,
         string content,
         string fileName,
-        Func<Stream> openRead,
+        Func<UploadBodySlot?, HttpContent> createContent,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
         bool serializeRoute,
         Action<bool>? onTransferActivity,
-        bool waitForTransientNetwork)
+        bool waitForTransientNetwork,
+        Func<UploadBodySlot>? bodySlotFactory = null)
     {
         for (var attempt = 0; attempt < 3; attempt++)
         {
@@ -442,12 +446,12 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     title,
                     content,
                     fileName,
-                    openRead,
+                    createContent,
                     cancellationToken,
                     onRateLimitWait,
                     serializeRoute,
                     onTransferActivity,
-                    waitForTransientNetwork);
+                    waitForTransientNetwork, bodySlotFactory);
             }
             catch (DiscordApiException ex) when (ex.DiscordCode == MaxActiveThreadsCode && attempt < 2)
             {
@@ -534,17 +538,20 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string title,
         string content,
         string fileName,
-        Func<Stream> openRead,
+        Func<UploadBodySlot?, HttpContent> createContent,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
         bool serializeRoute,
         Action<bool>? onTransferActivity,
-        bool waitForTransientNetwork)
+        bool waitForTransientNetwork,
+        Func<UploadBodySlot>? bodySlotFactory = null)
     {
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
-            request.Content = BuildForumThreadContent(title, content, fileName, openRead);
+            var slot = bodySlotFactory?.Invoke();
+            if (slot != null) request.Options.Set(UploadBodySlot.RequestKey, slot);
+            request.Content = BuildForumThreadContent(title, content, fileName, () => createContent(slot));
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
@@ -710,16 +717,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         bool waitForTransientNetwork = false)
     {
         ArgumentNullException.ThrowIfNull(file);
-        return SendFileMessageAsync(
-            channelId,
-            content,
-            file.FileName,
-            file.OpenRead,
-            cancellationToken,
-            onRateLimitWait,
-            serializeRoute,
-            onTransferActivity,
-            waitForTransientNetwork);
+        return SendFilesMessageAsync(channelId, content, [file], cancellationToken,
+            onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
     }
 
     private async Task<DiscordMessageDto> SendFileMessageAsync(
@@ -733,7 +732,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Action<bool>? onTransferActivity,
         bool waitForTransientNetwork)
     {
-        return await SendFilesMessageAsync(channelId, content, [(fileName, openRead)], cancellationToken,
+        return await SendFilesMessageAsync(channelId, content, [(fileName, _ => BuildFileContent(openRead))], cancellationToken,
             onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
     }
 
@@ -745,7 +744,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool serializeRoute = true,
         Action<bool>? onTransferActivity = null,
-        bool waitForTransientNetwork = false)
+        bool waitForTransientNetwork = false,
+        AdaptiveUploadGate? uploadBodyGate = null,
+        SemaphoreSlim? uploadBodySharedGate = null)
     {
         ArgumentNullException.ThrowIfNull(files);
         ValidateAttachmentCount(files.Count);
@@ -756,20 +757,26 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 throw new ArgumentException("Um attachment excede o limite individual configurado para o Discord.", nameof(files));
         }
         return SendFilesMessageAsync(channelId, content,
-            files.Select(file => (file.FileName, (Func<Stream>)file.OpenRead)).ToArray(), cancellationToken,
-            onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
+            files.Select((file, index) => (file.FileName, (Func<UploadBodySlot?, HttpContent>)(slot =>
+                BuildUploadPartContent(file, index == files.Count - 1 && slot != null ? slot.Complete : null)))).ToArray(), cancellationToken,
+            onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork,
+            uploadBodyGate == null && uploadBodySharedGate == null ? null : () => new UploadBodySlot(uploadBodyGate, uploadBodySharedGate, files.Sum(file => file.Length)));
     }
 
     private async Task<DiscordMessageDto> SendFilesMessageAsync(
-        string channelId, string content, IReadOnlyList<(string FileName, Func<Stream> OpenRead)> files,
+        string channelId, string content, IReadOnlyList<(string FileName, Func<UploadBodySlot?, HttpContent> CreateContent)> files,
         CancellationToken cancellationToken, Func<TimeSpan, Task>? onRateLimitWait,
-        bool serializeRoute, Action<bool>? onTransferActivity, bool waitForTransientNetwork)
+        bool serializeRoute, Action<bool>? onTransferActivity, bool waitForTransientNetwork,
+        Func<UploadBodySlot>? bodySlotFactory = null)
     {
         ValidateAttachmentCount(files.Count);
         using var response = await SendAsync(() =>
         {
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
-            request.Content = BuildMessageFilesContent(content, files);
+            var slot = bodySlotFactory?.Invoke();
+            if (slot != null) request.Options.Set(UploadBodySlot.RequestKey, slot);
+            request.Content = BuildMessageFilesContent(content, files.Select(file =>
+                (file.FileName, (Func<HttpContent>)(() => file.CreateContent(slot)))).ToArray());
             return request;
         }, cancellationToken, onRateLimitWait, serializeRoute, onTransferActivity, waitForTransientNetwork);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
@@ -887,7 +894,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string title,
         string content,
         string fileName,
-        Func<Stream> openRead)
+        Func<HttpContent> createContent)
     {
         DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new
@@ -902,7 +909,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
         var multipart = new MultipartFormDataContent();
         multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
-        AddFileContent(multipart, fileName, openRead);
+        AddFileContent(multipart, fileName, createContent);
         return multipart;
     }
 
@@ -910,10 +917,10 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         string fileName,
         Func<Stream> openRead)
-        => BuildMessageFilesContent(content, [(fileName, openRead)]);
+        => BuildMessageFilesContent(content, [(fileName, () => BuildFileContent(openRead))]);
 
     private static MultipartFormDataContent BuildMessageFilesContent(
-        string content, IReadOnlyList<(string FileName, Func<Stream> OpenRead)> files)
+        string content, IReadOnlyList<(string FileName, Func<HttpContent> CreateContent)> files)
     {
         ValidateAttachmentCount(files.Count);
         DiscordLimits.ValidateMessage(content);
@@ -929,7 +936,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         {
             multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
             for (var index = 0; index < files.Count; index++)
-                AddFileContent(multipart, files[index].FileName, files[index].OpenRead, index);
+                AddFileContent(multipart, files[index].FileName, files[index].CreateContent, index);
             return multipart;
         }
         catch { multipart.Dispose(); throw; }
@@ -941,11 +948,11 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             throw new ArgumentException($"A mensagem deve conter entre 1 e {DiscordLimits.AttachmentsPerMessage} attachments.");
     }
 
-    private static void AddFileContent(MultipartFormDataContent multipart, string fileName, Func<Stream> openRead, int index = 0)
+    private static void AddFileContent(MultipartFormDataContent multipart, string fileName, Func<HttpContent> createContent, int index = 0)
     {
         try
         {
-            multipart.Add(BuildFileContent(openRead), $"files[{index}]", fileName);
+            multipart.Add(createContent(), $"files[{index}]", fileName);
         }
         catch
         {
@@ -953,6 +960,9 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             throw;
         }
     }
+
+    private static HttpContent BuildUploadPartContent(PreparedUploadPart file, Action? onCopied = null) =>
+        file.Deferred || onCopied != null ? UploadPartContent.Create(file, onCopied) : BuildFileContent(file.OpenRead);
 
     private static StreamContent BuildFileContent(Func<Stream> openRead)
     {
@@ -979,6 +989,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = await Task.Run(requestFactory, cancellationToken).ConfigureAwait(false);
+            using var bodySlot = request.Options.TryGetValue(UploadBodySlot.RequestKey, out var slot) ? slot : null;
+            if (bodySlot != null) await bodySlot.EnterAsync(cancellationToken).ConfigureAwait(false);
             var routeKey = DiscordRequestLimiter.RouteKey(request);
             var routeLock = serializeRoute
                 ? _routeLocks.GetOrAdd(routeKey, _ => new SemaphoreSlim(1, 1))
@@ -1003,6 +1015,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 }
                 catch (HttpRequestException) when (shouldWaitForTransientNetwork || attempt < 11)
                 {
+                    bodySlot?.Dispose();
                     await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
                     continue;
                 }
@@ -1012,6 +1025,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                 }
                 finally
                 {
+                    bodySlot?.Dispose();
                     if (transferActivityStarted)
                     {
                         onTransferActivity!(false);

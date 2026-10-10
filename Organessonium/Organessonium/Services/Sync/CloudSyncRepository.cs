@@ -243,7 +243,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         try
         {
             var result = await uploader.UploadResumableGeneratedAsync(transfer.FileName, count,
-                index => memory.PreparePartAsync(_encryption, snapshot, local.Size, chunkBytes, encryption.WithChunkIndex(index), token),
+                index => memory.PreparePartAsync(_encryption, snapshot, local.Size, chunkBytes, encryption.WithChunkIndex(index), token,
+                    deferBuffers: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment),
                 transfer.ThreadId, transfer.BatchId, transfer.UploadedChunks.ToDictionary(c => c.Index, c => c.MessageId),
                 completed => progress(new(transfer.TransferId, local.RelativePath, "upload", completed * 90d / count, "uploading")),
                 async chunk =>
@@ -260,6 +261,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                         { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
                 onBatchUploaded: batch => _transfers.MarkUploadChunksAsync(transfer, batch, token),
                 batchPreparationGate: memory.BatchPreparationGate,
+                streamPreparedParts: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
                 maxPreparedPartBytes: checked(chunkBytes + EncryptionService.EnvelopeOverheadBytes));
             if (result.ChunkCount != count || (result.ChunkReferences == null && result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace)))
                 throw new InvalidDataException("O upload não confirmou todos os chunks.");

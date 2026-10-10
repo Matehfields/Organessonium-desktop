@@ -220,9 +220,28 @@ internal sealed class UploadMemoryCoordinator : IDisposable
     }
 
     internal Task<PreparedUploadPart> PreparePartAsync(EncryptionService encryption, FileInfo source,
-        long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token) => Task.Run(async () =>
+        long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token,
+        bool deferBuffers = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!deferBuffers) return PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, token);
+        var offset = checked((long)context.ChunkIndex * chunkBytes);
+        var length = checked((int)Math.Min(chunkBytes, Math.Max(0, expectedLength - offset)));
+        var replay = new EncryptedUploadReplayState();
+        return Task.FromResult(new PreparedUploadPart(
+            EncryptedPayloadProtocol.FileName(context.Role, context.ChunkIndex, context.ChunkCount),
+            checked(length + EncryptionService.EnvelopeOverheadBytes), length,
+            async sendToken =>
+            {
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, sendToken);
+                return await PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, linked.Token, replay).ConfigureAwait(false);
+            }, replay));
+    }
+
+    private static Task<PreparedUploadPart> PrepareMaterializedAsync(EncryptionService encryption, FileInfo source,
+        long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token,
+        EncryptedUploadReplayState? replay = null) => Task.Run(async () =>
+    {
         source.Refresh();
         if (source.Length != expectedLength) throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
         var offset = checked((long)context.ChunkIndex * chunkBytes);
@@ -238,7 +257,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             lease = RamUploadBudget.Pool.Rent(length, checked(length + EncryptionService.EnvelopeOverheadBytes),
                 () => RamUploadBudget.Chunks.Release());
             var encryptedLength = await encryption.EncryptFileRangeIntoAsync(source, offset, length,
-                lease.Plaintext, lease.Ciphertext, context, token).ConfigureAwait(false);
+                lease.Plaintext, lease.Ciphertext, context, token, replay).ConfigureAwait(false);
             lease.ReleasePlaintext();
             return new PreparedUploadPart(EncryptedPayloadProtocol.FileName(context.Role, context.ChunkIndex, context.ChunkCount),
                 encryptedLength, length, lease);

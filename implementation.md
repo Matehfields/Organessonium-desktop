@@ -173,7 +173,7 @@ A mensagem Discord não expõe esse JSON em claro. O leitor novo localiza anexos
 
 Quando não existe thread, o desktop cria o post com apenas o chunk 0 pelo endpoint de forum post. Ele valida e salva o `messageId` e o `attachmentId` inicial. Não assume que esse endpoint aceite dez arquivos.
 
-Os índices restantes são agrupados em até dez por chamada a `POST /channels/{threadId}/messages`. Para 26 chunks, quando o orçamento admite dez por lote, o caso sem falhas é: 1 no post inicial, depois 10, 10 e 5. O desktop pode reduzir o agrupamento para manter espaço para preparação antecipada. Mensagens podem ser enviadas em paralelo; a ordem de conclusão não determina a ordem do arquivo. A preparação do sucessor já pode ocorrer durante o post inicial; seu envio exige o thread confirmado.
+Os índices restantes são agrupados em dez por chamada a `POST /channels/{threadId}/messages`, exceto o lote final incompleto. Para 26 chunks, o caso sem falhas é: 1 no post inicial, depois 10, 10 e 5. A pressão de RAM faz a preparação de anexos aguardar, não reduz a quantidade por mensagem. Uma rejeição específica de tamanho/quantidade do servidor ainda utiliza a redução já existente. Mensagens podem ser enviadas em paralelo; a ordem de conclusão não determina a ordem do arquivo. Descritores podem ser preparados durante o post inicial; o envio das mensagens exige o thread confirmado.
 
 Uma prévia 480p ou atualização Markdown dentro de um thread existente não precisa criar outro post, então pode agrupar desde seu índice 0. Um checkpoint já com thread continua nesse mesmo thread.
 
@@ -201,27 +201,29 @@ Na resposta, mapear cada arquivo enviado pelo filename técnico exato; conferir 
 carregar ou criar contexto de cifra e layout do checkpoint
 validar referências já confirmadas
 pendentes = índices globais menos confirmados e o chunk inicial se falta thread
-selecionar agrupamento de até 10, com espaço para envio e sucessor
+selecionar agrupamento de 10 (último lote pode ser incompleto)
 iniciar produtor independente das vagas HTTP:
-    aguardar espaço na fila limitada antes de ler outra faixa
-    reservar os bytes do batch no orçamento global
-    para cada índice:
-        ler somente a faixa daquele chunk
-        cifrar com índice e quantidade global, sem temporário de ciphertext
-    publicar batch na fila (capacidade: um lote pronto por arquivo)
+    adquirir uma das 64 vagas globais de mensagens pendentes
+    criar descritores de faixa/filename/tamanho/contexto, sem ler o arquivo
+    publicar descritores na fila (capacidade: um lote por arquivo)
 se não existe thread:
-    preparar e cifrar chunk 0; criar forum post com um attachment
+    criar forum post com o descriptor do chunk 0, usando a mesma transmissão sob demanda
     validar resposta e persistir referência inicial
-iniciar consumidores com workers de rede limitados:
-    obter batch pronto e vaga HTTP
-    enviar multipart com streams independentes
-    reportar bytes transmitidos enquanto o stream HTTP avança
+iniciar consumidores de mensagens limitados globalmente a 64:
+    criar multipart com até dez conteúdos de comprimento conhecido
+    adquirir worker de transmissão; respeitar rate limiter antes do request
+    para cada attachment que o HTTP está prestes a consumir:
+        reservar os bytes desse anexo no orçamento global
+        ler somente sua faixa; cifrar em RAM com contexto global
+        transmitir e reportar bytes; zerar/devolver buffers e reserva
+    ao terminar o último attachment, devolver worker de transmissão
+    aguardar resposta sem ocupar worker nem buffers dos anexos
     validar todos os attachments retornados
     salvar um checkpoint contendo todos os chunks do request
     publicar número de chunks confirmados, sem contar mensagens
-    zerar/devolver buffers e liberar reserva de RAM
+    descartar nonce/digest/descritores e liberar vaga de mensagem pendente
 em falha ou cancelamento:
-    cancelar produtor e consumidores; limpar também o lote da fila
+    cancelar produtor e consumidores; liberar vagas e dados também do lote da fila
 validar referências completas e ordená-las por índice
 publicar metadata cifrado com chunkRefs, sem chunks
 ```
@@ -301,27 +303,33 @@ O estado mantém `videoPreview480pChunkRefs` para uma prévia agrupada concluíd
 
 ## Memória, concorrência, retries e limites
 
-O transporte mantém o teto de dez attachments, mas o agendador de produção usa `DiscordLimits.UploadMessageTargetBytes = 40 MiB` como alvo de corpo útil por mensagem. Isso resulta em duas partes completas de 20 MiB ou até dez partes menores. Não altera ORGAESGC, offsets, tamanho lógico dos chunks, `chunkRefs`, checkpoint nem limites da API. A escolha reduz o tempo entre confirmações e libera buffers progressivamente; um multipart de dez partes pode esperar dezenas de segundos após enviar seu corpo, bloqueando o sucessor mesmo com leitura antecipada.
+O agendador de produção mantém dez attachments por mensagem. `DiscordLimits.UploadMessageTargetBytes = AttachmentsPerMessage * AttachmentBytes` corresponde a 200 MiB com a configuração atual. Não há buffer de 200 MiB por mensagem: os conteúdos HTTP são descritores de anexos preparados sob demanda. ORGAESGC, offsets, tamanho dos chunks, `chunkRefs`, checkpoint e limites da API não mudaram.
 
 Em `DiscordRequestLimiter`, uploads multipart não serializados têm reservas com sequência. Headers novos marcam a sequência da requisição respondida como limite do snapshot; reservas posteriores ainda ocupam vagas, e respostas antigas não devolvem cotas. Expirar uma janela renova a cota de uploads sem descontar reservas que pertencem à janela anterior. As demais chamadas conservam o desconto de todas as requisições em andamento. O mecanismo não ignora `Remaining = 0`, backoff global/local, `retry_after`, cancelamento nem os 45 requests/s globais configurados.
 
-Cada `PreparedUploadPart` mantém um chunk cifrado em RAM. Não há fallback de ciphertext temporário no SSD. `RamUploadBudget` coordena pool e reservas compartilhadas entre biblioteca, retomadas, sincronização e descriptografia de downloads. Dois workers de leitura/cifra limitam o plaintext transitório. Até 160 partes pequenas podem ocupar vagas, mas seu total de bytes passa pela admissão global, que reserva também dois buffers de até 20 MiB. Partes grandes ficam limitadas a aproximadamente 400 MiB de ciphertext, e menos quando C#/WebView2 utilizam o restante do orçamento. Buffers devolvidos são zerados; o pool é reutilizado e pode descartar buffers livres sob pressão.
+`UploadMemoryCoordinator.PreparePartAsync(..., deferBuffers: true)` devolve um `PreparedUploadPart` com filename técnico, comprimento cifrado, tamanho lógico, contexto/fábrica de preparação e estado de replay pequeno. `UploadPartContent` declara o comprimento antes de transmitir, mas só lê/cifra quando `SerializeToStreamAsync` consome aquele anexo. `PreparedUploadPart.CopyToAsync` reserva seus bytes, prepara o chunk, transmite em blocos de até 64 KiB e libera/zera o buffer imediatamente após a cópia. Não espera a resposta da mensagem. Não há fallback de ciphertext temporário no SSD.
 
-Um produtor por arquivo prepara enquanto consumidores transmitem. A fila bounded tem capacidade de um lote pronto e exige espaço antes da leitura seguinte. A reserva pertence ao batch até concluir envio/retries, confirmação ou descarte. A vaga de rede não engloba preparação. `maxPreparedPartBytes` informa um limite superior do attachment cifrado, incluindo os 70 bytes ORGAESGC; o default é `DiscordLimits.AttachmentBytes`. O agrupamento considera espaço para um lote em envio e seu sucessor. Diminuir o agrupamento HTTP nunca altera tamanho, índice ou cifra dos chunks.
+`RamUploadBudget` continua compartilhado entre biblioteca, retomadas, sincronização e descriptografia de downloads. Dois workers de leitura/cifra limitam o plaintext transitório. Reservas por bytes incluem headroom para esses dois buffers e ajustam-se ao consumo de C#/WebView2; o orçamento de ciphertext permanece em torno de 400 MiB, não aumenta com a quantidade de mensagens pendentes. Os caminhos unitários/materializados conservam as reservas anteriores de batch; o upload agrupado usa `streamPreparedParts: true` e não faz essa reserva de 200 MiB. `maxPreparedPartBytes` continua validando o limite superior do anexo cifrado, incluindo os 70 bytes ORGAESGC.
+
+Há três limites independentes: até 16 workers de transmissão configurados/adaptativos, dois preparadores de chunks e `DiscordLimits.MaxPendingUploadMessages = 64` vagas globais para mensagens em preparação/envio/confirmação. A fila por arquivo contém um batch de descritores. `UploadBodySlot` adquire a vaga de transmissão antes do rate limiter/request e devolve-a ao terminar o último anexo; a resposta pode continuar pendente. Uma mensagem ocupa sua vaga global até confirmar/persistir ou falhar/cancelar. Esses limites impedem filas e conexões pendentes ilimitadas, sem manter centenas de MiB por ACK. A quantidade de workers regula corpos em transmissão, não o número de respostas pendentes. Cada retry recebe outro slot de transmissão e passa novamente pela fila REST.
 
 Na execução normal/background, `AppMemoryBudget` configura um Windows Job Object com `JOB_OBJECT_LIMIT_JOB_MEMORY = 1.000.000.000` bytes, incluindo processos WebView2 registrados. Esse limite controla memória privada comprometida, conforme [a definição do Windows](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information), não páginas compartilhadas/GPU ou cache de disco. O runtime configura `System.GC.HeapHardLimit = 536870912` bytes. A admissão utiliza alvos inferiores: 800 MiB totais e 448 MiB gerenciados. Sob pressão, aguarda de maneira assíncrona e cancelável em vez de criar ciphertext no disco ou aumentar a reserva sem limite. O sistema operacional ainda pode paginar RAM, independentemente do app.
 
 `Forçar 16 workers (RAM até 1 GB)` ignora somente a redução dinâmica de workers por vazão. `UploadConcurrencyRegistry` reconfigura os gates registrados por biblioteca, retomadas e sincronizador ao salvar a opção. Vagas adicionais passam a estar disponíveis no upload atual, sem reinício. Desativar afeta admissões seguintes, sem abortar requests em andamento. Memória, limites de attachments, rate limits e HTTP 429 nunca são ignorados. Abertura, leitura, cifra e montagem executam fora do Dispatcher WPF; armazenamento lento não bloqueia a thread da interface.
 
-`MultipartFormDataContent` usa `StreamContent` por attachment, sem um byte array para o multipart inteiro. Buffers são liberados somente após sucesso, falha ou cancelamento. Faststart, geração de prévias, snapshot estável da sincronização, checkpoints e arquivos de destino do download conservam o I/O existente; não são temporários de criptografia do upload.
+`MultipartFormDataContent` usa `UploadPartContent` nos anexos sob demanda e `StreamContent` nos caminhos já materializados, sem byte array para o multipart inteiro. Durante um ACK lento, o primeiro caminho mantém apenas estado técnico pequeno por chunk. Faststart, geração de prévias, snapshot estável da sincronização, checkpoints e arquivos de destino do download conservam o I/O existente; não são temporários de criptografia do upload.
 
-HTTP 429, headers de buckets, alvo global de 45 requests/s, backoff e cancelamento continuam no cliente Discord. Um batch é uma chamada REST, não uma chamada por attachment. Cada retry cria outro multipart e reabre streams dos mesmos bytes cifrados. Retransmitir ciphertext idêntico não é reutilizar nonce para cifrar plaintext diferente.
+HTTP 429, headers de buckets, alvo global de 45 requests/s, backoff e cancelamento continuam no cliente Discord. Um batch é uma chamada REST, não uma chamada por attachment. Cada retry cria outro multipart. Para anexos sob demanda, relê a origem e regenera o ciphertext autenticado após validar sua identidade; caminhos materializados reabrem os bytes anteriores. Backoff não mantém o buffer do anexo. Reproduzir os bytes de uma tentativa não autoriza utilizar o mesmo nonce com outro conteúdo.
+
+### Regeneração segura em retry
+
+O estado de replay é local, volátil e não pertence ao metadata/checkpoint. Para cada chunk, a primeira tentativa guarda nonce aleatório de 12 bytes e digest de 32 bytes. A definição exata é `D = SHA256(H || K || P)`: `H` são os primeiros 42 bytes do header ORGAESGC (todos os campos anteriores ao nonce); `K` é a chave derivada do arquivo, 32 bytes; `P` são os bytes plaintext exatos da faixa. Os comprimentos fixos de H/K tornam a concatenação inequívoca. A primeira tentativa cifra com nonce CSPRNG. Uma tentativa posterior calcula D novamente e usa comparação em tempo constante; se o digest diferir, falha antes de AES-GCM, sem enviar bytes desse anexo. Assim conteúdo, chave, salt, papel, posição, contagem e tamanho precisam permanecer iguais para reproduzir nonce/ciphertext/tag. Não persistir D, K ou P; zerar D/nonce ao descartar o descriptor. A chave é derivada e zerada na rotina existente, sem ser retida no estado de replay. Após reiniciar o app, chunks não confirmados podem receber novos nonces; os chunks confirmados e seus IDs continuam no checkpoint.
 
 HTTP 413, code 40005 ou HTTP 400/code 50035 com erro específico de quantidade/tamanho em `attachments`/`files` reduzem o batch pela metade, até um attachment, mantendo ciphertext e `chunkRefs`. Outros HTTP 400 não acionam essa redução. O teto aprendido é respeitado também por lotes já preparados.
 
 `UploadWireProgressStream` conta bytes após escrita no stream de destino HTTP. `UploadByteProgress` separa bytes de transmissão (incluindo retries) de progresso lógico único, com callbacks limitados e publicação final na confirmação. O contador `Partes confirmadas X/Y` só avança após validar/persistir a resposta. A UI recebe um oitavo argumento opcional em `_opsTransferMetrics` para o contador de transmissão, sem confundir bytes repetidos com conclusão lógica. A velocidade e a estimativa aparecem durante o corpo do request, não somente no ACK; atualizações atrasadas não substituem uma conclusão por estado ativo.
 
-A preparação antecipada elimina a pausa artificial entre leitura e envio de lotes. Não garante ocupação de rede de 100%: storage mais lento que a rede, pressão de memória, confirmação remota, rate limits e falhas podem exigir esperas. A estimativa de bytes restantes não inclui futuras esperas nem fases posteriores de prévias/metadados.
+A preparação de anexos em diferentes requests se sobrepõe à rede e as confirmações ficam desacopladas dos workers. Isso não garante ocupação de rede de 100%: storage mais lento que a rede, pressão de memória, saturação das 64 confirmações pendentes, rate limits e falhas podem exigir esperas. A criação do thread e a confirmação final continuam sendo etapas reais. A estimativa de bytes restantes não inclui futuras esperas nem fases posteriores de prévias/metadados.
 
 ## Integração com biblioteca, cache e sincronização
 
@@ -353,11 +361,40 @@ A implementação Dart deve reproduzir exatamente:
 3. Manter IDs como strings, validar índices e pares únicos, ordenar por `index`, deduplicar consultas por `messageId` e selecionar o anexo por `attachmentId`.
 4. Usar `ChunkIndex = index` zero-based no contexto e o número global do array completo como `ChunkCount`. O header ORGAESGC continua one-based internamente.
 5. Preservar os protocolos de cifra existentes. Ciphertext de cada attachment deve ser byte-compatible com o leitor C#; não cifrar o conjunto como um único payload.
-6. Criar forum post novo com um attachment inicial, depois multipart `payload_json` e `files[n]` até dez, com IDs locais correspondentes.
+6. Criar forum post novo com um attachment inicial, depois multipart `payload_json` e `files[n]` com dez anexos, exceto o lote final incompleto/rejeição específica do servidor, com IDs locais correspondentes.
 7. Validar toda a resposta por filename/tamanho/IDs, sem depender da ordem retornada. Persistir checkpoints inteiros de batch com layout versionado e referências completas.
 8. Preservar checkpoints e metadata unitários antigos. Não produzir `chunks` com IDs repetidos, nem migrar ao ler.
 9. Aplicar as mesmas regras à lista independente `preview.video480p.chunkRefs`; conservar thumbnails unitários, seek/prefetch e renovação por ID.
-10. Usar streams reabríveis em retry, buffers limitados, cancelamento e os limites reais retornados pela API. A política local de memória pode ser diferente, sem alterar o protocolo.
+10. Usar conteúdos de comprimento conhecido e streams assíncronos sob demanda, em vez de preparar dez byte arrays antes de criar cada request. A política local de memória pode ser diferente, sem alterar o protocolo.
+
+### Pipeline a reproduzir no mobile
+
+Separar o número de corpos em transmissão do número de mensagens aguardando ACK. A vaga de transmissão deve ser adquirida antes de iniciar o request e liberada após consumir o último arquivo do multipart, inclusive em falha/cancelamento. A vaga de mensagem pendente permanece até validar/persistir a resposta. Usar filas limitadas e teto explícito de mensagens pendentes; o desktop usa 64, mas o mobile pode ter um orçamento menor de conexões e RAM. A contagem de anexos não depende desse orçamento: um request continua com dez descritores mesmo quando só existe RAM para um chunk em cada corpo ativo.
+
+Cada stream de anexo deve aguardar admissão de memória, ler somente sua faixa, produzir ORGAESGC e alimentar o HTTP com backpressure. Só devolver/zerar o buffer depois que o consumidor HTTP terminar de utilizar seus bytes; não zerar um `Uint8List` ainda referenciado por eventos pendentes. Não montar o multipart inteiro nem gravar ciphertext temporário. Preparação lenta deve executar sem bloquear o isolate responsável pela UI.
+
+No retry, recriar os conteúdos HTTP e readquirir worker/cota. Para reproduzir o comportamento desktop, guardar somente D/nonce por chunk e aplicar a regra da seção de regeneração segura. H/K/P precisam ser idênticos antes de reaplicar o nonce. Esses dados de replay não são enviados ao Discord nem adicionados a `chunkRefs`; a interoperabilidade remota continua baseada no envelope ORGAESGC e nos IDs de attachment. Não registrar digest dependente de chave, nonce acompanhado de contexto privado, chave ou plaintext em logs.
+
+Exemplo de agendamento independente de biblioteca HTTP:
+
+```text
+mensagem = adquirir vaga limitada de ACK pendente
+descritores = próximos dez índices não confirmados
+para cada tentativa:
+    transmissão = adquirir worker e respeitar cotas Discord
+    criar multipart reabrível de comprimentos conhecidos
+    para cada anexo solicitado pelo HTTP:
+        aguardar orçamento de RAM
+        ler faixa; validar estado de replay; cifrar ORGAESGC
+        emitir bytes com backpressure e progresso
+        zerar/devolver buffers e orçamento
+    devolver worker de transmissão, antes de esperar ACK
+    em 429/falha transitória: aguardar política existente e repetir tentativa
+    em sucesso: validar todos os IDs/tamanhos; persistir batch atomicamente
+descartar replay e devolver vaga de mensagem
+```
+
+Aplicar também em arquivos retomados layout 2, prévias 480p, salvamento de Markdown agrupado e uploads sincronizados. Layout unitário antigo e downloads permanecem como descritos nas seções de compatibilidade. Um ACK pendente não deve impedir o envio de outros batches se existir worker, memória e cota disponíveis. Testar ativação/desativação do modo forçado durante uma transferência, mantendo os limites reais mesmo no modo forçado.
 
 Testes futuros entre plataformas: desktop upload -> mobile download/preview/seek; mobile upload -> desktop download/preview/seek; retomada com chunks confirmados; metadados antigos nas duas versões; corrupção e attachment ausente sem fallback inseguro. Usar o vetor criptográfico anterior para verificar cifra, e os exemplos/fixtures de referências desta especificação para verificar o transporte.
 
@@ -371,11 +408,11 @@ Os testes de comportamento estão em `tests/Organessonium.NetworkTests/MultiAtta
 
 Cobertura relevante: multipart 1/2/10 e rejeição local de 0/11; soma acima de 25 MiB; 26 chunks interrompidos/retomados; resposta fora de ordem; reconstrução byte a byte; array novo/legado; preview 480p com 13 chunks; mensagens deduplicadas; attachment ausente; cancelamento/limpeza; retries de rede/429; redução de batch; checkpoint unitário antigo; streaming, seek e renovação com filenames iguais; sincronização com três chunks, sendo dois na mesma mensagem.
 
-O benchmark manual em Discord real comparou uma origem sintética de 1 GiB no pipeline anterior e no atual: o anterior levou 146,58 s e teve intervalo máximo sem novas escritas HTTP de 32,34 s; a versão atual levou 60,95 s, com intervalo máximo de 0,73 s durante a transmissão das mensagens. Não houve HTTP 429 nesse teste final; o pico do Job Object foi 477,6 MiB. A criação do post exigiu 4,10 s entre terminar seu corpo e receber o ID, e a confirmação final também ocorre depois de transferir todos os bytes. São resultados observados, não garantia para outra conexão/horário nem promessa de gráfico sem oscilações. Cinco posts temporários usados na comparação foram removidos, sem modificar os arquivos da biblioteca. Nenhuma janela foi aberta.
+O teste manual do pipeline de dez anexos utilizou origem sintética de 2 GiB e até onze mensagens concorrentes após o post inicial. A transmissão terminou em torno de 92,62 s; a última confirmação chegou em 127,31 s. A maior lacuna entre escritas HTTP durante o envio foi 0,06 s; pico de memória privada do Job Object: 283,5 MiB; nenhum HTTP 429. Uma amostragem da placa física durante a transmissão mediu aproximadamente 200 a 212 Mbps; esses contadores incluem todo o tráfego do adaptador. Dois posts temporários da comparação foram removidos, sem alterar a biblioteca e sem abrir janelas. Há espera inicial de cerca de quatro segundos para obter o thread e uma cauda de confirmação depois de transmitir todos os bytes. Os números são observados nessa conexão, não garantia para outra rede/horário nem teste de internet real de 1 Gbps.
 
 `UploadBudgetTests.cs` cobre upload real de faixas de uma origem de 1 GiB com criptografia e transporte HTTP simulado, bytes durante o request, chunks confirmados, teto do Job Object e ausência de ciphertext em disco. Outro cenário mantém uma requisição ativa e verifica que o sucessor já está pronto, que a fila não lê além do limite e que o cancelamento zera ambos os conjuntos de buffers. A alteração de workers é exercitada no upload em andamento com storage lento simulado e heartbeat do Dispatcher. A WebView2 real carrega os assets do app em um host nunca visível, validando botão, velocidade, estimativa e descarte de updates atrasados, sem abrir a janela principal.
 
-Na verificação de conclusão, as 12 famílias selecionadas de upload, retomada/download, streaming, limites e sincronização passaram. O teste de origem de 1 GiB mediu pico de 614,5 MiB no Job Object; é um resultado de fixture, não benchmark da conta ou promessa de igual consumo em qualquer conteúdo. A solução desktop compilou sem warnings/erros; a compilação limpa do projeto de testes conserva dois CS0436 conhecidos do Windows App SDK, sem erros. Nenhum teste acessou a conta Discord do usuário.
+Na verificação atual, as 12 famílias selecionadas de upload, retomada/download, streaming, limites e publicação/recuperação do upload sincronizado passaram. `StreamingUploadTests.cs` transmite três mensagens completas de 200 MiB com apenas um worker de corpo enquanto todas as respostas ficam retidas, validando a separação das confirmações. Também verifica retries byte a byte e rejeição de uma origem alterada, sem ciphertext em disco. O teste local de preparação/cifra/cópia para receptor simulado mediu 567,8 MiB/s; não representa vazão da internet. A fixture de origem de 1 GiB mediu pico de 117,0 MiB. A solução desktop compilou sem warnings/erros; a compilação limpa do projeto de testes conserva dois CS0436 conhecidos do Windows App SDK, sem erros. Somente o diagnóstico manual autorizado acessa a conta; os testes automáticos usam HTTP simulado.
 
 Arquivos da implementação:
 
@@ -384,8 +421,10 @@ Arquivos da implementação:
 - `Services/ForumDownloader.cs`, `DiscordVideoChunkProvider.cs`.
 - `Services/MetadataService.cs`, `SettingsStore.cs`, `AppRegistry.cs`, `AppRegistry.Trash.cs`, `SerialIndexService.cs`, `DebugNamesScanner.cs`.
 - `Services/AppMemoryBudget.cs`, `RamUploadBudget.cs`, `UploadByteProgress.cs`, `UploadWireProgressStream.cs`, `UploadConcurrencyRegistry.cs`.
+- `Services/UploadPartContent.cs`, `UploadBodySlot.cs` e a regeneração validada em `EncryptionService.cs`.
 - `Services/TransferManager.cs`, `TransferStateRepository.cs`, `Sync/CloudSyncRepository.cs`, `Bridge/AppController.cs`.
 - `tests/Organessonium.NetworkTests/Program.cs`, `UploadBudgetTests.cs`, `MultiAttachmentTests.cs`, `SyncIntegrationTests.cs`, `TrashTests.cs`.
+- `tests/Organessonium.NetworkTests/StreamingUploadTests.cs` e `UploadCadenceDiagnostics.cs`.
 - `README.md`, `migration.md`, este `implementation.md` e `release/Build-Releases.ps1`.
 
 Os caminhos `Models`, `Services` e `Bridge` são relativos a `Organessonium/Organessonium`. O arquivo arquivado da criptografia não recebeu edição; o ZIP de fontes passa a incluir as duas especificações.

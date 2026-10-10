@@ -149,9 +149,10 @@ internal static partial class Program
             using var memory = new UploadMemoryCoordinator(16, forceParallelism: true);
             var result = await new ForumUploader(api, "files").UploadResumableGeneratedAsync("source.bin", count,
                 index => memory.PreparePartAsync(crypto, source, source.Length, EncryptionService.MaximumPlaintextPayloadBytes,
-                    context.WithChunkIndex(index), default), "", "", new Dictionary<int, string>(),
+                    context.WithChunkIndex(index), default, deferBuffers: true), "", "", new Dictionary<int, string>(),
                 uploadedParts: done => confirmed.Add(done), encryptedPayload: context, maxParallelParts: 16,
                 useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate,
+                streamPreparedParts: true,
                 onPartTransferProgress: bytes.Report, onBatchUploaded: batch =>
                 {
                     RequireSync(updatesBeforeConfirmation > 0, "os bytes só foram reportados depois do ACK");

@@ -2755,7 +2755,8 @@ public sealed partial class AppController : IAsyncDisposable
                 {
                     using var owned = memoryCoordinator == null ? new UploadMemoryCoordinator(partParallelism) : null;
                     return await (memoryCoordinator ?? owned!).PreparePartAsync(_encryption, file, sourceLength,
-                        (int)transferState.ChunkSizeBytes, encryptionContext.WithChunkIndex(index), cancellationToken);
+                        (int)transferState.ChunkSizeBytes, encryptionContext.WithChunkIndex(index), cancellationToken,
+                        deferBuffers: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
                 }
 
                 upload = await uploader.UploadResumableGeneratedAsync(
@@ -2780,6 +2781,7 @@ public sealed partial class AppController : IAsyncDisposable
                             { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
                     onBatchUploaded: HandleUploadedBatchAsync,
                     batchPreparationGate: RamUploadBudget.Batches,
+                    streamPreparedParts: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
                     maxPreparedPartBytes: checked((int)transferState.ChunkSizeBytes + EncryptionService.EnvelopeOverheadBytes),
                     onPartTransferProgress: (index, wire) =>
                     {
@@ -3199,7 +3201,8 @@ public sealed partial class AppController : IAsyncDisposable
                 VideoPreviewFileName(originalName),
                 totalParts,
                 index => previewMemory.PreparePartAsync(_encryption, generated, generated.Length,
-                    EncryptionService.MaximumPlaintextPayloadBytes, encryptionContext.WithChunkIndex(index), cancellationToken),
+                    EncryptionService.MaximumPlaintextPayloadBytes, encryptionContext.WithChunkIndex(index), cancellationToken,
+                    deferBuffers: useAttachmentReferences),
                 threadId,
                 "",
                 new Dictionary<int, string>(),
@@ -3224,7 +3227,8 @@ public sealed partial class AppController : IAsyncDisposable
                 encryptedPayload: encryptionContext,
                 cleanupPart: TryDeleteFile,
                 useAttachmentReferences: useAttachmentReferences,
-                batchPreparationGate: previewMemory.BatchPreparationGate);
+                batchPreparationGate: previewMemory.BatchPreparationGate,
+                streamPreparedParts: useAttachmentReferences);
             return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds, result.ChunkReferences);
         }
 
@@ -4073,17 +4077,17 @@ public sealed partial class AppController : IAsyncDisposable
                 {
                     uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
                         index => memory.PreparePartAsync(_encryption, file, file.Length,
-                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default),
+                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
                         canReuseThread ? threadId : "", "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
-                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate);
+                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
                 }
                 catch (DiscordApiException ex) when (canReuseThread && ((int)ex.StatusCode == 403 || (int)ex.StatusCode == 404))
                 {
                     uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
                         index => memory.PreparePartAsync(_encryption, file, file.Length,
-                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default),
+                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
                         "", "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
-                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate);
+                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
                 }
                 var newThreadId = uploadResult.ThreadId;
                 var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");

@@ -13,7 +13,7 @@ public sealed class EncryptionService
     public const int EnvelopeOverheadBytes = EnvelopeHeaderBytes + AuthenticationTagBytes;
     public const int MaximumPlaintextPayloadBytes = DiscordLimits.PlaintextChunkBytes;
     private const int FileSaltBytes = 16;
-    private const int NonceBytes = 12;
+    internal const int NonceBytes = 12;
     private static readonly byte[] EnvelopeMagic = "ORGAESGC"u8.ToArray();
     private readonly DefaultEncryptionKeyProvider _defaultKeyProvider;
     private readonly CustomEncryptionKeyProvider _customKeyProvider;
@@ -171,7 +171,8 @@ public sealed class EncryptionService
         Memory<byte> plaintextBuffer,
         Memory<byte> encryptedBuffer,
         EncryptedPayloadContext context,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        EncryptedUploadReplayState? replay = null)
     {
         if (offset < 0 || length < 0)
         {
@@ -211,7 +212,7 @@ public sealed class EncryptionService
                 readTotal += read;
             }
 
-            return EncryptBytesInto(plaintextBuffer.Span[..length], encryptedBuffer.Span, context);
+            return EncryptBytesInto(plaintextBuffer.Span[..length], encryptedBuffer.Span, context, replay);
         }
         finally
         {
@@ -263,7 +264,8 @@ public sealed class EncryptionService
         }
     }
 
-    internal int EncryptBytesInto(ReadOnlySpan<byte> plaintext, Span<byte> destination, EncryptedPayloadContext context)
+    internal int EncryptBytesInto(ReadOnlySpan<byte> plaintext, Span<byte> destination, EncryptedPayloadContext context,
+        EncryptedUploadReplayState? replay = null)
     {
         var outputLength = checked(EnvelopeHeaderBytes + plaintext.Length + AuthenticationTagBytes);
         if (destination.Length < outputLength)
@@ -279,8 +281,8 @@ public sealed class EncryptionService
             var fileKey = DeriveFileKey(context.FileId, context.Encryption, salt);
             try
             {
-                var nonce = RandomNumberGenerator.GetBytes(NonceBytes);
                 var header = new byte[EnvelopeHeaderBytes];
+                byte[]? nonce = null;
                 try
                 {
                     EnvelopeMagic.CopyTo(header, 0);
@@ -290,6 +292,8 @@ public sealed class EncryptionService
                     BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(14, 4), checked((uint)context.ChunkCount));
                     BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(18, 8), checked((ulong)plaintext.Length));
                     salt.CopyTo(header.AsSpan(26, FileSaltBytes));
+                    nonce = replay?.NonceFor(plaintext, header.AsSpan(0, EnvelopeHeaderBytes - NonceBytes), fileKey)
+                        ?? RandomNumberGenerator.GetBytes(NonceBytes);
                     nonce.CopyTo(header.AsSpan(42, NonceBytes));
 
                     using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
@@ -304,7 +308,7 @@ public sealed class EncryptionService
                 }
                 finally
                 {
-                    CryptographicOperations.ZeroMemory(nonce);
+                    if (nonce != null) CryptographicOperations.ZeroMemory(nonce);
                     CryptographicOperations.ZeroMemory(header);
                 }
             }

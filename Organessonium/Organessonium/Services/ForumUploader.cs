@@ -225,7 +225,8 @@ public sealed partial class ForumUploader
         Func<ForumUploadedBatch, Task>? onBatchUploaded = null,
         SemaphoreSlim? batchPreparationGate = null,
         Action<int, long>? onPartTransferProgress = null,
-        int maxPreparedPartBytes = DiscordLimits.AttachmentBytes)
+        int maxPreparedPartBytes = DiscordLimits.AttachmentBytes,
+        bool streamPreparedParts = false)
     {
         if (totalParts <= 0)
         {
@@ -243,7 +244,7 @@ public sealed partial class ForumUploader
             return await UploadGroupedGeneratedAsync(totalParts, preparePart, existingThreadId, existingBatchId,
                 uploadedChunkReferences ?? [], uploadedParts, onChunkUploaded, onBatchUploaded, cancellationToken,
                 onRateLimitWait, maxParallelParts, uploadGate, encryptedPayload, cleanupPart, adaptiveUploadGate,
-                onTransferActivity, batchPreparationGate, onPartTransferProgress, maxPreparedPartBytes);
+                onTransferActivity, batchPreparationGate, onPartTransferProgress, maxPreparedPartBytes, streamPreparedParts);
         }
 
         var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
@@ -626,6 +627,8 @@ public sealed class PreparedUploadPart : IDisposable
 {
     private UploadChunkBufferLease? _memoryLease;
     private readonly int _memoryLength;
+    private readonly Func<CancellationToken, Task<PreparedUploadPart>>? _prepareForSend;
+    private IDisposable? _replay;
 
     public PreparedUploadPart(FileInfo file, long logicalSizeBytes)
     {
@@ -660,6 +663,16 @@ public sealed class PreparedUploadPart : IDisposable
 
     public FileInfo? File { get; }
 
+    internal PreparedUploadPart(string fileName, int length, long logicalSizeBytes,
+        Func<CancellationToken, Task<PreparedUploadPart>> prepareForSend, IDisposable replay)
+    {
+        FileName = fileName;
+        Length = length;
+        LogicalSizeBytes = logicalSizeBytes;
+        _prepareForSend = prepareForSend;
+        _replay = replay;
+    }
+
     public string FileName { get; }
 
     public long Length { get; }
@@ -667,6 +680,24 @@ public sealed class PreparedUploadPart : IDisposable
     public long LogicalSizeBytes { get; }
 
     internal Action<long>? TransferProgress { get; set; }
+    internal bool Deferred => _prepareForSend != null;
+
+    internal async Task CopyToAsync(Stream destination, CancellationToken token)
+    {
+        if (_prepareForSend == null)
+        {
+            using var stream = OpenRead();
+            await stream.CopyToAsync(destination, 64 * 1024, token).ConfigureAwait(false);
+            return;
+        }
+        ObjectDisposedException.ThrowIf(_replay == null, this);
+        using var reservation = await RamUploadBudget.ReserveBytesAsync(Length, token).ConfigureAwait(false);
+        using var part = await _prepareForSend(token).ConfigureAwait(false);
+        part.TransferProgress = TransferProgress;
+        using var input = part.OpenRead();
+        await input.CopyToAsync(destination, 64 * 1024, token).ConfigureAwait(false);
+        // The bytes are already in the HTTP stream. Do not retain this chunk while awaiting the reply.
+    }
 
     internal Stream OpenRead()
     {
@@ -684,5 +715,6 @@ public sealed class PreparedUploadPart : IDisposable
     public void Dispose()
     {
         Interlocked.Exchange(ref _memoryLease, null)?.Dispose();
+        Interlocked.Exchange(ref _replay, null)?.Dispose();
     }
 }
