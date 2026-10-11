@@ -3,7 +3,7 @@
 Object.assign(I18N['pt-BR'], {
     makeCopy:'Fazer cópia', viewInformation:'Ver informações', versions:'Versões', makeDownload:'Fazer o download',
     addStarred:'Adicionar à pasta "Com estrela"', removeStarred:'Remover da pasta "Com estrela"',
-    fileInformation:'Informações do arquivo', detailsLoading:'Carregando informações...',
+    fileInformation:'Informações do arquivo', detailsLoading:'Carregando informações...', detailsPending:'Carregando...',
     detailsType:'Tipo', detailsLocation:'Localização', detailsSize:'Tamanho do arquivo', detailsStorage:'Tamanho utilizado',
     detailsUploaded:'Data e hora de upload', detailsModified:'Última modificação', detailsChunks:'Quantidade de chunks',
     detailsCurrent:'Versão atual', detailsNoVersions:'Este arquivo não tem versões anteriores.',
@@ -15,7 +15,7 @@ Object.assign(I18N['pt-BR'], {
 Object.assign(I18N.en, {
     makeCopy:'Make a copy', viewInformation:'View information', versions:'Versions', makeDownload:'Download',
     addStarred:'Add to "Starred"', removeStarred:'Remove from "Starred"',
-    fileInformation:'File information', detailsLoading:'Loading information...',
+    fileInformation:'File information', detailsLoading:'Loading information...', detailsPending:'Loading...',
     detailsType:'Type', detailsLocation:'Location', detailsSize:'File size', detailsStorage:'Storage used',
     detailsUploaded:'Upload date and time', detailsModified:'Last modified', detailsChunks:'Chunk count',
     detailsCurrent:'Current version', detailsNoVersions:'This file has no previous versions.',
@@ -59,7 +59,8 @@ function ensureFileDetailsDialog() {
     overlay.className = 'modal-overlay hidden';
     overlay.innerHTML = `<section class="modal-box file-details-dialog" role="dialog" aria-modal="true" aria-labelledby="file-details-title">
         <header><h3 id="file-details-title"></h3><button id="file-details-close" class="btn-icon" type="button">${icon('close',20)}</button></header>
-        <div id="file-details-name"></div><div id="file-details-content" aria-live="polite"></div></section>`;
+        <div id="file-details-name"></div><div id="file-details-status" class="file-details-status" role="status"></div>
+        <div id="file-details-content" aria-live="polite"></div></section>`;
     document.body.appendChild(overlay);
     $('file-details-close').addEventListener('click', closeFileDetails);
     overlay.addEventListener('click', event => { if (event.target === overlay) closeFileDetails(); });
@@ -79,16 +80,22 @@ function openFileDetails(app, versions) {
     $('file-details-title').textContent = t(versions ? 'versions' : 'fileInformation');
     $('file-details-name').textContent = app.name;
     $('file-details-close').setAttribute('aria-label', t('close'));
-    $('file-details-content').textContent = t('detailsLoading');
+    if (versions) $('file-details-content').textContent = '';
+    else renderFileInformation({entry:app}, true);
+    setFileDetailsLoading(true);
     $('file-details-overlay').classList.remove('hidden');
     $('file-details-close').focus();
     fileDetailsRequest = requestFileInformation(app, info => {
         if (fileDetailsRequest !== id) return;
+        setFileDetailsLoading(false);
         $('file-details-name').textContent = info.entry.name;
         if (versions) renderFileVersions(info.entry);
         else renderFileInformation(info);
     }, message => {
-        if (fileDetailsRequest === id) $('file-details-content').textContent = message;
+        if (fileDetailsRequest === id) {
+            setFileDetailsLoading(false);
+            $('file-details-content').textContent = message;
+        }
     });
     const id = fileDetailsRequest;
 }
@@ -97,6 +104,7 @@ function closeFileDetails() {
     const overlay = $('file-details-overlay');
     if (!overlay || overlay.classList.contains('hidden')) return false;
     overlay.classList.add('hidden');
+    setFileDetailsLoading(false);
     fileDetailsRequest = '';
     fileDetailsFocus?.focus();
     return true;
@@ -107,7 +115,14 @@ function fileInformationDate(value) {
     return value && Number.isFinite(date.getTime()) ? date.toLocaleString(resolveLanguage()) : t('detailsUnknown');
 }
 
-function renderFileInformation(info) {
+function setFileDetailsLoading(loading) {
+    $('file-details-content').setAttribute('aria-busy', String(loading));
+    const status = $('file-details-status');
+    status.classList.toggle('loading', loading);
+    status.innerHTML = loading ? `<span class="file-details-spinner" aria-hidden="true"></span><span>${esc(t('detailsLoading'))}</span>` : '';
+}
+
+function renderFileInformation(info, loading = false) {
     const app = info.entry;
     const category = isFolderApp(app) ? 'folder' : fileType(app.name);
     const label = 'details' + category[0].toUpperCase() + category.slice(1);
@@ -123,7 +138,7 @@ function renderFileInformation(info) {
         [t('detailsChunks'), String(info.chunkCount)]
     ];
     $('file-details-content').innerHTML = '<dl class="file-information">' + rows.map(([key,value]) =>
-        `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('') + '</dl>';
+        `<div><dt>${esc(key)}</dt><dd${loading ? ' class="file-details-pending"' : ''}>${esc(loading ? t('detailsPending') : value)}</dd></div>`).join('') + '</dl>';
 }
 
 function renderFileVersions(app) {

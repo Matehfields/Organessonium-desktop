@@ -75,10 +75,13 @@ window._onSystemAccentChanged = color => {
 // The content animates, not the collection or its asynchronous requests.
 function animateWorkspaceContent(element) {
     if (!element) return;
-    element.classList.remove('workspace-content-enter');
+    const targets = element.id === 'main-area'
+        ? [...element.children].filter(child => child.matches('.content-header,.files-grid,.files-list,.empty-state'))
+        : [element];
+    targets.forEach(target => target.classList.remove('workspace-content-enter'));
     if (document.documentElement.dataset.motion === 'reduced') return;
     void element.offsetWidth;
-    element.classList.add('workspace-content-enter');
+    targets.forEach(target => target.classList.add('workspace-content-enter'));
 }
 
 function syncSidebarSelection() {

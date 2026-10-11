@@ -5845,7 +5845,7 @@ function showCtx(e, app) {
     const r = e.currentTarget ? e.currentTarget.getBoundingClientRect() : null;
     const x = e.clientX || (r ? r.right - 160 : 12);
     const y = e.clientY || (r ? r.bottom + 4 : 12);
-    positionContextMenu(x, y);
+    positionContextMenu(x, y, true);
     if (!isFolderApp(app) && app.metadataMessageId) requestFileInformation(app, info => {
         if (ctxTarget !== app || ctxMode !== 'item' || ctxMenu.classList.contains('hidden')) return;
         app.versions = info.entry.versions || [];
@@ -5863,7 +5863,7 @@ function showBackgroundCtx(e) {
     ctxMode = 'background';
     ctxTabTarget = null;
     configureContextMenu('background');
-    positionContextMenu(e.clientX, e.clientY);
+    positionContextMenu(e.clientX, e.clientY, true);
 }
 
 window._selectAllFilesFromNative = () => {
@@ -5911,7 +5911,7 @@ function showTabCtx(e, tabId) {
     ctxMode = 'tab';
     ctxTabTarget = tabId || 'files';
     configureContextMenu(tabId === 'files' ? 'files-tab' : 'tab');
-    positionContextMenu(e.clientX, e.clientY);
+    positionContextMenu(e.clientX, e.clientY, true);
 }
 
 function configureContextMenu(mode, app = null) {
@@ -5961,7 +5961,7 @@ function showCtxPart(id, visible) {
     if (el) el.classList.toggle('hidden', !visible);
 }
 
-function positionContextMenu(x, y) {
+function positionContextMenu(x, y, animate = false) {
     ctxMenu.style.left = '0px';
     ctxMenu.style.top = '0px';
     ctxMenu.classList.remove('hidden');
@@ -5971,10 +5971,17 @@ function positionContextMenu(x, y) {
     const py = Math.max(4, Math.min(window.innerHeight - h - 4, y));
     ctxMenu.style.left = px + 'px';
     ctxMenu.style.top = py + 'px';
+    ctxMenu.style.transformOrigin = (px < x ? 'right' : 'left') + ' ' + (py < y ? 'bottom' : 'top');
+    if (animate) {
+        ctxMenu.classList.remove('ctx-menu-enter');
+        void ctxMenu.offsetWidth;
+        ctxMenu.classList.add('ctx-menu-enter');
+    }
 }
 
 function hideCtx() {
     ctxMenu.classList.add('hidden');
+    ctxMenu.classList.remove('ctx-menu-enter');
     ctxTarget = null;
     ctxTabTarget = null;
     ctxMode = 'item';
