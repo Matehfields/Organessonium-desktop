@@ -59,6 +59,16 @@ public partial class MainWindow : Window
 
     public MainWindow() : this(null) { }
 
+    internal async Task NotifyUnexpectedErrorAsync()
+    {
+        if (_shutdownInProgress || _bridge == null) return;
+        try
+        {
+            await _bridge.CallAsync("_onNonfatalError", "Ocorreu um erro inesperado. A operação pode ter sido interrompida; tente novamente.");
+        }
+        catch (Exception ex) { AppLogger.Error("App.ErrorNotification", ex); }
+    }
+
     internal MainWindow(SettingsStore? store)
     {
         _store = store!;

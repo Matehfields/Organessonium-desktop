@@ -168,7 +168,7 @@ Introduzido por: Anterior à tarefa.
 
 Motivo: Não recriptografar conteúdo antigo nem misturar chunks no meio de uma retomada.
 
-Código relacionado: ForumDownloader (entry.Encryption ausente); AppController.UploadSingleAsync preserveLegacyTransfer; VideoChunkIndex/DiscordVideoChunkProvider.
+Código relacionado: ForumDownloader (entry.Encryption ausente); AppController.UploadSingleAsync (transferState.Encryption ausente); UploadMemoryCoordinator.PreparePlainPartAsync; VideoChunkIndex/DiscordVideoChunkProvider.
 
 Flutter: Download e streaming conservam payloads sem encryption e ORGAESGC v1; a mudança do envelope de metadados não recriptografa partes existentes.
 
@@ -185,6 +185,8 @@ Procedimento para remoção: Migrar conteúdo explicitamente fora desta tarefa, 
 Status: ativo
 
 Descrição: Rótulos textuais file:... role:... chunk:... encryption:v1, batch/Parte e ORG_PREVIEW.
+
+As retomadas de prévia plaintext geradas em RAM preservam `ORG_PREVIEW|video-480|batch:...|Parte n/total`, inclusive para uma única parte. `ForumUploader.UploadResumableGeneratedAsync` recebe `legacyPreviewKind` somente nesse caminho; não permite combiná-lo com criptografia ou transporte agrupado. Isso evita identificar uma prévia como conteúdo original ao reconstruir mensagens legadas.
 
 Introduzido por: Leitores anteriores; payloadReference cifrado nesta tarefa.
 
@@ -603,6 +605,24 @@ Descrição: checkpoints novos contêm `downloadMetadata` para fixar o payload d
 Código relacionado: `Models/TransferState.cs`, `Services/TransferManager.cs` (`CreateDownloadAsync`), `Bridge/AppController.cs` (`ResumeInterruptedTransfersAsync`).
 
 Pode ser removido quando: não existirem downloads interrompidos de versões anteriores do desktop. Impacto: estados antigos sem snapshot deixarão de retomar; atualizar testes e documentação junto da remoção.
+
+### TRANSFER-FASTSTART-LEGACY-001
+
+Status: ativo
+
+Descrição: checkpoints anteriores podem registrar `fastStartApplied` para um MP4 que era remuxado em arquivo temporário. A retomada agora reconstrói a mesma sequência por leitura virtual, sem reutilizar ou recriar a cópia em disco. Checkpoints parcialmente enviados sem esse flag preservam os bytes originais, sem mudar de layout no meio do upload.
+
+Motivo: preservar índices, tamanho, thread e chunks confirmados em transferências interrompidas antes da eliminação do staging de mídia.
+
+Código relacionado: `Services/Mp4FastStart.cs` (`PreparedVideoUpload.OpenRead`), `Models/TransferState.cs`, `Bridge/AppController.cs` (`UploadSingleAsync`). Nenhum formato remoto ou algoritmo de criptografia foi alterado.
+
+Comportamento atual: o flag true exige que o faststart possa ser reconstruído; se não for possível, a retomada falha explicitamente e mantém os chunks confirmados. Leituras não regravam objetos remotos. O arquivo de origem deve permanecer disponível e válido.
+
+Pode ser removido quando: não houver checkpoints anteriores recuperáveis e existir política explícita para descartar estados interrompidos.
+
+Impacto da remoção: retomar um upload antigo pode misturar bytes remuxados/originais se o layout não for validado.
+
+Procedimento: concluir ou descartar estados antigos com autorização, verificar os payloads remotos e somente então retirar o branch de compatibilidade, seus testes e esta documentação. O fallback operacional de MP4 não suportado e a falha segura de prévias acima do limite de RAM não são dívida legada removível.
 
 ## Fronteiras e itens que não são dívida automaticamente
 

@@ -1219,7 +1219,6 @@ public sealed class ForumDownloader
         }
 
         using var http = _downloadClientFactory();
-        var done = 0;
         var downloadedBytes = initialDownloadedBytes;
         var totalBytes = parts.Sum(part => Math.Max(0, part.Size)) + Math.Max(0, initialDownloadedBytes);
         var lastDetailedPercent = -1;
@@ -1240,8 +1239,7 @@ public sealed class ForumDownloader
                 }
 
                 result[part.Index] = target;
-                var current = Interlocked.Increment(ref done);
-                onProgress($"[{current}/{parts.Count}] {part.Name}");
+                onProgress($"{FormatBytes(Interlocked.Read(ref downloadedBytes))} / {FormatBytes(totalBytes)} baixados");
             }
             finally
             {

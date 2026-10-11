@@ -11,6 +11,7 @@ internal static class RamUploadBudget
     private const long ManagedAdmissionBytes = 448L * 1024 * 1024;
     private static readonly object Sync = new();
     private static long _reserved;
+    private static long _externalNativeReserved, _externalManagedReserved;
 
     internal static int PipelineBatchChunks(int partBytes)
     {
@@ -29,22 +30,33 @@ internal static class RamUploadBudget
     internal static Task<IDisposable> ReserveAsync(int chunks, CancellationToken token) =>
         ReserveBytesAsync(checked((long)chunks * DiscordLimits.AttachmentBytes), token);
 
-    internal static async Task<IDisposable> ReserveBytesAsync(long bytes, CancellationToken token)
+    internal static Task<IDisposable> ReserveBytesAsync(long bytes, CancellationToken token) =>
+        ReserveCoreAsync(bytes, bytes, false, token);
+
+    internal static Task<IDisposable> ReserveExternalBytesAsync(long nativeBytes, long managedBytes, CancellationToken token) =>
+        ReserveCoreAsync(nativeBytes, managedBytes, true, token);
+
+    private static async Task<IDisposable> ReserveCoreAsync(long bytes, long managedBytes, bool external, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(bytes);
+        if (managedBytes < 0 || managedBytes > bytes) throw new ArgumentOutOfRangeException(nameof(managedBytes));
         while (true)
         {
             token.ThrowIfCancellationRequested();
             lock (Sync)
             {
                 var pool = Pool.AllocatedBytes;
-                var buffers = Math.Max(pool, _reserved + bytes + 2L * DiscordLimits.AttachmentBytes);
+                var buffers = Math.Max(pool, _reserved + (external ? 0 : bytes) + 2L * DiscordLimits.AttachmentBytes);
+                var nativeExternal = _externalNativeReserved + (external ? bytes : 0);
+                var managedExternal = _externalManagedReserved + (external ? managedBytes : 0);
                 var nativeBaseline = Math.Max(0, AppMemoryBudget.CommittedBytes() - pool);
                 var managedBaseline = Math.Max(0, GC.GetTotalMemory(false) - pool);
-                if (nativeBaseline + buffers <= AppMemoryBudget.AdmissionBytes && managedBaseline + buffers <= ManagedAdmissionBytes)
+                if (nativeBaseline + buffers + nativeExternal <= AppMemoryBudget.AdmissionBytes &&
+                    managedBaseline + buffers + managedExternal <= ManagedAdmissionBytes)
                 {
-                    _reserved += bytes;
-                    return new Reservation(bytes);
+                    if (external) { _externalNativeReserved += bytes; _externalManagedReserved += managedBytes; }
+                    else _reserved += bytes;
+                    return new Reservation(bytes, managedBytes, external);
                 }
                 Pool.TrimFreeBuffers();
             }
@@ -53,13 +65,21 @@ internal static class RamUploadBudget
         }
     }
 
-    private sealed class Reservation(long bytes) : IDisposable
+    private sealed class Reservation(long bytes, long managedBytes, bool external) : IDisposable
     {
         private long _bytes = bytes;
         public void Dispose()
         {
             var release = Interlocked.Exchange(ref _bytes, 0);
-            lock (Sync) _reserved -= release;
+            lock (Sync)
+            {
+                if (external)
+                {
+                    _externalNativeReserved -= release;
+                    if (release != 0) _externalManagedReserved -= managedBytes;
+                }
+                else _reserved -= release;
+            }
         }
     }
 }

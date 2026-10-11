@@ -39,6 +39,8 @@ internal static partial class Program
         ("videoTamperedPayloadNotExposed", VideoTamperedPayloadNotExposedAsync),
         ("videoStreamingAndFullDownloadIndependent", VideoStreamingAndFullDownloadIndependentAsync),
         ("mp4FastStartOffsetsAndFallback", Mp4FastStartOffsetsAndFallbackAsync),
+        ("largeVirtualMp4Ranges", LargeVirtualMp4RangesAsync),
+        ("mediaPreviewWorkerRamOnly", MediaPreviewWorkerRamOnlyAsync),
         ("webViewVirtualVideoPlayback", WebViewVirtualVideoPlaybackAsync),
         ("encryptedFileRangeRoundTrip", EncryptedFileRangeRoundTripAsync),
         ("encryptedFileRangeUsesCallerOwnedBuffers", EncryptedFileRangeUsesCallerOwnedBuffersAsync),

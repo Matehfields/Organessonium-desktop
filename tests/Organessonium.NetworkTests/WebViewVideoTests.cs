@@ -47,10 +47,12 @@ internal static partial class Program
                     using var prepared = await Mp4FastStart.PrepareAsync(new FileInfo(fixture));
                     if (!prepared.Applied) throw new InvalidDataException("A fixture real precisa ter moov no final para validar o remux.");
                     var original = await File.ReadAllBytesAsync(fixture);
-                    var optimized = await File.ReadAllBytesAsync(prepared.File.FullName);
+                    using var optimizedStream = new MemoryStream();
+                    await using (var input = prepared.OpenRead()) await input.CopyToAsync(optimizedStream);
+                    var optimized = optimizedStream.ToArray();
                     if (!Mp4MdatHash(original).SequenceEqual(Mp4MdatHash(optimized))) throw new InvalidDataException("A mídia real mudou durante faststart.");
                     if (Environment.GetEnvironmentVariable("ORGANESSONIUM_VIDEO_TEST_EXPORT_DIR") is string export && Directory.Exists(export))
-                        File.Copy(prepared.File.FullName, Path.Combine(export, "faststart-audio-video.mp4"), true);
+                        await File.WriteAllBytesAsync(Path.Combine(export, "faststart-audio-video.mp4"), optimized);
                     using var registry = new PreviewResourceRegistry();
                     var env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(root.FullName, "WebView"));
                     await view.EnsureCoreWebView2Async(env);

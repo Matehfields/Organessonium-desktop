@@ -2513,11 +2513,7 @@ public sealed partial class AppController : IAsyncDisposable
         var originalFile = file;
         var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.EffectiveUploadThreads, 1, 16);
         var sourceLength = file.Length;
-        var preserveLegacyTransfer = existingTransferState?.Encryption == null &&
-                                     existingTransferState?.UploadedChunks.Count > 0;
-        var progressTracker = new UploadProgressTracker(
-            ThumbnailCache.IsImage(name),
-            string.Equals(PreviewType(name), "video", StringComparison.Ordinal));
+        var progressTracker = new UploadProgressTracker(ThumbnailCache.IsImage(name));
         await ReportUploadItemProgressAsync(
             opId,
             fileIndex,
@@ -2530,14 +2526,13 @@ public sealed partial class AppController : IAsyncDisposable
             progressTracker: progressTracker);
 
         using var preparedVideo = existingTransferState?.UploadedChunks.Count > 0 && !existingTransferState.FastStartApplied
-            ? new PreparedVideoUpload(file, null, false)
+            ? new PreparedVideoUpload(file, false)
             : await Task.Run(() => Mp4FastStart.PrepareAsync(file, cancellationToken), cancellationToken);
         if (existingTransferState?.FastStartApplied == true && !preparedVideo.Applied)
             throw new IOException("Não foi possível reconstruir o faststart desta transferência. Os chunks já enviados foram preservados.");
         file = preparedVideo.File;
         sourceLength = file.Length;
 
-        IReadOnlyList<FileInfo>? parts = null;
         var totalChunks = ArchiveSplitter.GetPartCount(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes);
         var chunkSizeBytes = sourceLength > 0
             ? Math.Min(sourceLength, EncryptionService.MaximumPlaintextPayloadBytes)
@@ -2549,13 +2544,6 @@ public sealed partial class AppController : IAsyncDisposable
                 ArchiveSplitter.GetPartCount(sourceLength, (int)chunkSizeBytes) != existingTransferState.TotalChunks)
                 throw new IOException("O tamanho/layout da origem mudou; os chunks confirmados foram preservados.");
             totalChunks = existingTransferState.TotalChunks;
-        }
-        if (preserveLegacyTransfer)
-        {
-            parts = await ArchiveSplitter.SplitAsync(file, cancellationToken,
-                chunkSizeBytes > 0 ? (int)chunkSizeBytes : null);
-            totalChunks = parts.Count;
-            chunkSizeBytes = parts.Count > 0 ? parts.Max(part => part.Length) : 0;
         }
 
         var threadId = "";
@@ -2672,8 +2660,10 @@ public sealed partial class AppController : IAsyncDisposable
                     uploadedParts = Math.Max(confirmedParts, uploadedParts);
                     Interlocked.Exchange(ref confirmedParts, uploadedParts);
                     var bytePercent = sourceLength <= 0 ? 0 : (int)Math.Clamp(byteProgress.LogicalBytes * 100d / sourceLength, 0, 100);
-                    var partPercent = Math.Max(Percent(uploadedParts, totalChunks), bytePercent);
-                    var message = $"Partes confirmadas {uploadedParts}/{totalChunks}";
+                    var partPercent = bytePercent;
+                    var message = byteProgress.LogicalBytes >= sourceLength && sourceLength > 0
+                        ? "Concluindo"
+                        : $"{FormatTransferBytes(byteProgress.LogicalBytes)} / {FormatTransferBytes(sourceLength)} enviados";
                     _ = ReportUploadItemProgressAsync(
                         opId,
                         fileIndex,
@@ -2681,7 +2671,7 @@ public sealed partial class AppController : IAsyncDisposable
                         progressTracker.Original(partPercent),
                         message,
                         throttle,
-                        uploadedParts >= totalChunks,
+                        uploadedParts >= totalChunks || bytePercent >= 100,
                         useBatchUi,
                         progressTracker: progressTracker);
                 }
@@ -2736,7 +2726,8 @@ public sealed partial class AppController : IAsyncDisposable
                     using var owned = memoryCoordinator == null ? new UploadMemoryCoordinator(partParallelism) : null;
                     return await (memoryCoordinator ?? owned!).PreparePartAsync(_encryption, file, sourceLength,
                         (int)transferState.ChunkSizeBytes, encryptionContext.WithChunkIndex(index), cancellationToken,
-                        deferBuffers: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
+                        deferBuffers: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
+                        openSource: preparedVideo.OpenRead);
                 }
 
                 upload = await uploader.UploadResumableGeneratedAsync(
@@ -2771,9 +2762,11 @@ public sealed partial class AppController : IAsyncDisposable
             }
             else
             {
-                upload = await uploader.UploadResumableAsync(
+                upload = await uploader.UploadResumableGeneratedAsync(
                     name,
-                    parts!,
+                    totalChunks,
+                    index => UploadMemoryCoordinator.PreparePlainPartAsync(file, sourceLength,
+                        checked((int)chunkSizeBytes), index, cancellationToken, preparedVideo.OpenRead),
                     transferState.ThreadId,
                     transferState.BatchId,
                     uploadedMap,
@@ -2783,7 +2776,8 @@ public sealed partial class AppController : IAsyncDisposable
                     ReportChunkRateLimitWaitAsync,
                     maxParallelParts: partParallelism,
                     adaptiveUploadGate: adaptiveUploadGate,
-                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive);
+                    onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
+                    onPartTransferProgress: (index, wire) => { byteProgress.Report(index, wire); ReportUploadedParts(Volatile.Read(ref confirmedParts)); });
             }
             threadId = upload.ThreadId;
 
@@ -2815,7 +2809,7 @@ public sealed partial class AppController : IAsyncDisposable
                 fileIndex,
                 fileTotal,
                 progressTracker.Metadata(0),
-                "Enviando metadados",
+                "Concluindo",
                 throttle,
                 true,
                 useBatchUi,
@@ -2848,7 +2842,7 @@ public sealed partial class AppController : IAsyncDisposable
                 fileIndex,
                 fileTotal,
                 progressTracker.Metadata(70),
-                "Metadados enviados",
+                "Concluindo",
                 throttle,
                 true,
                 useBatchUi,
@@ -2917,454 +2911,150 @@ public sealed partial class AppController : IAsyncDisposable
 
             throw;
         }
-        finally
-        {
-            if (parts != null)
-            {
-                ArchiveSplitter.CleanupParts(parts, file);
-            }
-        }
     }
 
     private async Task<PreviewUploadIds> TryUploadGeneratedPreviewAsync(
-        string opId,
-        int fileIndex,
-        int fileTotal,
-        FileInfo file,
-        string name,
-        string threadId,
-        ForumUploader uploader,
-        AppSettings settings,
-        UiThrottle throttle,
-        Func<TimeSpan, Task> onRateLimitWait,
-        CancellationToken cancellationToken,
-        TransferState? transferState = null,
-        bool useBatchUi = false,
-        UploadProgressTracker? progressTracker = null,
-        EncryptedPayloadContext? previewEncryption = null)
+        string opId, int fileIndex, int fileTotal, FileInfo file, string name, string threadId,
+        ForumUploader uploader, AppSettings settings, UiThrottle throttle,
+        Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken,
+        TransferState? transferState = null, bool useBatchUi = false,
+        UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null)
     {
-        DirectoryInfo? tempDir = null;
-        var previewMessageId = "";
-        var videoPreviewMessageId = "";
-        IReadOnlyList<string> videoPreviewChunkMessageIds = [];
-        IReadOnlyList<ChunkReference>? videoPreviewChunkReferences = null;
-        long videoPreviewSizeBytes = 0;
+        var previewMessageId = transferState?.ThumbnailMessageId ?? "";
+        IReadOnlyList<string> videoChunks = transferState?.VideoPreview480pChunks ?? [];
+        IReadOnlyList<ChunkReference>? videoReferences = transferState?.VideoPreview480pChunkRefs;
+        var videoSize = transferState?.VideoPreview480pSizeBytes ?? 0;
+        var image = ThumbnailCache.IsImage(name);
+        var video = PreviewType(name) == "video";
+        if (!image && !video) return new PreviewUploadIds("", "", [], 0);
         try
         {
-            if (ThumbnailCache.IsImage(name))
+            if (previewMessageId.Length == 0)
             {
-                await ReportUploadItemProgressAsync(
-                    opId,
-                    fileIndex,
-                    fileTotal,
-                    progressTracker?.ThumbnailGeneration(0) ?? 0,
-                    "Gerando miniatura 200x200",
-                    throttle,
-                    true,
-                    useBatchUi,
-                    progressTracker: progressTracker);
-                var png = ThumbnailCache.CreateSquarePng(await File.ReadAllBytesAsync(file.FullName, cancellationToken));
-                ThumbnailCache.Store(threadId, png);
-                tempDir = Directory.CreateTempSubdirectory("organessonium_image_preview_");
-                var generated = new FileInfo(Path.Combine(tempDir.FullName, PreviewFileName(name, ".png")));
-                await File.WriteAllBytesAsync(generated.FullName, png, cancellationToken);
-                await ReportUploadItemProgressAsync(
-                    opId,
-                    fileIndex,
-                    fileTotal,
-                    progressTracker?.ThumbnailUpload(0) ?? 0,
-                    "Enviando miniatura",
-                    throttle,
-                    true,
-                    useBatchUi,
-                    progressTracker: progressTracker);
-                using var previewBudget = previewEncryption == null ? null : await RamUploadBudget.ReserveAsync(1, cancellationToken);
-                using var imageMemory = new UploadMemoryCoordinator(1);
-                using (var encryptedPreview = previewEncryption == null
-                    ? null
-                    : await imageMemory.PreparePartAsync(_encryption, generated, generated.Length,
-                        EncryptionService.MaximumPlaintextPayloadBytes, previewEncryption.WithChunkCount(1), cancellationToken))
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                    progressTracker?.ThumbnailGeneration(0) ?? 0, "Gerando miniatura",
+                    throttle, true, useBatchUi, progressTracker: progressTracker);
+                using var thumbnail = await VideoPreviewGenerator.CreateThumbnailAsync(file, cancellationToken);
+                ThumbnailCache.Store(threadId, thumbnail.Bytes);
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                    progressTracker?.ThumbnailUpload(0) ?? 99, "Enviando miniatura",
+                    throttle, true, useBatchUi, progressTracker: progressTracker);
+                using var memory = new UploadMemoryCoordinator(1);
+                var source = new FileInfo(Path.Combine(AppContext.BaseDirectory, "ram-thumbnail" + (image ? ".png" : ".jpg")));
+                using var part = previewEncryption != null
+                    ? await memory.PreparePartAsync(_encryption, source, thumbnail.Length,
+                        EncryptionService.MaximumPlaintextPayloadBytes, previewEncryption.WithChunkCount(1),
+                        cancellationToken, openSource: thumbnail.OpenRead)
+                    : await UploadMemoryCoordinator.PreparePlainPartAsync(source, thumbnail.Length,
+                        DiscordLimits.AttachmentBytes, 0, cancellationToken, thumbnail.OpenRead);
+                part.TransferProgress = wire =>
                 {
-                    previewMessageId = await uploader.UploadPreviewFileToThreadAsync(
-                        threadId,
-                        previewEncryption == null
-                            ? PayloadReference("PREVIEW|" + StripExtension(name))
-                            : PayloadMessage(previewEncryption, 1),
-                        encryptedPreview ?? new PreparedUploadPart(generated, generated.Length),
-                        cancellationToken,
-                        onRateLimitWait: onRateLimitWait);
-                }
-                await ReportUploadItemProgressAsync(
-                    opId,
-                    fileIndex,
-                    fileTotal,
-                    progressTracker?.ThumbnailUpload(100) ?? 100,
-                    "Miniatura enviada",
-                    throttle,
-                    true,
-                    useBatchUi,
-                    progressTracker: progressTracker);
+                    var percent = (int)Math.Clamp(wire * 100d / Math.Max(1, part.Length), 0, 100);
+                    _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                        progressTracker?.ThumbnailUpload(percent) ?? 99,
+                        percent >= 100 ? "Concluindo" : "Enviando miniatura",
+                        throttle, percent >= 100, useBatchUi, progressTracker: progressTracker);
+                };
+                previewMessageId = await uploader.UploadPreviewFileToThreadAsync(threadId,
+                    previewEncryption == null ? PayloadReference("PREVIEW|" + StripExtension(name)) : PayloadMessage(previewEncryption, 1),
+                    part, cancellationToken, onRateLimitWait: onRateLimitWait);
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                    progressTracker?.ThumbnailUpload(100) ?? 99, "Concluindo",
+                    throttle, true, useBatchUi, progressTracker: progressTracker);
                 if (transferState != null)
                 {
                     transferState.ThumbnailMessageId = previewMessageId;
                     await _transferManager.SaveAsync(transferState, cancellationToken);
                 }
-
-                return new PreviewUploadIds(previewMessageId, "", [], 0);
-            }
-
-            if (PreviewType(name) != "video")
-            {
-                return new PreviewUploadIds("", "", [], 0);
-            }
-
-            tempDir = Directory.CreateTempSubdirectory("organessonium_video_preview_");
-            previewMessageId = await TryCreateAndUploadVideoThumbnailAsync(
-                opId,
-                fileIndex,
-                fileTotal,
-                file,
-                name,
-                threadId,
-                tempDir,
-                uploader,
-                throttle,
-                onRateLimitWait,
-                cancellationToken,
-                useBatchUi,
-                progressTracker,
-                previewEncryption);
-            if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
-            {
-                transferState.ThumbnailMessageId = previewMessageId;
-                await _transferManager.SaveAsync(transferState, cancellationToken);
-            }
-
-            if (!settings.VideoPreviewQuality.Equals("original", StringComparison.OrdinalIgnoreCase))
-            {
-                try
-                {
-                    var generated = await VideoPreviewGenerator.Create480pAsync(
-                        file,
-                        tempDir,
-                        settings.HardwareAcceleration,
-                        progress => _ = ReportUploadItemProgressAsync(
-                            opId,
-                            fileIndex,
-                            fileTotal,
-                            progressTracker?.VideoPreviewGeneration(progress) ?? progress,
-                            $"Gerando prévia 480p - {progress}%",
-                            throttle,
-                            progress is 0 or 100,
-                            useBatchUi,
-                            progressTracker: progressTracker),
-                        cancellationToken,
-                        outputFileName: VideoPreviewFileName(name));
-                    await ReportUploadItemProgressAsync(
-                        opId,
-                        fileIndex,
-                        fileTotal,
-                        -1,
-                        "Enviando preview 480p",
-                        throttle,
-                        true,
-                        useBatchUi,
-                        progressTracker: progressTracker);
-                    var videoPreview = await UploadVideoPreview480Async(
-                        opId,
-                        fileIndex,
-                        fileTotal,
-                        threadId,
-                        name,
-                        generated,
-                        uploader,
-                        throttle,
-                        onRateLimitWait,
-                        cancellationToken,
-                        useBatchUi,
-                        settings.EffectiveUploadThreads,
-                        progressTracker,
-                        previewEncryption == null
-                            ? null
-                            : previewEncryption with { Role = EncryptedPayloadRoles.Video480p },
-                        transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
-                    videoPreviewChunkMessageIds = videoPreview.ChunkMessageIds;
-                    videoPreviewChunkReferences = videoPreview.ChunkReferences;
-                    videoPreviewMessageId = videoPreviewChunkReferences?.FirstOrDefault()?.MessageId ??
-                        videoPreviewChunkMessageIds.FirstOrDefault() ?? "";
-                    videoPreviewSizeBytes = videoPreview.SizeBytes;
-                    if (transferState != null)
-                    {
-                        transferState.VideoPreview480pChunks = videoPreviewChunkMessageIds.ToList();
-                        transferState.VideoPreview480pChunkRefs = videoPreviewChunkReferences?.ToList();
-                        transferState.VideoPreview480pSizeBytes = videoPreviewSizeBytes;
-                        await _transferManager.SaveAsync(transferState, cancellationToken);
-                    }
-
-                    if (string.IsNullOrWhiteSpace(previewMessageId))
-                    {
-                        previewMessageId = await TryCreateAndUploadVideoThumbnailAsync(
-                            opId,
-                            fileIndex,
-                            fileTotal,
-                            generated,
-                            name,
-                            threadId,
-                            tempDir,
-                            uploader,
-                            throttle,
-                            onRateLimitWait,
-                            cancellationToken,
-                            useBatchUi,
-                            progressTracker,
-                            previewEncryption);
-                        if (transferState != null && !string.IsNullOrWhiteSpace(previewMessageId))
-                        {
-                            transferState.ThumbnailMessageId = previewMessageId;
-                            await _transferManager.SaveAsync(transferState, cancellationToken);
-                        }
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine("[VideoPreviewUpload] " + ex.Message);
-                    AppLogger.Error("VideoPreviewUpload", ex, file.FullName);
-                }
             }
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            Debug.WriteLine("[PreviewUpload] " + ex.Message);
-            AppLogger.Error("PreviewUpload", ex, file.FullName);
-        }
-        finally
-        {
-            if (tempDir != null)
-            {
-                CleanDir(tempDir);
-            }
+            AppLogger.Error("PreviewUpload", ex);
+            await _bridge.CallAsync("_onNonfatalError", "O arquivo original foi enviado, mas a miniatura não pôde ser gerada.");
         }
 
-        return new PreviewUploadIds(previewMessageId, videoPreviewMessageId, videoPreviewChunkMessageIds, videoPreviewSizeBytes, videoPreviewChunkReferences);
+        if (video && !settings.VideoPreviewQuality.Equals("original", StringComparison.OrdinalIgnoreCase) && videoChunks.Count == 0)
+        {
+            try
+            {
+                using var generated = await VideoPreviewGenerator.Create480pAsync(file, settings.HardwareAcceleration,
+                    progress => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                        progressTracker?.VideoPreviewGeneration(progress) ?? 99,
+                        $"Gerando prévia 480p - {progress}%", throttle, progress is 0 or 100, useBatchUi, progressTracker: progressTracker),
+                    cancellationToken);
+                var result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
+                    generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
+                    settings.EffectiveUploadThreads, progressTracker,
+                    previewEncryption == null ? null : previewEncryption with { Role = EncryptedPayloadRoles.Video480p },
+                    transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
+                videoChunks = result.ChunkMessageIds;
+                videoReferences = result.ChunkReferences;
+                videoSize = result.SizeBytes;
+                if (transferState != null)
+                {
+                    transferState.VideoPreview480pChunks = videoChunks.ToList();
+                    transferState.VideoPreview480pChunkRefs = videoReferences?.ToList();
+                    transferState.VideoPreview480pSizeBytes = videoSize;
+                    await _transferManager.SaveAsync(transferState, cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                AppLogger.Error("VideoPreviewUpload", ex);
+                await _bridge.CallAsync("_onNonfatalError", "O arquivo original foi enviado, mas a prévia 480p não pôde ser gerada. " + ex.Message);
+            }
+        }
+        return new PreviewUploadIds(previewMessageId, videoReferences?.FirstOrDefault()?.MessageId ?? videoChunks.FirstOrDefault() ?? "",
+            videoChunks, videoSize, videoReferences);
     }
 
     private async Task<VideoPreviewUploadResult> UploadVideoPreview480Async(
-        string opId,
-        int fileIndex,
-        int fileTotal,
-        string threadId,
-        string originalName,
-        FileInfo generated,
-        ForumUploader uploader,
-        UiThrottle throttle,
-        Func<TimeSpan, Task> onRateLimitWait,
-        CancellationToken cancellationToken,
-        bool useBatchUi,
-        int maxParallelParts,
-        UploadProgressTracker? progressTracker,
-        EncryptedPayloadContext? videoEncryption,
+        string opId, int fileIndex, int fileTotal, string threadId, string originalName,
+        RamMediaPreview generated, ForumUploader uploader, UiThrottle throttle,
+        Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken, bool useBatchUi,
+        int maxParallelParts, UploadProgressTracker? progressTracker, EncryptedPayloadContext? videoEncryption,
         bool useAttachmentReferences = false)
     {
-        using var preparedVideo = await Mp4FastStart.PrepareAsync(generated, cancellationToken);
-        generated = preparedVideo.File;
-        if (videoEncryption != null)
+        using var prepared = await Mp4FastStart.PrepareAsync(generated, cancellationToken);
+        var chunkBytes = videoEncryption == null ? DiscordLimits.AttachmentBytes : EncryptionService.MaximumPlaintextPayloadBytes;
+        var totalParts = ArchiveSplitter.GetPartCount(generated.Length, chunkBytes);
+        var context = videoEncryption?.WithChunkCount(totalParts);
+        using var memory = new UploadMemoryCoordinator(maxParallelParts);
+        var bytes = new UploadByteProgress(generated.Length, chunkBytes, context != null, (_, _) => { });
+        void Report()
         {
-            var totalParts = ArchiveSplitter.GetPartCount(generated.Length, EncryptionService.MaximumPlaintextPayloadBytes);
-            var encryptionContext = videoEncryption.WithChunkCount(totalParts);
-            using var previewMemory = new UploadMemoryCoordinator(maxParallelParts);
-            var result = await uploader.UploadResumableGeneratedAsync(
-                VideoPreviewFileName(originalName),
-                totalParts,
-                index => previewMemory.PreparePartAsync(_encryption, generated, generated.Length,
-                    EncryptionService.MaximumPlaintextPayloadBytes, encryptionContext.WithChunkIndex(index), cancellationToken,
-                    deferBuffers: useAttachmentReferences),
-                threadId,
-                "",
-                new Dictionary<int, string>(),
-                uploadedParts =>
-                {
-                    var partPercent = Percent(uploadedParts, totalParts);
-                    var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{totalParts}";
-                    _ = ReportUploadItemProgressAsync(
-                        opId,
-                        fileIndex,
-                        fileTotal,
-                        progressTracker?.VideoPreviewUpload(partPercent) ?? partPercent,
-                        msg,
-                        throttle,
-                        uploadedParts >= totalParts,
-                        useBatchUi,
-                        progressTracker: progressTracker);
-                },
-                cancellationToken: cancellationToken,
-                onRateLimitWait: onRateLimitWait,
-                maxParallelParts: maxParallelParts,
-                encryptedPayload: encryptionContext,
-                cleanupPart: TryDeleteFile,
-                useAttachmentReferences: useAttachmentReferences,
-                batchPreparationGate: previewMemory.BatchPreparationGate,
-                streamPreparedParts: useAttachmentReferences);
-            return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds, result.ChunkReferences);
+            var message = bytes.LogicalBytes >= generated.Length ? "Concluindo"
+                : $"Prévia 480p: {FormatTransferBytes(bytes.LogicalBytes)} / {FormatTransferBytes(generated.Length)} enviados";
+            _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                progressTracker?.VideoPreviewUpload(0) ?? 99, message, throttle,
+                bytes.LogicalBytes >= generated.Length, useBatchUi, progressTracker: progressTracker);
         }
-
-        var previewParts = await ArchiveSplitter.SplitAsync(generated, cancellationToken);
-        var payloadParts = previewParts;
-        try
-        {
-            if (payloadParts.Count == 1)
-            {
-                await ReportUploadItemProgressAsync(
-                    opId,
-                    fileIndex,
-                    fileTotal,
-                    progressTracker?.VideoPreviewUpload(0) ?? 0,
-                    "Enviando preview 480p",
-                    throttle,
-                    true,
-                    useBatchUi,
-                    progressTracker: progressTracker);
-                var messageId = await uploader.UploadPreviewFileToThreadAsync(
-                    threadId,
-                    "VIDEO_PREVIEW_480P|" + StripExtension(originalName),
-                    payloadParts[0],
-                    cancellationToken,
-                    onRateLimitWait: onRateLimitWait);
-                await ReportUploadItemProgressAsync(
-                    opId,
-                    fileIndex,
-                    fileTotal,
-                    progressTracker?.VideoPreviewUpload(100) ?? 100,
-                    "Preview 480p enviada",
-                    throttle,
-                    true,
-                    useBatchUi,
-                    progressTracker: progressTracker);
-                return new VideoPreviewUploadResult(generated.Length, [messageId]);
-            }
-
-            var chunks = await uploader.UploadPreviewToThreadAsync(
-                threadId,
-                "video-480",
-                payloadParts,
-                uploadedParts =>
-                {
-                    var partPercent = Percent(uploadedParts, payloadParts.Count);
-                    var msg = $"Enviando preview 480p - parte {Math.Max(1, uploadedParts)}/{payloadParts.Count}";
-                    _ = ReportUploadItemProgressAsync(
-                        opId,
-                        fileIndex,
-                        fileTotal,
-                        progressTracker?.VideoPreviewUpload(partPercent) ?? partPercent,
-                        msg,
-                        throttle,
-                        uploadedParts >= payloadParts.Count,
-                        useBatchUi,
-                        progressTracker: progressTracker);
-                },
-                cancellationToken,
-                onRateLimitWait: onRateLimitWait,
-                encryptedPayload: videoEncryption);
-            return new VideoPreviewUploadResult(generated.Length, chunks);
-        }
-        finally
-        {
-            ArchiveSplitter.CleanupParts(previewParts, generated);
-        }
+        var result = await uploader.UploadResumableGeneratedAsync(VideoPreviewFileName(originalName), totalParts,
+            index => context != null
+                ? memory.PreparePartAsync(_encryption, prepared.File, generated.Length, chunkBytes,
+                    context.WithChunkIndex(index), cancellationToken, deferBuffers: useAttachmentReferences, openSource: prepared.OpenRead)
+                : UploadMemoryCoordinator.PreparePlainPartAsync(prepared.File, generated.Length, chunkBytes, index, cancellationToken, prepared.OpenRead),
+            threadId, "", new Dictionary<int, string>(), _ => Report(),
+            cancellationToken: cancellationToken, onRateLimitWait: onRateLimitWait,
+            maxParallelParts: maxParallelParts, encryptedPayload: context,
+            useAttachmentReferences: context != null && useAttachmentReferences,
+            batchPreparationGate: memory.BatchPreparationGate,
+            streamPreparedParts: context != null && useAttachmentReferences,
+            onPartTransferProgress: (index, wire) => { bytes.Report(index, wire); Report(); },
+            legacyPreviewKind: context == null ? "video-480" : null);
+        return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds, result.ChunkReferences);
     }
 
-    private async Task<string> TryCreateAndUploadVideoThumbnailAsync(
-        string opId,
-        int fileIndex,
-        int fileTotal,
-        FileInfo source,
-        string originalName,
-        string threadId,
-        DirectoryInfo tempDir,
-        ForumUploader uploader,
-        UiThrottle throttle,
-        Func<TimeSpan, Task> onRateLimitWait,
-        CancellationToken cancellationToken,
-        bool useBatchUi,
-        UploadProgressTracker? progressTracker,
-        EncryptedPayloadContext? previewEncryption)
+    private static string FormatTransferBytes(long value)
     {
-        try
-        {
-            await ReportUploadItemProgressAsync(
-                opId,
-                fileIndex,
-                fileTotal,
-                progressTracker?.ThumbnailGeneration(0) ?? 0,
-                "Gerando miniatura 200x200",
-                throttle,
-                true,
-                useBatchUi,
-                progressTracker: progressTracker);
-            var thumbnail = await VideoPreviewGenerator.CreateThumbnailAsync(
-                source,
-                tempDir,
-                PreviewFileName(originalName, ".jpg"),
-                cancellationToken);
-            if (thumbnail == null)
-            {
-                return "";
-            }
-
-            ThumbnailCache.Store(threadId, await File.ReadAllBytesAsync(thumbnail.FullName, cancellationToken));
-            await ReportUploadItemProgressAsync(
-                opId,
-                fileIndex,
-                fileTotal,
-                progressTracker?.ThumbnailUpload(0) ?? 0,
-                "Enviando miniatura",
-                throttle,
-                true,
-                useBatchUi,
-                progressTracker: progressTracker);
-            using var previewBudget = previewEncryption == null ? null : await RamUploadBudget.ReserveAsync(1, cancellationToken);
-            using var thumbnailMemory = new UploadMemoryCoordinator(1);
-            using var encryptedThumbnail = previewEncryption == null
-                ? null
-                : await thumbnailMemory.PreparePartAsync(_encryption, thumbnail, thumbnail.Length,
-                    EncryptionService.MaximumPlaintextPayloadBytes, previewEncryption.WithChunkCount(1), cancellationToken);
-            var messageId = await uploader.UploadPreviewFileToThreadAsync(
-                threadId,
-                previewEncryption == null
-                    ? PayloadReference("PREVIEW|" + StripExtension(originalName))
-                    : PayloadMessage(previewEncryption, 1),
-                encryptedThumbnail ?? new PreparedUploadPart(thumbnail, thumbnail.Length),
-                cancellationToken,
-                onRateLimitWait: onRateLimitWait);
-            await ReportUploadItemProgressAsync(
-                opId,
-                fileIndex,
-                fileTotal,
-                progressTracker?.ThumbnailUpload(100) ?? 100,
-                "Miniatura de vídeo enviada",
-                throttle,
-                true,
-                useBatchUi,
-                progressTracker: progressTracker);
-            return messageId;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine("[VideoThumbnailUpload] " + ex.Message);
-            AppLogger.Error("VideoThumbnailUpload", ex, source.FullName);
-            return "";
-        }
+        var amount = (double)Math.Max(0, value);
+        var units = new[] { "B", "KB", "MB", "GB", "TB" };
+        var unit = 0;
+        while (amount >= 1024 && unit < units.Length - 1) { amount /= 1024; unit++; }
+        return amount.ToString(unit == 0 ? "0" : "0.0", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
     }
 
     private async Task StartDownloadAsync(string threadId, string name, DirectoryInfo? selectedDestination = null, AppEntry? selectedVersion = null)
@@ -3412,14 +3102,22 @@ public sealed partial class AppController : IAsyncDisposable
                         progress =>
                         {
                             Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
-                            _ = OpsProgressAsync(opId, progress.Percent, progress.Message);
+                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent),
+                                $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
                             _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
                         });
                     await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                 }
                 else
                 {
-                    await Downloader().DownloadAndAssembleAsync(threadId, dest, msg => _ = OpsUpdateAsync(opId, "active", msg), cancellationToken);
+                    await Downloader().DownloadAndAssembleAsync(threadId, dest, msg => _ = OpsUpdateAsync(opId, "active", msg), cancellationToken,
+                        progress =>
+                        {
+                            Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
+                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent),
+                                $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
+                            _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                        });
                 }
 
                 var completedBytes = Interlocked.Read(ref totalDownloadBytes);
@@ -3539,7 +3237,8 @@ public sealed partial class AppController : IAsyncDisposable
                                 var overallPercent = totalBytes > 0
                                     ? Math.Clamp((int)Math.Round(aggregate * 100.0 / totalBytes), 0, 100)
                                     : Percent(done, toDownload.Count);
-                                _ = OpsProgressAsync(opId, overallPercent, $"({i + 1}/{toDownload.Count}) {progress.Message}");
+                                _ = OpsProgressAsync(opId, Math.Min(99, overallPercent),
+                                    $"{FormatTransferBytes(aggregate)} / {FormatTransferBytes(totalBytes)} baixados");
                                 _ = OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, aggregate, totalBytes);
                             });
                         await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
@@ -7233,14 +6932,12 @@ private static string ClassifyConnectError(Exception ex)
     private sealed class UploadProgressTracker
     {
         private readonly bool _isImage;
-        private readonly bool _isVideo;
         private readonly object _sync = new();
         private int _current;
 
-        public UploadProgressTracker(bool isImage, bool isVideo)
+        public UploadProgressTracker(bool isImage)
         {
             _isImage = isImage;
-            _isVideo = isVideo;
         }
 
         public int Current
@@ -7254,33 +6951,28 @@ private static string ClassifyConnectError(Exception ex)
             }
         }
 
-        public int Preparing(int percent) => Report(0, 5, percent);
+        public int Preparing(int percent) => Current;
 
         public int Original(int percent)
         {
-            var end = _isVideo ? 65 : (_isImage ? 75 : 95);
-            return Report(5, end, percent);
+            return Report(0, _isImage ? 98 : 99, percent);
         }
 
         public int ThumbnailGeneration(int percent)
         {
-            var start = _isVideo ? 65 : 75;
-            var end = _isVideo ? 70 : 87;
-            return Report(start, end, percent);
+            return Current;
         }
 
         public int ThumbnailUpload(int percent)
         {
-            var start = _isVideo ? 70 : 87;
-            var end = _isVideo ? 73 : 95;
-            return Report(start, end, percent);
+            return _isImage ? Report(98, 99, percent) : Current;
         }
 
-        public int VideoPreviewGeneration(int percent) => Report(73, 84, percent);
+        public int VideoPreviewGeneration(int percent) => Current;
 
-        public int VideoPreviewUpload(int percent) => Report(84, 95, percent);
+        public int VideoPreviewUpload(int percent) => Current;
 
-        public int Metadata(int percent) => Report(95, 100, percent);
+        public int Metadata(int percent) => Current;
 
         public int Done() => Report(100, 100, 100);
 

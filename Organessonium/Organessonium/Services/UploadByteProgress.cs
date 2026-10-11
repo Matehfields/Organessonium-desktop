@@ -21,7 +21,7 @@ internal sealed class UploadByteProgress(long size, long chunkSize, bool encrypt
             _logicalBytes += logical - previous.Logical;
             _wireBytes += wire >= previous.Wire ? wire - previous.Wire : Math.Max(0, wire);
             _parts[index] = (Math.Max(0, wire), logical);
-            Publish(false);
+            Publish(_logicalBytes >= size);
         }
     }
 

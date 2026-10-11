@@ -221,10 +221,10 @@ internal sealed class UploadMemoryCoordinator : IDisposable
 
     internal Task<PreparedUploadPart> PreparePartAsync(EncryptionService encryption, FileInfo source,
         long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token,
-        bool deferBuffers = false)
+        bool deferBuffers = false, Func<Stream>? openSource = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!deferBuffers) return PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, token);
+        if (!deferBuffers) return PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, token, openSource: openSource);
         var offset = checked((long)context.ChunkIndex * chunkBytes);
         var length = checked((int)Math.Min(chunkBytes, Math.Max(0, expectedLength - offset)));
         var replay = new EncryptedUploadReplayState();
@@ -234,16 +234,19 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             async sendToken =>
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, sendToken);
-                return await PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, linked.Token, replay).ConfigureAwait(false);
+                return await PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, linked.Token, replay, openSource).ConfigureAwait(false);
             }, replay));
     }
 
     private static Task<PreparedUploadPart> PrepareMaterializedAsync(EncryptionService encryption, FileInfo source,
         long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token,
-        EncryptedUploadReplayState? replay = null) => Task.Run(async () =>
+        EncryptedUploadReplayState? replay = null, Func<Stream>? openSource = null) => Task.Run(async () =>
     {
-        source.Refresh();
-        if (source.Length != expectedLength) throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
+        if (openSource == null)
+        {
+            source.Refresh();
+            if (source.Length != expectedLength) throw new IOException("O arquivo mudou enquanto o upload estava em andamento.");
+        }
         var offset = checked((long)context.ChunkIndex * chunkBytes);
         var length = checked((int)Math.Min(chunkBytes, Math.Max(0, expectedLength - offset)));
         if (context.ChunkIndex > 0 && offset >= expectedLength) throw new EndOfStreamException("Chunk ausente na origem.");
@@ -257,7 +260,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             lease = RamUploadBudget.Pool.Rent(length, checked(length + EncryptionService.EnvelopeOverheadBytes),
                 () => RamUploadBudget.Chunks.Release());
             var encryptedLength = await encryption.EncryptFileRangeIntoAsync(source, offset, length,
-                lease.Plaintext, lease.Ciphertext, context, token, replay).ConfigureAwait(false);
+                lease.Plaintext, lease.Ciphertext, context, token, replay, openSource).ConfigureAwait(false);
             lease.ReleasePlaintext();
             return new PreparedUploadPart(EncryptedPayloadProtocol.FileName(context.Role, context.ChunkIndex, context.ChunkCount),
                 encryptedLength, length, lease);
@@ -272,6 +275,28 @@ internal sealed class UploadMemoryCoordinator : IDisposable
     }, token);
 
     public void Dispose() => _disposed = true;
+
+    internal static Task<PreparedUploadPart> PreparePlainPartAsync(FileInfo source, long expectedLength,
+        int chunkBytes, int index, CancellationToken token, Func<Stream>? openSource = null) => Task.Run(async () =>
+    {
+        var offset = checked((long)index * chunkBytes);
+        var length = checked((int)Math.Min(chunkBytes, Math.Max(0, expectedLength - offset)));
+        using var reservation = await RamUploadBudget.ReserveBytesAsync(length, token).ConfigureAwait(false);
+        await RamUploadBudget.Chunks.WaitAsync(token).ConfigureAwait(false);
+        UploadChunkBufferLease? lease = null;
+        try
+        {
+            lease = RamUploadBudget.Pool.Rent(0, length, () => RamUploadBudget.Chunks.Release());
+            await using var input = openSource?.Invoke() ?? PreparedVideoUpload.OpenFile(source);
+            if (input.Length != expectedLength) throw new IOException("A origem mudou durante o upload.");
+            input.Position = offset;
+            await input.ReadExactlyAsync(lease.Ciphertext[..length], token).ConfigureAwait(false);
+            lease.ReleasePlaintext();
+            var uploadName = expectedLength <= chunkBytes ? source.Name : $"{source.Name}.{index + 1:D3}";
+            return new PreparedUploadPart(uploadName, length, length, lease);
+        }
+        catch { if (lease != null) lease.Dispose(); else RamUploadBudget.Chunks.Release(); throw; }
+    }, token);
 }
 
 internal sealed class UploadChunkBufferLease : IDisposable

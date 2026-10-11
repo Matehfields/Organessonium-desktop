@@ -11,64 +11,63 @@ public static class Mp4FastStart
     private static readonly HashSet<string> TopLevelTypes = ["ftyp", "free", "skip", "wide", "mdat", "moov"];
     private static readonly HashSet<string> Containers = ["moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "udta", "meta"];
 
-    public static async Task<PreparedVideoUpload> PrepareAsync(FileInfo original, CancellationToken cancellationToken = default)
+    public static Task<PreparedVideoUpload> PrepareAsync(FileInfo original, CancellationToken cancellationToken = default) =>
+        PrepareCoreAsync(original, () => PreparedVideoUpload.OpenFile(original), null, cancellationToken);
+
+    internal static Task<PreparedVideoUpload> PrepareAsync(RamMediaPreview preview, CancellationToken cancellationToken = default) =>
+        PrepareCoreAsync(new FileInfo(Path.Combine(AppContext.BaseDirectory, "ram-preview.mp4")), preview.OpenRead, preview.Length, cancellationToken);
+
+    private static async Task<PreparedVideoUpload> PrepareCoreAsync(FileInfo original, Func<Stream> openSource,
+        long? memoryLength, CancellationToken cancellationToken)
     {
-        if (!original.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase)) return new(original, null, false);
-        DirectoryInfo? temporary = null;
+        if (!original.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase)) return new(original, false);
         try
         {
-            await using var input = new FileStream(original.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true);
+            await using var input = openSource();
             var boxes = await ReadTopLevelAsync(input, cancellationToken).ConfigureAwait(false);
             var moovs = boxes.Where(b => b.Type == "moov").ToArray();
             var mdats = boxes.Where(b => b.Type == "mdat").ToArray();
             if (moovs.Length != 1 || mdats.Length == 0 || boxes.Count == 0 || boxes[0].Type != "ftyp")
                 throw new InvalidDataException("Estrutura MP4 não suportada para faststart.");
             var moov = moovs[0];
-            if (moov.Offset < mdats[0].Offset) return new(original, null, false);
+            if (moov.Offset < mdats[0].Offset) return new(original, false, openSource, sourceLength: memoryLength);
             if (boxes.Any(b => !TopLevelTypes.Contains(b.Type)) || moov.Size > MaximumMoovBytes || moov.ExtendsToEnd)
                 throw new InvalidDataException("MP4 fragmentado ou estrutura não suportada para faststart.");
-            input.Position = moov.Offset;
-            var metadata = new byte[checked((int)moov.Size)];
-            await input.ReadExactlyAsync(metadata, cancellationToken).ConfigureAwait(false);
-            var ordered = boxes.Where(b => b != moov).ToList();
-            ordered.Insert(ordered.FindIndex(b => b.Type == "mdat"), moov);
-            var relocated = new Dictionary<long, long>();
-            long position = 0;
-            foreach (var box in ordered) { relocated[box.Offset] = position; position = checked(position + box.Size); }
-            var offsetTables = PatchContainer(metadata, moov.Header, metadata.Length, mdats, relocated, 0);
-            if (offsetTables == 0) throw new InvalidDataException("MP4 sem tabela de offsets de amostras.");
-
-            temporary = Directory.CreateTempSubdirectory("organessonium-faststart-");
-            var outputFile = new FileInfo(Path.Combine(temporary.FullName, original.Name));
-            await using (var output = new FileStream(outputFile.FullName, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
+            // Keep enough headroom for the first payload so concurrent indexes cannot starve every upload.
+            var required = moov.Size + DiscordLimits.AttachmentBytes;
+            using var reservation = await RamUploadBudget.ReserveExternalBytesAsync(required, required, cancellationToken).ConfigureAwait(false);
+            byte[]? metadata = null;
+            try
             {
-                var buffer = new byte[128 * 1024];
-                foreach (var box in ordered)
-                {
-                    if (box == moov) { await output.WriteAsync(metadata, cancellationToken).ConfigureAwait(false); continue; }
-                    input.Position = box.Offset;
-                    var remaining = box.Size;
-                    while (remaining > 0)
-                    {
-                        var take = (int)Math.Min(remaining, buffer.Length);
-                        await input.ReadExactlyAsync(buffer.AsMemory(0, take), cancellationToken).ConfigureAwait(false);
-                        await output.WriteAsync(buffer.AsMemory(0, take), cancellationToken).ConfigureAwait(false);
-                        remaining -= take;
-                    }
-                }
-                await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-                if (output.Length != input.Length) throw new InvalidDataException("Tamanho inesperado após faststart.");
+                input.Position = moov.Offset;
+                metadata = new byte[checked((int)moov.Size)];
+                await input.ReadExactlyAsync(metadata, cancellationToken).ConfigureAwait(false);
+                var ordered = boxes.Where(b => b != moov).ToList();
+                ordered.Insert(ordered.FindIndex(b => b.Type == "mdat"), moov);
+                var relocated = new Dictionary<long, long>();
+                long position = 0;
+                foreach (var box in ordered) { relocated[box.Offset] = position; position = checked(position + box.Size); }
+                var offsetTables = PatchContainer(metadata, moov.Header, metadata.Length, mdats, relocated, 0);
+                if (offsetTables == 0) throw new InvalidDataException("MP4 sem tabela de offsets de amostras.");
+
+                // Only the patched moov is resident. Media ranges are read from the original on demand.
+                var layout = ordered.ToArray();
+                return new PreparedVideoUpload(original, true,
+                    () => new RelocatedMp4Stream(openSource(), layout, relocated, moov, metadata), metadata, memoryLength);
             }
-            return new PreparedVideoUpload(outputFile, temporary, true);
+            catch
+            {
+                if (metadata != null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(metadata);
+                throw;
+            }
         }
-        catch (OperationCanceledException) { Cleanup(temporary); throw; }
-        catch (Exception ex) when (ex is IOException or OverflowException or ArgumentException or UnauthorizedAccessException)
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or OverflowException or ArgumentException or UnauthorizedAccessException)
         {
-            Cleanup(temporary);
             // Do not persist a local source path or private media name in diagnostics.
             AppLogger.Error("Video.FastStart", new IOException("Não foi possível preparar o container MP4; upload original preservado.",
                 new InvalidDataException(ex is InvalidDataException ? ex.Message : ex.GetType().Name)));
-            return new PreparedVideoUpload(original, null, false);
+            return new PreparedVideoUpload(original, false, openSource, sourceLength: memoryLength);
         }
     }
 
@@ -142,15 +141,87 @@ public static class Mp4FastStart
         return tables;
     }
     private sealed record Box(string Type, long Offset, long Size, int Header, bool ExtendsToEnd);
-    internal static void Cleanup(DirectoryInfo? temporary)
+    private sealed class RelocatedMp4Stream(Stream source, Box[] boxes, IReadOnlyDictionary<long, long> offsets,
+        Box moov, byte[] metadata) : Stream
     {
-        if (temporary != null) try { temporary.Delete(true); } catch { }
+        private readonly long[] _starts = boxes.Select(box => offsets[box.Offset]).ToArray();
+        private long _position;
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => source.Length;
+        public override long Position { get => _position; set => Seek(value, SeekOrigin.Begin); }
+        private int CurrentBox()
+        {
+            var index = Array.BinarySearch(_starts, _position);
+            return index >= 0 ? index : ~index - 1;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            if (_position >= Length || buffer.Length == 0) return 0;
+            var index = CurrentBox();
+            var box = boxes[index];
+            var within = _position - _starts[index];
+            var take = (int)Math.Min(buffer.Length, box.Size - within);
+            int read;
+            if (box == moov) { metadata.AsSpan((int)within, take).CopyTo(buffer); read = take; }
+            else { source.Position = box.Offset + within; read = source.Read(buffer[..take]); }
+            _position += read;
+            return read;
+        }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested();
+            if (_position >= Length || buffer.Length == 0) return 0;
+            var index = CurrentBox();
+            var box = boxes[index];
+            var within = _position - _starts[index];
+            var take = (int)Math.Min(buffer.Length, box.Size - within);
+            int read;
+            if (box == moov) { metadata.AsMemory((int)within, take).CopyTo(buffer); read = take; }
+            else { source.Position = box.Offset + within; read = await source.ReadAsync(buffer[..take], token).ConfigureAwait(false); }
+            _position += read;
+            return read;
+        }
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var target = origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => checked(_position + offset), SeekOrigin.End => checked(Length + offset), _ => throw new ArgumentOutOfRangeException(nameof(origin)) };
+            if (target < 0) throw new IOException("Posição inválida na origem MP4.");
+            return _position = target;
+        }
+        public override void Flush() { }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) source.Dispose(); base.Dispose(disposing); }
+        public override async ValueTask DisposeAsync() { await source.DisposeAsync().ConfigureAwait(false); GC.SuppressFinalize(this); }
     }
 }
 
-public sealed class PreparedVideoUpload(FileInfo file, DirectoryInfo? temporary, bool applied) : IDisposable
+public sealed class PreparedVideoUpload(FileInfo file, bool applied, Func<Stream>? open = null, byte[]? metadata = null,
+    long? sourceLength = null) : IDisposable
 {
     public FileInfo File { get; } = file;
     public bool Applied { get; } = applied;
-    public void Dispose() => Mp4FastStart.Cleanup(temporary);
+    public long Length { get; } = sourceLength ?? file.Length;
+    private readonly DateTime _sourceModified = sourceLength == null ? file.LastWriteTimeUtc : default;
+    private bool _disposed;
+    internal static Stream OpenFile(FileInfo source) => new FileStream(source.FullName, FileMode.Open,
+        FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.RandomAccess);
+    public Stream OpenRead()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (sourceLength == null)
+        {
+            File.Refresh();
+            if (!File.Exists || File.Length != Length || File.LastWriteTimeUtc != _sourceModified)
+                throw new IOException("A origem mudou durante o upload. Os chunks confirmados foram preservados.");
+        }
+        return open?.Invoke() ?? OpenFile(File);
+    }
+    public void Dispose()
+    {
+        _disposed = true;
+        if (metadata != null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(metadata);
+    }
 }

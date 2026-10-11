@@ -8,10 +8,16 @@ public partial class App : Application
 {
     protected override async void OnStartup(StartupEventArgs e)
     {
+        if (e.Args.FirstOrDefault() == VideoPreviewWorker.Argument)
+        {
+            Shutdown(await VideoPreviewWorker.RunAsync(e.Args));
+            return;
+        }
         DispatcherUnhandledException += (_, args) =>
         {
             AppLogger.Error("App.DispatcherUnhandledException", args.Exception);
             args.Handled = true;
+            if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync();
         };
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
@@ -28,6 +34,8 @@ public partial class App : Application
         {
             AppLogger.Error("App.UnobservedTaskException", args.Exception);
             args.SetObserved();
+            if (!Dispatcher.HasShutdownStarted)
+                Dispatcher.BeginInvoke(new Action(() => { if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync(); }));
         };
 
         if (e.Args.Any(arg => arg.Equals("--debug-names", StringComparison.OrdinalIgnoreCase)))

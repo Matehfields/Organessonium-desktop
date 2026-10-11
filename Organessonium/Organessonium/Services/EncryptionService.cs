@@ -172,7 +172,8 @@ public sealed class EncryptionService
         Memory<byte> encryptedBuffer,
         EncryptedPayloadContext context,
         CancellationToken cancellationToken = default,
-        EncryptedUploadReplayState? replay = null)
+        EncryptedUploadReplayState? replay = null,
+        Func<Stream>? openSource = null)
     {
         if (offset < 0 || length < 0)
         {
@@ -192,7 +193,7 @@ public sealed class EncryptionService
 
         try
         {
-            await using var input = new FileStream(
+            await using var input = openSource?.Invoke() ?? new FileStream(
                 source.FullName,
                 FileMode.Open,
                 FileAccess.Read,

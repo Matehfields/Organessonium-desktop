@@ -12,6 +12,7 @@ let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
 let historyBack = [], historyForward = [];
 let confirmCb = null;
+const nonfatalMessages = [];
 let uploadConflictState = null;
 let settings = {
     accentColorMode:'system', accentColor:'#0078D4',
@@ -2230,6 +2231,10 @@ function updatePdfProgress(loadingPage = null) {
 
 window._onStatus  = (m,l) => setStatus(m, l);
 window._onError   = m     => setStatus(t('errorPrefix') + m, false);
+window._onNonfatalError = message => {
+    nonfatalMessages.push(String(message));
+    showNextNonfatalError();
+};
 window._onUploadConflict = (requestId, payload) => openUploadConflict(requestId, payload || {});
 window._onPreviewCacheCleared = () => {
     setStatus(t('cacheCleared'), false);
@@ -2498,6 +2503,8 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     item.dataset.metricTotal = String(Math.max(1, Number(totalItems) || 1));
     item.dataset.metricSpeed = formatTransferRate(state.speed);
     item.dataset.metricReady = 'true';
+    item.dataset.metricBytes = String(bytes);
+    item.dataset.metricByteTotal = String(total);
 
     const etaEl = $('op-eta-' + id);
     if (etaEl) {
@@ -2508,6 +2515,7 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
             : '';
         etaEl.classList.toggle('hidden', !etaEl.textContent);
     }
+    refreshBatchProgress(id);
     refreshOpsTitle();
 };
 
@@ -2558,6 +2566,13 @@ function refreshBatchProgress(id) {
     if (!item || !item.classList.contains('op-batch')) return;
     const rows = Array.from(item.querySelectorAll('.op-file-row'));
     if (!rows.length) return;
+    const byteTotal = Number(item.dataset.metricByteTotal) || 0;
+    if (byteTotal > 0) {
+        const cap = rows.every(row => row.dataset.fileStatus === 'done') ? 100
+            : (rows.length === 1 ? Math.min(99, Number(rows[0].dataset.progress) || 0) : 99);
+        setOpProgress(id, Math.min(cap, (Number(item.dataset.metricBytes) || 0) * 100 / byteTotal));
+        return;
+    }
     const total = rows.reduce((sum, row) => sum + Math.max(0, Number(row.dataset.progress) || 0), 0);
     setOpProgress(id, total / rows.length);
 }
@@ -5362,12 +5377,20 @@ function confirmRename() {
     window.bridge.renameItem(renameTarget.metadataMessageId, name);
     closeRenameModal();
 }
-function askConfirm(title, msg, onYes, confirmKey = 'delete') {
+function askConfirm(title, msg, onYes, confirmKey = 'delete', singleButton = false) {
     $('confirm-title').textContent=title; $('confirm-message').textContent=msg;
     $('confirm-ok').textContent=t(confirmKey);
+    $('confirm-cancel').classList.toggle('hidden', singleButton);
     confirmCb=onYes; confirmOverlay.classList.remove('hidden'); setTimeout(()=>$('confirm-ok').focus(),50);
 }
-function hideConfirm() { confirmOverlay.classList.add('hidden'); confirmCb=null; }
+function hideConfirm() {
+    confirmOverlay.classList.add('hidden'); confirmCb=null;
+    setTimeout(showNextNonfatalError, 0);
+}
+function showNextNonfatalError() {
+    if (!nonfatalMessages.length || !confirmOverlay.classList.contains('hidden')) return;
+    askConfirm(t('errorPrefix').replace(/[:\s]+$/, ''), nonfatalMessages.shift(), () => {}, 'close', true);
+}
 
 function openUploadConflict(requestId, payload = {}) {
     if (!requestId || !uploadConflictOverlay) return;

@@ -7,6 +7,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Organessonium.Models;
 using Organessonium.Services;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.NetworkTests;
 
@@ -293,14 +294,58 @@ internal static partial class Program
                 await File.WriteAllBytesAsync(path, originalBytes);
                 using var prepared = await Mp4FastStart.PrepareAsync(new FileInfo(path));
                 if (!prepared.Applied) return TestOutcome.Fail("MP4 compatível não recebeu faststart");
-                var result = await File.ReadAllBytesAsync(prepared.File.FullName);
+                using var remuxed = new MemoryStream();
+                await using (var input = prepared.OpenRead()) await input.CopyToAsync(remuxed);
+                var result = remuxed.ToArray();
                 var expectedOffset = oldOffset + moov.Length;
                 var tablePos = FindAsciiBytes(result, co64 ? "co64" : "stco") + 12;
                 var actual = co64 ? BinaryPrimitives.ReadUInt64BigEndian(result.AsSpan(tablePos, 8)) : BinaryPrimitives.ReadUInt32BigEndian(result.AsSpan(tablePos, 4));
                 if (actual != (ulong)expectedOffset || !result.AsSpan(expectedOffset, sample.Length).SequenceEqual(sample) || result.Length != originalBytes.Length)
                     return TestOutcome.Fail("stco/co64 ou mídia alterados pelo remux");
-                using var already = await Mp4FastStart.PrepareAsync(prepared.File);
-                if (already.Applied || already.File.FullName != prepared.File.FullName) return TestOutcome.Fail("MP4 faststart foi reprocessado");
+                using var ram = new RamMediaPreview(result.ToArray());
+                using var already = await Mp4FastStart.PrepareAsync(ram);
+                if (already.Applied || already.Length != result.Length) return TestOutcome.Fail("MP4 faststart foi reprocessado");
+                var crypto = CreateEncryptionService(out _);
+                const int chunkBytes = 31; // Includes ranges that cross the relocated moov and mdat boundaries.
+                var count = (result.Length + chunkBytes - 1) / chunkBytes;
+                var context = new EncryptedPayloadContext("virtual-mp4", crypto.CreateFileEncryption(EncryptionModes.Standard),
+                    EncryptedPayloadRoles.Original, 0, count);
+                using var memory = new UploadMemoryCoordinator(4);
+                var chunks = await Task.WhenAll(Enumerable.Range(0, count).Select(async index =>
+                {
+                    using var part = await memory.PreparePartAsync(crypto, prepared.File, prepared.Length,
+                        chunkBytes, context.WithChunkIndex(index), default, openSource: prepared.OpenRead);
+                    using var ciphertext = new MemoryStream();
+                    await using (var input = part.OpenRead()) await input.CopyToAsync(ciphertext);
+                    return crypto.DecryptBytes(ciphertext.ToArray(), context.WithChunkIndex(index));
+                }));
+                if (!chunks.SelectMany(chunk => chunk).SequenceEqual(result) || prepared.File.FullName != path ||
+                    root.EnumerateFiles().Count() != 1) return TestOutcome.Fail("o upload virtual perdeu bytes ou criou cópia em disco");
+                using var legacy = await UploadMemoryCoordinator.PreparePlainPartAsync(prepared.File, prepared.Length,
+                    chunkBytes, 0, default, prepared.OpenRead);
+                using var legacyBytes = new MemoryStream();
+                await using (var input = legacy.OpenRead()) await input.CopyToAsync(legacyBytes);
+                if (legacy.FileName != "fixture.mp4.001" || !legacyBytes.ToArray().SequenceEqual(result.Take(chunkBytes)))
+                    return TestOutcome.Fail("o upload plaintext legado perdeu nome ou bytes");
+                var previewMessages = 0;
+                var legacyMetadata = new MetadataService(MetadataCodec.ForEncryption(crypto));
+                using var server = new VideoHttpHandler(async (request, token) =>
+                {
+                    if (request.Method != HttpMethod.Post) return VideoJsonResponse("{\"id\":\"thread\"}");
+                    var multipart = (MultipartFormDataContent)request.Content!;
+                    using var json = JsonDocument.Parse(await multipart.First(part => part.Headers.ContentDisposition?.Name?.Trim('"') == "payload_json").ReadAsStringAsync(token));
+                    RequireSync(legacyMetadata.DecodePayloadReference(json.RootElement.GetProperty("content").GetString()!)
+                        .StartsWith("ORG_PREVIEW|video-480|", StringComparison.Ordinal), "o upload RAM perdeu o rótulo de prévia legado");
+                    foreach (var content in multipart.Where(part => part.Headers.ContentDisposition?.FileName != null))
+                        await content.CopyToAsync(Stream.Null, token);
+                    return VideoJsonResponse("{\"id\":\"preview-" + Interlocked.Increment(ref previewMessages) + "\"}");
+                });
+                using var api = new DiscordApiClient("ram-preview-test-" + Guid.NewGuid(), new HttpClient(server, false));
+                await new ForumUploader(api, "files").UploadResumableGeneratedAsync("preview.mp4", count,
+                    index => UploadMemoryCoordinator.PreparePlainPartAsync(prepared.File, prepared.Length, chunkBytes,
+                        index, default, prepared.OpenRead), "thread", "", new Dictionary<int, string>(),
+                    legacyPreviewKind: "video-480");
+                RequireSync(previewMessages == count, "a prévia plaintext perdeu anexos no upload RAM");
                 if (!(await File.ReadAllBytesAsync(path)).SequenceEqual(originalBytes)) return TestOutcome.Fail("arquivo original foi alterado");
             }
             var invalidPath = Path.Combine(root.FullName, "invalid.mp4");

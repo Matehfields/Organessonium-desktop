@@ -13,6 +13,27 @@ internal static class AppMemoryBudget
     private static readonly object Sync = new();
     private static SafeFileHandle? _job;
     private static int[] _webViewIds = [];
+    private static int[] _mediaWorkerIds = [];
+
+    internal static IDisposable RegisterMediaWorker(Process process)
+    {
+        Initialize();
+        lock (Sync)
+        {
+            if (!IsProcessInJob(process.Handle, _job!, out var attached)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!attached && !AssignProcessToJobObject(_job!, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            _mediaWorkerIds = [.. _mediaWorkerIds, process.Id];
+        }
+        return new MediaWorkerRegistration(process.Id);
+    }
+
+    private sealed class MediaWorkerRegistration(int id) : IDisposable
+    {
+        public void Dispose()
+        {
+            lock (Sync) _mediaWorkerIds = _mediaWorkerIds.Where(value => value != id).ToArray();
+        }
+    }
 
     internal static void Initialize()
     {
@@ -55,7 +76,7 @@ internal static class AppMemoryBudget
     {
         using var current = Process.GetCurrentProcess();
         var bytes = current.PrivateMemorySize64;
-        foreach (var id in Volatile.Read(ref _webViewIds))
+        foreach (var id in Volatile.Read(ref _webViewIds).Concat(Volatile.Read(ref _mediaWorkerIds)).Distinct())
         {
             if (id == current.Id) continue;
             try { using var child = Process.GetProcessById(id); bytes += child.PrivateMemorySize64; }

@@ -226,7 +226,8 @@ public sealed partial class ForumUploader
         SemaphoreSlim? batchPreparationGate = null,
         Action<int, long>? onPartTransferProgress = null,
         int maxPreparedPartBytes = DiscordLimits.AttachmentBytes,
-        bool streamPreparedParts = false)
+        bool streamPreparedParts = false,
+        string? legacyPreviewKind = null)
     {
         if (totalParts <= 0)
         {
@@ -234,6 +235,8 @@ public sealed partial class ForumUploader
         }
 
         ArgumentNullException.ThrowIfNull(preparePart);
+        if (legacyPreviewKind != null && (encryptedPayload != null || useAttachmentReferences || string.IsNullOrWhiteSpace(existingThreadId)))
+            throw new ArgumentException("Uma prévia plaintext legada exige transporte unitário no thread existente.", nameof(legacyPreviewKind));
         if (maxPreparedPartBytes < EncryptionService.EnvelopeOverheadBytes || maxPreparedPartBytes > DiscordLimits.AttachmentBytes)
             throw new ArgumentOutOfRangeException(nameof(maxPreparedPartBytes));
 
@@ -250,6 +253,10 @@ public sealed partial class ForumUploader
         var batchId = string.IsNullOrWhiteSpace(existingBatchId) ? NewBatchId() : existingBatchId;
         var threadId = existingThreadId ?? "";
         var chunkMessages = Enumerable.Repeat("", totalParts).ToArray();
+        string PartLabel(int index) => encryptedPayload != null
+            ? PayloadMessage(encryptedPayload.WithChunkIndex(index), totalParts)
+            : legacyPreviewKind != null ? PreviewPartContent(legacyPreviewKind, batchId, index + 1, totalParts)
+            : PartContent(batchId, index + 1, totalParts);
         foreach (var pair in uploadedChunkMessages)
         {
             if (pair.Key >= 0 && pair.Key < chunkMessages.Length && !string.IsNullOrWhiteSpace(pair.Value))
@@ -326,9 +333,7 @@ public sealed partial class ForumUploader
                     return await _discord.CreateForumPostWithFileDetailedAsync(
                         _forumId,
                         EncryptedThreadTitle(),
-                        encryptedPayload == null
-                            ? PartContent(batchId, 1, totalParts)
-                            : PayloadMessage(encryptedPayload.WithChunkIndex(0), totalParts),
+                        PartLabel(0),
                         first!,
                         cancellationToken,
                         onRateLimitWait,
@@ -399,9 +404,7 @@ public sealed partial class ForumUploader
                             prepared.TransferProgress = bytes => onPartTransferProgress?.Invoke(index, bytes);
                             return await _discord.SendFileMessageAsync(
                                 threadId,
-                                encryptedPayload == null
-                                    ? PartContent(batchId, index + 1, totalParts)
-                                    : PayloadMessage(encryptedPayload.WithChunkIndex(index), totalParts),
+                                PartLabel(index),
                                 prepared!,
                                 cancellationToken,
                                 onRateLimitWait,
