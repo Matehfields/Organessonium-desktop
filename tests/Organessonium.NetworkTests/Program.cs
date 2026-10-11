@@ -17,6 +17,7 @@ internal static partial class Program
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),
         ("fileVersionsLifecycle", FileVersionsLifecycleAsync),
         ("fileActionsHiddenBrowser", FileActionsHiddenBrowserAsync),
+        ("appearanceHiddenBrowser", AppearanceHiddenBrowserAsync),
         ("metadataV1RoundTripAndErrors", MetadataV1RoundTripAndErrorsAsync),
         ("metadataLegacyAndEncryptedWrites", MetadataLegacyAndEncryptedWritesAsync),
         ("metadataV1Interoperability", MetadataV1InteroperabilityAsync),

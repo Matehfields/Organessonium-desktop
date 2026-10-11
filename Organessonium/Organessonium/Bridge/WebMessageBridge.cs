@@ -23,10 +23,11 @@ public sealed class WebMessageBridge
         return ExecuteAsync($"window.__organessoniumSettings={json};");
     }
 
-    public Task SetSystemPreferencesAsync(string theme)
+    public Task SetSystemPreferencesAsync(string theme, string? accentColor = null)
     {
         var value = JsonSerializer.Serialize(theme, JsonOptions.Web);
-        return ExecuteAsync($"window.__organessoniumSystemPreferences={{...(window.__organessoniumSystemPreferences||{{}}),theme:{value}}};");
+        var accent = JsonSerializer.Serialize(accentColor ?? WindowsAccentService.Read(), JsonOptions.Web);
+        return ExecuteAsync($"window.__organessoniumSystemPreferences={{...(window.__organessoniumSystemPreferences||{{}}),theme:{value},accentColor:{accent}}};");
     }
 
     public Task NotifyReadyAsync()

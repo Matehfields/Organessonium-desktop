@@ -29,6 +29,12 @@ public sealed class AppSettings
     [JsonPropertyName("theme")]
     public string Theme { get; set; } = "system";
 
+    [JsonPropertyName("accentColorMode")]
+    public string AccentColorMode { get; set; } = "system";
+
+    [JsonPropertyName("accentColor")]
+    public string AccentColor { get; set; } = "#0078D4";
+
     [JsonPropertyName("cardSize")]
     public string CardSize { get; set; } = "medium";
 
@@ -122,6 +128,8 @@ public sealed class AppSettings
             AppsForumId = AppsForumId,
             SerialChannelId = SerialChannelId,
             Theme = Theme,
+            AccentColorMode = AccentColorMode,
+            AccentColor = AccentColor,
             CardSize = CardSize,
             Language = Language,
             DownloadThreads = DownloadThreads,

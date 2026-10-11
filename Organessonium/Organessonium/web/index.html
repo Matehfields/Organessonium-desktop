@@ -10,6 +10,7 @@
 
 <div id="app-shell" class="app-shell">
     <aside id="app-sidebar" class="app-sidebar" aria-label="Navegação principal">
+        <span id="sidebar-selection-indicator" class="sidebar-selection-indicator" aria-hidden="true"></span>
         <div class="sidebar-header">
             <div id="sidebar-brand" class="topbar-brand sidebar-brand">
                 <span class="logo-omega">Ω</span>
@@ -443,6 +444,20 @@
                     <button class="theme-btn"         data-theme-value="light"><span data-icon="light_mode" data-size="15"></span> <span id="theme-light-text">Claro</span></button>
                 </div>
             </div>
+            <div class="setting-row col">
+                <label id="setting-accent-label" for="setting-accent-mode">Cor de destaque</label>
+                <select id="setting-accent-mode" class="setting-select">
+                    <option value="system" id="accent-system-text">Usar cor do Windows</option>
+                    <option value="preset" id="accent-preset-text">Padrões do Windows</option>
+                    <option value="custom" id="accent-custom-text">Personalizada</option>
+                </select>
+                <div id="accent-presets" class="accent-presets hidden" role="group" aria-label="Cores padrão"></div>
+                <div id="accent-custom-controls" class="accent-custom-controls hidden">
+                    <input id="setting-accent-picker" type="color" value="#0078d4" aria-label="Escolher cor"/>
+                    <input id="setting-accent-hex" class="modal-input" value="#0078D4" maxlength="7" spellcheck="false" aria-label="Cor hexadecimal"/>
+                </div>
+                <small id="setting-accent-help">Afeta apenas o app. Tons muito claros ou escuros são ajustados para contraste.</small>
+            </div>
             <div class="setting-row">
                 <label id="setting-card-size-label">Tamanho dos cards</label>
                 <div class="card-size-btns">
@@ -657,6 +672,7 @@
 <script src="bridge.js"></script>
 <script src="icons.js"></script>
 <script src="app.js"></script>
+<script src="appearance.js"></script>
 <script src="file-details.js"></script>
 <script src="sync.js"></script>
 </body>

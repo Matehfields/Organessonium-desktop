@@ -24,6 +24,8 @@ dataPath: args[10],
             previewThreads: args[20],
             videoPrefetchChunks: args[21],
             forceUploadParallelism: args[22] === true,
+            accentColorMode: args[23] ?? current.accentColorMode,
+            accentColor: args[24] ?? current.accentColor,
             proxy: {
                 proxyMode: args[13],
                 proxyHost: args[14],

@@ -174,10 +174,10 @@ internal static partial class Program
             await Task.Delay(250);
             var missing = await view.ExecuteScriptAsync("(()=>{const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');ctx.font='24px \"Material Symbols Rounded\"';return [...new Set([...document.querySelectorAll('.svg-icon')].map(el=>el.textContent))].filter(name=>ctx.measureText(name).width>26)})()");
             RequireSync(missing == "[]", "glyphs ausentes no font Google: " + missing);
-            await Check("[...document.querySelectorAll('.svg-icon')].every(el=>getComputedStyle(el).color==='rgb(196, 199, 197)'&&getComputedStyle(el).fontFamily.includes('Material Symbols Rounded'))", "ícones escuros não ficaram neutros");
+            await Check("[...document.querySelectorAll('.svg-icon')].every(el=>getComputedStyle(el).fontFamily.includes('Material Symbols Rounded'))&&[...document.querySelectorAll('#file-details-content .svg-icon:not(.icon-media),.markdown-editor-toolbar .svg-icon:not(.icon-media)')].every(el=>getComputedStyle(el).color==='rgb(196, 199, 197)')", "ícones de ações escuros não ficaram neutros ou perderam a fonte Google");
             await view.ExecuteScriptAsync("applyTheme('light')");
             await Task.Delay(250);
-            var unexpectedColor = await view.ExecuteScriptAsync("[...document.querySelectorAll('.svg-icon')].filter(el=>getComputedStyle(el).color!=='rgb(95, 99, 104)').slice(0,3).map(el=>[el.textContent,getComputedStyle(el).color,document.body.dataset.theme,document.documentElement.dataset.theme])");
+            var unexpectedColor = await view.ExecuteScriptAsync("[...document.querySelectorAll('#file-details-content .svg-icon:not(.icon-media),.markdown-editor-toolbar .svg-icon:not(.icon-media)')].filter(el=>getComputedStyle(el).color!=='rgb(95, 99, 104)').slice(0,3).map(el=>[el.textContent,getComputedStyle(el).color,document.body.dataset.theme,document.documentElement.dataset.theme])");
             RequireSync(unexpectedColor == "[]", "ícones claros: " + unexpectedColor);
             await view.ExecuteScriptAsync("window.__editorEntry.toolbarWrapCleanup?.();window.__editorPanel.remove()");
             controller.Bounds = new System.Drawing.Rectangle(0, 0, 800, 600);

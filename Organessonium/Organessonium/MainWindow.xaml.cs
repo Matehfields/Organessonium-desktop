@@ -34,6 +34,8 @@ public partial class MainWindow : Window
     private string _lastDropSignature = "";
     private long _lastDropTick;
     private string _lastSystemTheme = WindowThemeService.InitialTheme();
+    private readonly Windows.UI.ViewManagement.UISettings? _windowsColors = WindowsAccentService.TryCreate();
+    private string _lastSystemAccent = "";
     private bool _recoveringWebView;
     private bool _isWebViewFullscreen;
     private WindowState _savedWindowState;
@@ -65,6 +67,7 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         Activated += (_, _) => _ = RefreshSystemThemeAsync();
         SystemEvents.UserPreferenceChanged += OnSystemUserPreferenceChanged;
+        if (_windowsColors != null) _windowsColors.ColorValuesChanged += OnSystemAccentChanged;
         SourceInitialized += OnSourceInitialized;
         SizeChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
         StateChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
@@ -344,6 +347,7 @@ public partial class MainWindow : Window
         _shutdownInProgress = true;
         if (Application.Current is App app && app.KeepBackgroundOnClose) Hide();
         SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
+        if (_windowsColors != null) _windowsColors.ColorValuesChanged -= OnSystemAccentChanged;
         RemoveShellDropSupport();
         try
         {
@@ -556,12 +560,15 @@ public partial class MainWindow : Window
     private async Task RefreshSystemThemeAsync(bool force = false)
     {
         var current = WindowThemeService.InitialTheme();
-        if (!force && string.Equals(current, _lastSystemTheme, StringComparison.OrdinalIgnoreCase))
+        var accent = WindowsAccentService.Read(_windowsColors);
+        if (!force && string.Equals(current, _lastSystemTheme, StringComparison.OrdinalIgnoreCase) &&
+            accent == _lastSystemAccent)
         {
             return;
         }
 
         _lastSystemTheme = current;
+        _lastSystemAccent = accent;
         if (_store == null)
         {
             ApplyWindowTheme(current);
@@ -576,9 +583,16 @@ public partial class MainWindow : Window
 
         if (_bridge != null)
         {
-            await _bridge.SetSystemPreferencesAsync(current);
+            await _bridge.SetSystemPreferencesAsync(current, accent);
             await _bridge.CallAsync("_onSystemThemeChanged", current);
+            await _bridge.CallAsync("_onSystemAccentChanged", accent);
         }
+    }
+
+    private void OnSystemAccentChanged(Windows.UI.ViewManagement.UISettings sender, object args)
+    {
+        if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+            Dispatcher.BeginInvoke(new Action(() => _ = RefreshSystemThemeAsync()));
     }
 
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)

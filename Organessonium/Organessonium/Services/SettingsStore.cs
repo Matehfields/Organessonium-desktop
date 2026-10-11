@@ -166,6 +166,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
             settings.SerialChannelId = Get(values, "serialChannelId", settings.SerialChannelId);
             settings.Theme = Get(values, "theme", settings.Theme);
+            settings.AccentColorMode = WindowsAccentService.NormalizeMode(Get(values, "accentColorMode", settings.AccentColorMode));
+            settings.AccentColor = WindowsAccentService.NormalizeColor(Get(values, "accentColor", settings.AccentColor));
             settings.CardSize = Get(values, "cardSize", settings.CardSize);
             settings.Language = Get(values, "language", settings.Language);
             settings.DownloadThreads = Math.Clamp(GetInt(values, "downloadThreads", settings.DownloadThreads), 1, 16);
@@ -215,6 +217,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "appsForumId", settings.AppsForumId);
             Upsert(connection, "serialChannelId", settings.SerialChannelId);
             Upsert(connection, "theme", settings.Theme);
+            Upsert(connection, "accentColorMode", WindowsAccentService.NormalizeMode(settings.AccentColorMode));
+            Upsert(connection, "accentColor", WindowsAccentService.NormalizeColor(settings.AccentColor));
             Upsert(connection, "cardSize", settings.CardSize);
             Upsert(connection, "language", settings.Language);
             Upsert(connection, "downloadThreads", Math.Clamp(settings.DownloadThreads, 1, 16).ToString());

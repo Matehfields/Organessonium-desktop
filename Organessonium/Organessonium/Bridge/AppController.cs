@@ -4499,6 +4499,8 @@ public sealed partial class AppController : IAsyncDisposable
         settings.PreviewThreads = Math.Clamp(ArgInt(args, 20, settings.PreviewThreads), 1, 8);
         settings.VideoPrefetchChunks = Math.Clamp(ArgInt(args, 21, settings.VideoPrefetchChunks), 0, VideoStreamSession.MaximumPrefetchChunks);
         settings.ForceUploadParallelism = ArgBool(args, 22, settings.ForceUploadParallelism);
+        settings.AccentColorMode = WindowsAccentService.NormalizeMode(ArgString(args, 23, settings.AccentColorMode));
+        settings.AccentColor = WindowsAccentService.NormalizeColor(ArgString(args, 24, settings.AccentColor));
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var _))
         {
             settings.Proxy.Mode = ProxyMode.Automatic;

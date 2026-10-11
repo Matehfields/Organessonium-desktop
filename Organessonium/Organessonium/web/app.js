@@ -14,6 +14,7 @@ let historyBack = [], historyForward = [];
 let confirmCb = null;
 let uploadConflictState = null;
 let settings = {
+    accentColorMode:'system', accentColor:'#0078D4',
     cardSize:'medium', downloadThreads:4, uploadThreads:4, forceUploadParallelism:false, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
     previewEnabled:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
@@ -62,7 +63,7 @@ const transferRateStates = new Map();
 
 const PDF_DEFAULT_BATCH_SIZE = 10;
 
-const CARD_SIZES = { small:'180px', medium:'250px', large:'320px' };
+const CARD_SIZES = { small:'180px', medium:'240px', large:'320px' };
 const DEFAULT_FOLDER_COLOR = '#C4C7C5';
 const FOLDER_COLORS = [DEFAULT_FOLDER_COLOR,'#F28B82','#FDD663','#81C995','#C58AF9','#FFB74D'];
 const SORT_LABEL_KEYS = { 'name-asc':'sortName','name-desc':'sortName','size-desc':'sortSize','size-asc':'sortSize','date-desc':'sortDate','date-asc':'sortDate' };
@@ -672,6 +673,7 @@ function setLanguage(value) {
     if (select) select.value = settings.language;
     try { localStorage.setItem('organessonium.lang', settings.language); } catch (_) {}
     applyI18n();
+    syncAccentControls();
     render();
     queueSettingsSave();
 }
@@ -718,6 +720,7 @@ function syncSidebarChrome() {
     button.title = label;
     button.setAttribute('aria-label', label);
     button.setAttribute('aria-expanded', sidebarCollapsed ? 'false' : 'true');
+    if (typeof syncSidebarSelection === 'function') syncSidebarSelection();
     scheduleNativeTitleBarDragRegion();
 }
 
@@ -822,6 +825,7 @@ function showFilesWorkspace() {
 }
 
 function setActiveLibraryView(view) {
+    const changed = activeLibraryView !== view;
     activeLibraryView = view;
     const createButton = $('btn-sidebar-new');
     if (createButton) {
@@ -835,6 +839,8 @@ function setActiveLibraryView(view) {
         if (name === view) item?.setAttribute('aria-current', 'page');
         else item?.removeAttribute('aria-current');
     });
+    syncSidebarSelection();
+    if (changed) animateWorkspaceContent($('main-area'));
 }
 
 function showFavoritesWorkspace(force = false) {
@@ -3455,6 +3461,7 @@ function setupWorkspaceTabs() {
 
 function activateWorkspaceTab(id) {
     if (!workspaceTabs || !editorArea) return;
+    const previousTab = activeWorkspaceTab;
     activeWorkspaceTab = id || 'files';
     $('main-area').classList.toggle('hidden', activeWorkspaceTab !== 'files');
     editorArea.classList.toggle('hidden', activeWorkspaceTab === 'files');
@@ -3462,6 +3469,8 @@ function activateWorkspaceTab(id) {
     else editorArea.classList.remove('editor-area-active');
     workspaceTabs.querySelectorAll('.workspace-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.tabId === activeWorkspaceTab));
     editorArea.querySelectorAll('.markdown-editor-tab').forEach(panel => panel.classList.toggle('hidden', panel.dataset.tabId !== activeWorkspaceTab));
+    if (previousTab !== activeWorkspaceTab) animateWorkspaceContent(activeWorkspaceTab === 'files'
+        ? $('main-area') : [...editorArea.querySelectorAll('.markdown-editor-tab')].find(panel => panel.dataset.tabId === activeWorkspaceTab));
     if (activeWorkspaceTab !== 'files') scheduleMarkdownToolbarLabelSync(markdownTabs.get(activeWorkspaceTab));
     if (activeWorkspaceTab === 'files') refreshFilesIfNeeded();
 }
@@ -5641,7 +5650,9 @@ function loadSettings() {
     settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
     settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
     settings.customKeyAvailable = settings.customKeyAvailable === true;
-    applyTheme(settings.theme); applyCardSize(settings.cardSize);
+    settings.accentColorMode = ['system','preset','custom'].includes(settings.accentColorMode) ? settings.accentColorMode : 'system';
+    settings.accentColor = normalizeAccentColor(settings.accentColor);
+    applyTheme(settings.theme); applyCardSize(settings.cardSize); syncAccentControls();
     $('setting-threads').value=settings.downloadThreads; $('thr-val').textContent=settings.downloadThreads;
     $('setting-upload-files').value=settings.maxParallelUploads; $('upload-files-val').textContent=settings.maxParallelUploads;
     syncUploadSettings();
@@ -5658,6 +5669,7 @@ function loadSettings() {
     document.querySelectorAll('.video-quality-btn').forEach(b=>b.classList.toggle('active',b.dataset.videoQuality===(settings.videoPreviewQuality||'low')));
     syncMotionPreference();
     applyI18n();
+    syncAccentControls();
 }
 function syncUploadSettings() {
     const forced = settings.forceUploadParallelism === true;
@@ -5749,7 +5761,9 @@ function saveSettings(showStatus = true) {
         settings.proxy.proxyPassword || '',
         settings.previewThreads,
         settings.videoPrefetchChunks,
-        settings.forceUploadParallelism === true
+        settings.forceUploadParallelism === true,
+        settings.accentColorMode,
+        settings.accentColor
     );
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);
@@ -5758,6 +5772,8 @@ function openSettings()  {
     settingsPanel.classList.remove('hidden');
     settingsOverlay.classList.remove('hidden');
     settingsPanel.setAttribute('aria-hidden', 'false');
+    syncSidebarSelection();
+    animateWorkspaceContent(settingsPanel.querySelector('.settings-body'));
     if (window.bridge && window.bridge.getPreviewCacheSize) window.bridge.getPreviewCacheSize();
     requestAnimationFrame(()=>{
         settingsPanel.classList.add('open');
@@ -5777,6 +5793,7 @@ function closeSettings() {
     }
     settingsPanel.classList.remove('open');
     settingsPanel.setAttribute('aria-hidden', 'true');
+    syncSidebarSelection();
     setTimeout(()=>{
         settingsPanel.classList.add('hidden');
         settingsOverlay.classList.add('hidden');
@@ -5787,6 +5804,7 @@ function applyTheme(t) {
     const theme = resolveTheme(t);
     document.documentElement.setAttribute('data-theme', theme);
     document.documentElement.setAttribute('data-theme-setting', t || 'system');
+    if (typeof applyAccentColor === 'function') applyAccentColor();
     try { if (window.bridge && window.bridge.applyWindowTheme) window.bridge.applyWindowTheme(t || 'system'); } catch (_) {}
 }
 function applyCardSize(s) {
