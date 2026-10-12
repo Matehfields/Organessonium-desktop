@@ -2057,6 +2057,7 @@ public sealed partial class AppController : IAsyncDisposable
         var folderCount = 0;
         var skipped = 0;
         var registry = Registry();
+        await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
         var all = CurrentLocalEntries();
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -2091,7 +2092,7 @@ public sealed partial class AppController : IAsyncDisposable
             if (folderCount > 0)
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
-                await LoadAppsAsync();
+                await PublishLocalRegistryAsync(registry, CurrentLocalEntries());
                 await _bridge.CallAsync("_onStatus", "OK Pasta criada sem arquivos para enviar.", false);
             }
             else
@@ -2108,7 +2109,7 @@ public sealed partial class AppController : IAsyncDisposable
         if (tasks.Count == 0)
         {
             await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
-            await LoadAppsAsync();
+            await PublishLocalRegistryAsync(registry, CurrentLocalEntries());
             await _bridge.CallAsync("_onStatus", "OK Upload cancelado.", false);
             return;
         }
@@ -2135,7 +2136,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
-                await PublishLocalRegistryAsync(registry, all);
+                await PublishLocalRegistryAsync(registry, CurrentLocalEntries());
             }
             finally
             {
@@ -2405,13 +2406,15 @@ public sealed partial class AppController : IAsyncDisposable
                         replacement: task.Replacement,
                         onPreviewSize: size => Interlocked.Add(ref totalBytes, size)), fileToken);
                     uploadedEntries[index] = uploaded;
-                    List<AppEntry> visibleEntries;
+                    Task publication;
                     lock (allEntries)
                     {
                         ReplaceLocalEntry(allEntries, uploaded);
-                        visibleEntries = allEntries.ToList();
+                        var visibleEntries = CurrentLocalEntries();
+                        ReplaceLocalEntry(visibleEntries, uploaded);
+                        publication = PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
                     }
-                    await PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
+                    await publication;
                     var completed = Interlocked.Increment(ref done);
                     await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
                     await OpsTransferMetricsAsync(
@@ -5028,6 +5031,9 @@ public sealed partial class AppController : IAsyncDisposable
         folder.ParentFolderId = FolderIdForPath(all, parentPath);
         await registry.AddEntryAsync(folder, synchronizeSerials: false);
         ReplaceLocalEntry(all, folder);
+        var visibleEntries = CurrentLocalEntries();
+        ReplaceLocalEntry(visibleEntries, folder);
+        await PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
         TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
         TrackFolderSerial(serialFolderIds, folder.FolderId);
         return folder;

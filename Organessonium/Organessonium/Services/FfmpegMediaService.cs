@@ -57,13 +57,14 @@ internal static class FfmpegMediaService
         Action<TimeSpan>? encodedTime = null, Action<int>? generationProgress = null)
     {
         using var admission = CancellationTokenSource.CreateLinkedTokenSource(token);
-        admission.CancelAfter(TimeSpan.FromSeconds(30));
+        if (!thumbnail) admission.CancelAfter(TimeSpan.FromSeconds(30));
         IDisposable reservation;
         try
         {
             reservation = await RamUploadBudget.ReserveExternalBytesAsync(
                 thumbnail ? VideoPreviewWorker.ThumbnailWorkingReservationBytes : WorkingBytes,
-                thumbnail ? VideoPreviewWorker.MaximumThumbnailBytes : 0, admission.Token).ConfigureAwait(false);
+                thumbnail ? VideoPreviewWorker.MaximumThumbnailBytes : 0, admission.Token,
+                priority: thumbnail).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {

@@ -922,7 +922,7 @@ public sealed partial class AppRegistry
         }
 
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
-        await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken, onRateLimitWait);
+        await OpenEntryIndexAsync(parent.ThreadId, synchronizeSerials, cancellationToken, onRateLimitWait);
         try
         {
             await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
@@ -1787,7 +1787,7 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
-        if (string.IsNullOrWhiteSpace(threadId))
+        if (string.IsNullOrWhiteSpace(threadId) || _uploadIndexThreads.ContainsKey(threadId))
         {
             return false;
         }

@@ -6131,6 +6131,30 @@ function sorted(arr) {
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
+function syncRenderedItems(container, items, kind, create) {
+    const existing = new Map([...container.children].map(node => [node.dataset.renderKey, node]));
+    let position = 0;
+    for (const item of items) {
+        const key = kind + ':' + (typeof item === 'string' ? currentPath + '/' + item : itemKey(item));
+        const source = typeof item === 'string'
+            ? allApps.filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.name === item)
+            : item;
+        const signature = JSON.stringify([resolveLanguage(), currentPath, source]);
+        let node = existing.get(key);
+        existing.delete(key);
+        if (!node || node.dataset.renderSignature !== signature) {
+            const replacement = create(item);
+            replacement.dataset.renderKey = key;
+            replacement.dataset.renderSignature = signature;
+            if (node) node.replaceWith(replacement);
+            node = replacement;
+        }
+        if (container.children[position] !== node) container.insertBefore(node, container.children[position] || null);
+        position++;
+    }
+    existing.forEach(node => node.remove());
+}
+
 function render() {
     renderPathCrumbs();
     const viewApps = appsForActiveView();
@@ -6151,9 +6175,9 @@ function render() {
     if (searchQuery && !specialRootView) files=sorted(viewApps.filter(a=>a.type!=='folder'&&(a.name||'').toLowerCase().includes(searchQuery)));
     files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
-    filesGrid.innerHTML=''; filesList.innerHTML='';
     const total=folders.length+files.length;
     if (!total) {
+        filesGrid.replaceChildren(); filesList.replaceChildren();
         const loadingFolder = !searchQuery && (favoritesView
             ? folderLoadingPath === '/@favorites'
             : folderLoadingPath === currentPath);
@@ -6167,24 +6191,38 @@ function render() {
     emptyState.classList.remove('folder-loading');
 
     if (viewMode==='grid') {
+        filesList.replaceChildren();
         filesGrid.classList.remove('hidden'); filesList.classList.add('hidden');
-        if (folders.length) {
-            const folderWrap = document.createElement('div');
-            folderWrap.className = 'folders-grid';
-            folders.forEach(f=>folderWrap.appendChild(specialRootView ? makeSpecialFolderCard(f) : makeDriveFolderCard(f)));
-            filesGrid.appendChild(folderWrap);
+        for (const [className, items, kind, create] of [
+            ['folders-grid', folders, specialRootView ? 'special-folder' : 'folder', specialRootView ? makeSpecialFolderCard : makeDriveFolderCard],
+            ['cards-grid', files, 'file', makeDriveFileCard]
+        ]) {
+            let wrap = filesGrid.querySelector('.' + className);
+            if (!items.length) { wrap?.remove(); continue; }
+            if (!wrap) { wrap = document.createElement('div'); wrap.className = className; filesGrid.appendChild(wrap); }
+            syncRenderedItems(wrap, items, kind, create);
         }
-        if (files.length) {
-            const fileWrap = document.createElement('div');
-            fileWrap.className = 'cards-grid';
-            files.forEach(a=>fileWrap.appendChild(makeDriveFileCard(a)));
-            filesGrid.appendChild(fileWrap);
-        }
+        const foldersWrap = filesGrid.querySelector('.folders-grid');
+        if (foldersWrap && filesGrid.firstElementChild !== foldersWrap) filesGrid.prepend(foldersWrap);
     } else {
+        filesGrid.replaceChildren();
         filesGrid.classList.add('hidden'); filesList.classList.remove('hidden');
-        filesList.appendChild(makeListHeader());
-        folders.forEach(f=>filesList.appendChild(specialRootView ? makeSpecialFolderRow(f) : makeFolderRow(f)));
-        files.forEach(a=>filesList.appendChild(makeFileRow(a)));
+        let header = filesList.querySelector('.list-header');
+        if (!header || header.dataset.renderLanguage !== resolveLanguage()) {
+            const replacement = makeListHeader(); replacement.dataset.renderLanguage = resolveLanguage();
+            if (header) header.replaceWith(replacement); else filesList.prepend(replacement);
+        }
+        for (const [className, items, kind, create] of [
+            ['file-list-folders', folders, specialRootView ? 'special-folder-row' : 'folder-row', specialRootView ? makeSpecialFolderRow : makeFolderRow],
+            ['file-list-files', files, 'file-row', makeFileRow]
+        ]) {
+            let wrap = filesList.querySelector('.' + className);
+            if (!items.length) { wrap?.remove(); continue; }
+            if (!wrap) { wrap = document.createElement('div'); wrap.className = className; filesList.appendChild(wrap); }
+            syncRenderedItems(wrap, items, kind, create);
+        }
+        const foldersWrap = filesList.querySelector('.file-list-folders');
+        if (foldersWrap && filesList.children[1] !== foldersWrap) filesList.insertBefore(foldersWrap, filesList.children[1] || null);
     }
     updateSelectionUI();
     scheduleCardPreviewSync();

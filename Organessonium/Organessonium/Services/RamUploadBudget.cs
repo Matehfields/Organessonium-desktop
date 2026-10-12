@@ -12,6 +12,7 @@ internal static class RamUploadBudget
     private static readonly object Sync = new();
     private static long _reserved;
     private static long _externalNativeReserved, _externalManagedReserved;
+    private static int _priorityWaiters;
 
     internal static int PipelineBatchChunks(int partBytes)
     {
@@ -31,15 +32,23 @@ internal static class RamUploadBudget
         ReserveBytesAsync(checked((long)chunks * DiscordLimits.AttachmentBytes), token);
 
     internal static Task<IDisposable> ReserveBytesAsync(long bytes, CancellationToken token) =>
-        ReserveCoreAsync(bytes, bytes, false, token);
+        ReserveCoreAsync(bytes, bytes, false, false, token);
 
-    internal static Task<IDisposable> ReserveExternalBytesAsync(long nativeBytes, long managedBytes, CancellationToken token) =>
-        ReserveCoreAsync(nativeBytes, managedBytes, true, token);
+    internal static Task<IDisposable> ReserveExternalBytesAsync(long nativeBytes, long managedBytes, CancellationToken token,
+        bool priority = false) => ReserveCoreAsync(nativeBytes, managedBytes, true, priority, token);
 
-    private static async Task<IDisposable> ReserveCoreAsync(long bytes, long managedBytes, bool external, CancellationToken token)
+    private static async Task<IDisposable> ReserveCoreAsync(long bytes, long managedBytes, bool external, bool priority, CancellationToken token)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(bytes);
         if (managedBytes < 0 || managedBytes > bytes) throw new ArgumentOutOfRangeException(nameof(managedBytes));
+        if (priority) Interlocked.Increment(ref _priorityWaiters);
+        try { return await WaitForReservationAsync(bytes, managedBytes, external, priority, token).ConfigureAwait(false); }
+        finally { if (priority) Interlocked.Decrement(ref _priorityWaiters); }
+    }
+
+    private static async Task<IDisposable> WaitForReservationAsync(long bytes, long managedBytes, bool external,
+        bool priority, CancellationToken token)
+    {
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -51,7 +60,9 @@ internal static class RamUploadBudget
                 var managedExternal = _externalManagedReserved + (external ? managedBytes : 0);
                 var nativeBaseline = Math.Max(0, AppMemoryBudget.CommittedBytes() - pool);
                 var managedBaseline = Math.Max(0, GC.GetTotalMemory(false) - pool);
-                if (nativeBaseline + buffers + nativeExternal <= AppMemoryBudget.AdmissionBytes &&
+                // Let existing sends drain before new chunks can displace a waiting thumbnail.
+                if ((priority || Volatile.Read(ref _priorityWaiters) == 0) &&
+                    nativeBaseline + buffers + nativeExternal <= AppMemoryBudget.AdmissionBytes &&
                     managedBaseline + buffers + managedExternal <= ManagedAdmissionBytes)
                 {
                     if (external) { _externalNativeReserved += bytes; _externalManagedReserved += managedBytes; }

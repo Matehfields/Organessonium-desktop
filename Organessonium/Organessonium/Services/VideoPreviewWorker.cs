@@ -32,12 +32,13 @@ public static class VideoPreviewWorker
         try
         {
             using var admission = CancellationTokenSource.CreateLinkedTokenSource(token);
-            admission.CancelAfter(TimeSpan.FromSeconds(30));
+            if (video) admission.CancelAfter(TimeSpan.FromSeconds(30));
             try
             {
                 reservation = await RamUploadBudget.ReserveExternalBytesAsync(
                     video ? WorkingReservationBytes : ThumbnailWorkingReservationBytes,
-                    video ? MaximumPreviewBytes : MaximumThumbnailBytes, admission.Token).ConfigureAwait(false);
+                    video ? MaximumPreviewBytes : MaximumThumbnailBytes, admission.Token,
+                    priority: !video).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!token.IsCancellationRequested)
             {
