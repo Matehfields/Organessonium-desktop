@@ -309,7 +309,7 @@ public sealed class SerialIndexService
             TotalItems = children.Count,
             FileCount = files.Count,
             FolderCount = children.Count - files.Count,
-            TotalBytes = source.Where(entry => entry.Type != "folder").Sum(entry => Math.Max(0, entry.SizeBytes)),
+            TotalBytes = source.Where(entry => entry.Type != "folder").Sum(FileVersioning.StorageBytes),
             ImageCount = files.Count(IsImage),
             VideoCount = files.Count(IsVideo),
             TypeCounts = typeCounts

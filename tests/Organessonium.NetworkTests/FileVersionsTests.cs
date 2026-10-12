@@ -39,6 +39,12 @@ internal static partial class Program
             var source = new FileInfo(Path.Combine(root.FullName, "Dados.bin"));
             var originals = new List<byte[]>();
             var entries = new List<AppEntry>();
+            async Task CheckStorageAsync(long expectedBytes, long expectedFiles = 1)
+            {
+                var statistics = await registry.GetLibraryStatisticsAsync("root");
+                RequireSync(statistics?.TotalBytes == expectedBytes && statistics.FileCount == expectedFiles,
+                    $"armazenamento da biblioteca: {statistics?.TotalBytes}/{expectedBytes}, arquivos {statistics?.FileCount}/{expectedFiles}");
+            }
             async Task<AppEntry> Upload(FileReplacement? replacement)
             {
                 var bytes = RandomNumberGenerator.GetBytes(3000 + originals.Count * 1000);
@@ -60,10 +66,14 @@ internal static partial class Program
             }
             var first = await Upload(null);
             entries.Add(first);
+            await CheckStorageAsync(originals[0].Length);
             var second = await Upload(FileVersioning.PrepareReplacement(first));
             entries[0] = second;
+            await CheckStorageAsync(originals.Take(2).Sum(bytes => bytes.Length));
             var third = await Upload(FileVersioning.PrepareReplacement(second));
             entries[0] = third;
+            var retainedBytes = originals.Take(3).Sum(bytes => (long)bytes.Length);
+            await CheckStorageAsync(retainedBytes);
             RequireSync(server.PayloadPosts == 1 && first.ThreadId == third.ThreadId &&
                 first.FileId == third.FileId && first.MetadataMessageId == third.MetadataMessageId,
                 "substituir criou outro post ou alterou a identidade");
@@ -77,6 +87,22 @@ internal static partial class Program
             var cachedThroughSerial = (await registry.LoadCachedFolderAsync("root", "/")).Single(item => item.FileId == third.FileId);
             RequireSync(cachedThroughSerial.Versions.Count == 2 && cachedThroughSerial.LogicalChunkCount == third.LogicalChunkCount &&
                 cachedThroughSerial.SizeBytes == third.SizeBytes, "abrir o serial v3 descartou os detalhes/histórico em cache");
+            var mapping = store.LoadFolderIndexMappings()["root"];
+            var remoteSerial = await new SerialIndexService(api, settings, root.CreateSubdirectory("remote-serial"))
+                .LoadFolderAsync(mapping);
+            RequireSync(remoteSerial?.Aggregate.TotalBytes == retainedBytes && remoteSerial.Aggregate.FileCount == 1,
+                "o serial remoto não conservou o armazenamento das três versões");
+            var restartedRegistry = new AppRegistry(api, new SettingsStore(store.DataDirectory), settings);
+            RequireSync((await restartedRegistry.GetLibraryStatisticsAsync("root"))?.TotalBytes == retainedBytes,
+                "reiniciar perdeu os bytes das versões no resumo");
+            var fallbackStore = new SettingsStore(root.CreateSubdirectory("cache-without-serial"));
+            fallbackStore.UpsertFolderIndexMapping(mapping with { SerialMessageId = "", SerialSha256 = "" });
+            fallbackStore.CacheFolderEntries("root", [third]);
+            var fallbackStatistics = await new AppRegistry(api, fallbackStore, settings).GetLibraryStatisticsAsync("root");
+            RequireSync(fallbackStatistics?.TotalBytes == retainedBytes && fallbackStatistics.FileCount == 1,
+                "o fallback sem serial ignorou o histórico em cache");
+            await registry.RefreshFolderAsync("root", "/");
+            await CheckStorageAsync(retainedBytes);
             var downloader = new ForumDownloader(api, settings, encryption, () => new HttpClient(server, false));
             var oldEntries = authoritative.Versions.Select(version => service.ToAppEntry(new MetadataEnvelope(third.MetadataMessageId, version.Payload))!).ToList();
             oldEntries.Add(authoritative);
@@ -114,6 +140,7 @@ internal static partial class Program
             var restarted = new SettingsStore(store.DataDirectory).LoadCachedEntriesForFolder(folder.FolderId).Single();
             RequireSync(moved.Versions.Count == 2 && moved.Favorite && restarted.Versions.Count == 2 &&
                 restarted.ModifiedAt.Length > 0 && restarted.Path == "/Fotos", "renomear, favoritar, mover ou reiniciar perdeu o histórico");
+            await CheckStorageAsync(retainedBytes + originals[2].Length, expectedFiles: 2);
             // Reject metadata commit after chunks were sent. The previous active payload remains readable.
             server.RejectNextMetadataUpdate = true;
             var failed = false;
@@ -189,6 +216,27 @@ internal static partial class Program
             var unexpectedColor = await view.ExecuteScriptAsync("[...document.querySelectorAll('#file-details-content .svg-icon:not(.icon-media),.markdown-editor-toolbar .svg-icon:not(.icon-media)')].filter(el=>getComputedStyle(el).color!=='rgb(95, 99, 104)').slice(0,3).map(el=>[el.textContent,getComputedStyle(el).color,document.body.dataset.theme,document.documentElement.dataset.theme])");
             RequireSync(unexpectedColor == "[]", "ícones claros: " + unexpectedColor);
             await view.ExecuteScriptAsync("window.__editorEntry.toolbarWrapCleanup?.();window.__editorPanel.remove()");
+            await view.ExecuteScriptAsync("closeFileDetails();settings.animationsEnabled=false;syncMotionPreference();window._onAppsLoaded([{...window.__entry,path:'/',parentFolderId:'root'},{type:'folder',name:'Fotos',folderId:'photos-fixture',path:'/',parentFolderId:'root'}]);window._onLibraryStatistics({fileCount:1,folderCount:1,totalBytes:60*1024**3})");
+            await Check("document.getElementById('storage-display').textContent==='60.00 GB'&&document.getElementById('server-item-count').textContent==='2'", "a barra lateral não exibiu o armazenamento total separado da contagem de itens");
+            foreach (var theme in new[] { "dark", "light" })
+            {
+                await view.ExecuteScriptAsync($"applyTheme('{theme}')");
+                foreach (var selected in new[] { false, true })
+                {
+                    await view.ExecuteScriptAsync($"document.querySelectorAll('.file-card').forEach(card=>card.classList.toggle('selected',{selected.ToString().ToLowerInvariant()}))");
+                    var count = JsonSerializer.Deserialize<int>(await view.ExecuteScriptAsync("document.querySelectorAll('.file-card .btn-more').length"));
+                    RequireSync(count == 2, "o teste de hover não renderizou arquivo e pasta");
+                    for (var index = 0; index < count; index++)
+                    {
+                        await view.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", "{\"type\":\"mouseMoved\",\"x\":1,\"y\":1}");
+                        await view.ExecuteScriptAsync($"window.__more=document.querySelectorAll('.file-card .btn-more')[{index}];window.__moreColor=getComputedStyle(window.__more).color");
+                        var point = await view.ExecuteScriptAsync("(()=>{const r=window.__more.getBoundingClientRect();return {type:'mouseMoved',x:r.x+r.width/2,y:r.y+r.height/2}})()");
+                        await view.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", point);
+                        await Task.Delay(150);
+                        await Check("window.__more.matches(':hover')&&getComputedStyle(window.__more).backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(window.__more).color===window.__moreColor", $"hover dos três pontos mudou de cor em {theme}, selecionado={selected}");
+                    }
+                }
+            }
             controller.Bounds = new System.Drawing.Rectangle(0, 0, 800, 600);
             await view.ExecuteScriptAsync("openFileDetails(window.__entry,false);window._onFileInformation(window.__infoRequest,window.__info)");
             await Check("document.querySelector('.file-details-dialog').getBoundingClientRect().right<=window.innerWidth&&document.querySelector('.file-details-dialog').getBoundingClientRect().bottom<=window.innerHeight&&window.__errors.length===0", "dialog fora da tela ou erro JavaScript");

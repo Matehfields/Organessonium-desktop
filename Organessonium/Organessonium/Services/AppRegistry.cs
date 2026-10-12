@@ -1757,7 +1757,7 @@ public sealed partial class AppRegistry
         long cachedFolderCount = cachedEntries.LongCount(entry => entry.Type == "folder");
         long cachedTotalBytes = cachedEntries
             .Where(entry => entry.Type != "folder")
-            .Sum(entry => Math.Max(0, entry.SizeBytes));
+            .Sum(FileVersioning.StorageBytes);
         foreach (var child in cachedEntries.Where(entry => entry.Type == "folder"))
         {
             if (string.IsNullOrWhiteSpace(child.FolderId))

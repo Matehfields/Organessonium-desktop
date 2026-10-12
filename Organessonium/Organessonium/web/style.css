@@ -862,8 +862,7 @@ html[data-motion="reduced"] *{
 [data-theme="light"] .btn-icon:hover,
 [data-theme="light"] .btn-view:hover,
 [data-theme="light"] .btn-secondary:hover,
-[data-theme="light"] .btn-more:hover,
-[data-theme="light"] .btn-row-action:hover,
+[data-theme="light"] .btn-row-action:not(.btn-more):hover,
 [data-theme="light"] .btn-nav:hover:not(:disabled){
     color:#0b0f14;
     background:#e8eaed;
@@ -1134,7 +1133,6 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     background:transparent;color:var(--text-secondary);cursor:pointer;
     transition:background .12s,color .12s;
 }
-.btn-more:hover{background:var(--surface2);color:var(--text-primary);}
 
 /* ─── Files List ──────────────────────────────────────────────────────────── */
 .files-list{
@@ -1165,7 +1163,7 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     background:transparent;color:var(--text-secondary);cursor:pointer;
     transition:background .12s,color .12s;
 }
-.btn-row-action:hover{background:var(--surface2);color:var(--text-primary);}
+.btn-row-action:not(.btn-more):hover{background:var(--surface2);color:var(--text-primary);}
 .btn-row-action.btn-danger-sm:hover{background:var(--danger-dim);color:var(--danger);}
 
 /* ─── Drag overlay ───────────────────────────────────────────────────────── */
