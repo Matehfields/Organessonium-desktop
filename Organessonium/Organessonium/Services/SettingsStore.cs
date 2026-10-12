@@ -179,6 +179,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.TempPath = Get(values, "tempPath", settings.TempPath);
             settings.DataPath = DataDirectory.FullName;
             settings.PreviewEnabled = GetBool(values, "previewEnabled", settings.PreviewEnabled);
+            settings.GenerateVideoPreviews = GetBool(values, "generateVideoPreviews", settings.GenerateVideoPreviews);
             settings.VideoPreviewQuality = NormalizeVideoPreviewQuality(Get(values, "videoPreviewQuality", settings.VideoPreviewQuality));
             settings.AnimationsEnabled = GetBool(values, "animationsEnabled", settings.AnimationsEnabled);
             settings.HardwareAcceleration = GetBool(values, "hardwareAcceleration", settings.HardwareAcceleration);
@@ -230,6 +231,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "tempPath", settings.TempPath);
             Upsert(connection, "dataPath", settings.DataPath);
             Upsert(connection, "previewEnabled", settings.PreviewEnabled ? "true" : "false");
+            Upsert(connection, "generateVideoPreviews", settings.GenerateVideoPreviews ? "true" : "false");
             Upsert(connection, "videoPreviewQuality", NormalizeVideoPreviewQuality(settings.VideoPreviewQuality));
             Upsert(connection, "animationsEnabled", settings.AnimationsEnabled ? "true" : "false");
             Upsert(connection, "hardwareAcceleration", settings.HardwareAcceleration ? "true" : "false");
@@ -635,6 +637,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.TempPath = Get(values, "tempPath", settings.TempPath);
         settings.DataPath = DataDirectory.FullName;
         settings.PreviewEnabled = GetBool(values, "previewEnabled", settings.PreviewEnabled);
+        settings.GenerateVideoPreviews = GetBool(values, "generateVideoPreviews", settings.GenerateVideoPreviews);
         settings.VideoPreviewQuality = NormalizeVideoPreviewQuality(Get(values, "videoPreviewQuality", settings.VideoPreviewQuality));
         settings.AnimationsEnabled = GetBool(values, "animationsEnabled", settings.AnimationsEnabled);
         settings.HardwareAcceleration = GetBool(values, "hardwareAcceleration", settings.HardwareAcceleration);

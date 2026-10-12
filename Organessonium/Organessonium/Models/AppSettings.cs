@@ -71,6 +71,9 @@ public sealed class AppSettings
     [JsonPropertyName("previewEnabled")]
     public bool PreviewEnabled { get; set; } = true;
 
+    [JsonPropertyName("generateVideoPreviews")]
+    public bool GenerateVideoPreviews { get; set; } = true;
+
     [JsonPropertyName("videoPreviewQuality")]
     public string VideoPreviewQuality { get; set; } = "low";
 
@@ -141,6 +144,7 @@ public sealed class AppSettings
             TempPath = TempPath,
             DataPath = DataPath,
             PreviewEnabled = PreviewEnabled,
+            GenerateVideoPreviews = GenerateVideoPreviews,
             VideoPreviewQuality = VideoPreviewQuality,
             AnimationsEnabled = AnimationsEnabled,
             HardwareAcceleration = HardwareAcceleration,

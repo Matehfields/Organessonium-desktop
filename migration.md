@@ -628,13 +628,13 @@ Procedimento: concluir ou descartar estados antigos com autorização, verificar
 
 Status: verificar antes da remoção
 
-Descrição: `VideoPreviewWorker` mantém o gerador Windows para miniaturas de imagens e para prévias em instalações sem FFmpeg ou Windows de 32 bits. O caminho 480p legado depende de codecs Windows e mantém a saída seekable em até 128 MiB. Miniaturas usam reserva separada de 96 MiB/8 MiB e não aceitam um ícone genérico como imagem. FFmpeg gera vídeo/MKV em fluxo sem esse teto de saída.
+Descrição: `VideoPreviewWorker` mantém o gerador Windows para miniaturas de imagens e para prévias em instalações sem FFmpeg ou Windows de 32 bits. O caminho 480p legado depende de codecs Windows e mantém a saída seekable em até 128 MiB. Miniaturas usam reserva separada de 96 MiB/8 MiB e não aceitam um ícone genérico como imagem. FFmpeg gera vídeo/MKV em uma passagem, com staging oculto ao lado do original e upload posterior, sem esse teto de saída.
 
 Introduzido por: correção de miniaturas e prévias 480p longas via motor separado.
 
 Código relacionado: `Services/VideoPreviewGenerator.cs`, `VideoPreviewWorker.cs`, `FfmpegMediaService.cs`, `FfmpegPreviewUpload.cs`, `Bridge/AppController.cs` (`TryUploadGeneratedPreviewAsync`).
 
-Comportamento atual: previews remotos existentes, MP4 flat, `chunks` unitários, plaintext antigo e `chunkRefs` permanecem legíveis. Nenhuma entrada é regravada para trocar o encoder. Retomadas antigas podem enviar prévias pelo layout unitário; uploads novos agrupam até dez anexos. ORGAESGC v1 e o metadata de vídeo não mudam; chunks de prévia podem ter 2 MiB, e leitores usam tamanhos reais, não o limite de upload.
+Comportamento atual: previews remotos existentes, MP4 flat, `chunks` unitários, plaintext antigo e `chunkRefs` permanecem legíveis. Nenhuma entrada é regravada para trocar o encoder. Retomadas antigas podem enviar prévias pelo layout unitário; uploads novos agrupam até dez anexos. ORGAESGC v1 e o metadata não mudam. Novas partes acompanham o limite de 20 MiB; prévias antigas de 2 MiB continuam válidas porque leitores usam tamanhos reais, não o limite atual de upload.
 
 Pode ser removido quando: houver motor de mídia disponível e validado para todas as instalações/arquiteturas suportadas, e a política de distribuição/licenciamento estiver concluída. O gerador Windows de imagens é um caminho operacional útil, não dívida descartável automaticamente.
 

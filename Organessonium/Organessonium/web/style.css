@@ -2420,7 +2420,7 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 .ops-panel{
     position:fixed;bottom:18px;right:14px;
     width:min(380px,calc(100vw - 28px));
-    background:var(--surface);border:1px solid var(--accent);
+    background:var(--surface);border:1px solid var(--border);
     border-radius:8px;box-shadow:0 14px 42px rgba(0,0,0,.52);
     z-index:200;overflow:hidden;
 }
@@ -2457,12 +2457,12 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .op-batch-cancel{
-    flex:0 0 auto;border:0;background:transparent;color:var(--accent);
+    flex:0 0 auto;border:0;background:transparent;color:var(--text-secondary);
     font-family:inherit;font-size:12px;font-weight:600;cursor:pointer;padding:5px 0;
 }
 .op-batch-cancel:hover{color:var(--text-primary);}
 .op-batch-track{height:2px;background:var(--surface3);overflow:hidden;}
-.op-batch-track span{display:block;height:100%;background:var(--accent);transition:width .2s ease;}
+.op-batch-track span{display:block;height:100%;background:var(--text-secondary);transition:width .2s ease;}
 .op-batch-track-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center;padding:0 14px 0 16px;background:var(--surface2);}
 .op-file-list{display:flex;flex-direction:column;}
 .op-file-row{
@@ -2471,7 +2471,7 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     border-bottom:1px solid var(--border);
 }
 .op-file-row:last-child{border-bottom:0;}
-.op-file-icon{display:flex;align-items:center;justify-content:center;color:var(--accent);}
+.op-file-icon{display:flex;align-items:center;justify-content:center;color:var(--text-secondary);}
 .op-file-copy{min-width:0;display:flex;flex-direction:column;gap:2px;}
 .op-file-name{
     font-size:12px;font-weight:500;color:var(--text-primary);
@@ -2488,9 +2488,15 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     position:relative;color:var(--text-muted);border:2px solid var(--surface3);
 }
 .op-file-progress.active{
-    border:0;background:conic-gradient(var(--accent) calc(var(--progress) * 1%),var(--surface3) 0);animation:none;
+    border:0;background:conic-gradient(var(--text-secondary) calc(var(--progress) * 1%),var(--surface3) 0);animation:none;
 }
 .op-file-progress.active::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--surface);}
+.op-file-action{position:relative;width:24px;height:24px;display:flex;align-items:center;justify-content:center;}
+.op-file-cancel{position:absolute;inset:0;border:0;border-radius:50%;background:var(--surface3);color:var(--text-primary);cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;}
+.op-file-row:not([data-file-status="done"]):not([data-file-status="error"]):not([data-file-status="cancelled"]) .op-file-action:hover .op-file-cancel,
+.op-file-row:not([data-file-status="done"]):not([data-file-status="error"]):not([data-file-status="cancelled"]) .op-file-action:focus-within .op-file-cancel{opacity:1;pointer-events:auto;}
+.op-file-row:not([data-file-status="done"]):not([data-file-status="error"]):not([data-file-status="cancelled"]) .op-file-action:hover .op-file-progress{visibility:hidden;}
+.op-file-cancel:disabled{cursor:wait;}
 .op-file-progress.waiting{border:0;color:#FBC02D;animation:none;}
 .op-file-progress.done{border:0;color:#4caf50;animation:none;}
 .op-file-progress.error,.op-file-progress.cancelled{border:0;color:var(--danger);animation:none;}
@@ -2520,6 +2526,8 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 .op-status.err{color:var(--danger);}
 .op-progress{height:3px;background:var(--surface3);border-radius:2px;overflow:hidden;}
 .op-progress-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .2s;}
+.op-item[data-op-type="upload"] .op-progress-bar{background:var(--text-secondary);}
+.op-item[data-op-type="upload"] .op-icon.upload{color:var(--text-secondary);background:var(--surface3);}
 .op-progress-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center;}
 .op-log{font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 

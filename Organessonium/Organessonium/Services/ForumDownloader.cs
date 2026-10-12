@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Organessonium.Models;
 using Organessonium.Services.MetadataEncryption;
@@ -116,16 +117,7 @@ public sealed class ForumDownloader
 
         Directory.CreateDirectory(destDir.FullName);
         var output = new FileInfo(System.IO.Path.Combine(destDir.FullName, archiveName));
-        await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-        {
-            var partNumber = 0;
-            foreach (var part in downloaded.Values)
-            {
-                partNumber++;
-                onProgress($"Montando parte {partNumber}/{downloaded.Count}");
-                await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                await inStream.CopyToAsync(outStream, cancellationToken);
-            }        }
+        await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
 
         try { tempDir.Delete(true); } catch { }
         return output;
@@ -197,14 +189,7 @@ public sealed class ForumDownloader
 
         destDir.Create();
         var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name));
-        await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-        {
-            foreach (var part in downloaded.Values)
-            {
-                await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                await inStream.CopyToAsync(outStream, cancellationToken);
-            }
-        }
+        await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
 
         try { tempDir.Delete(true); } catch { }
         output.Refresh();
@@ -407,21 +392,8 @@ public sealed class ForumDownloader
         onProgress("Montando arquivo final...");
         destDir.Create();
         var outputFile = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name));
-        await using (var outStream = new FileStream(outputFile.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-        {
-            foreach (var part in parts.OrderBy(part => part.Index))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (!available.TryGetValue(part.Index, out var chunkFile) || !chunkFile.Exists)
-                {
-                    throw new IOException("Chunk temporÃ¡rio ausente para montar download: " + part.Index);
-                }
-
-                onProgress($"Montando parte {part.Index + 1}/{parts.Count}");
-                await using var inStream = new FileStream(chunkFile.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                await inStream.CopyToAsync(outStream, cancellationToken);
-            }
-        }
+        await DownloadAssembler.AssembleAsync(parts.OrderBy(part => part.Index).Select(part => available[part.Index]),
+            outputFile, onProgress, onDetailedProgress, cancellationToken);
 
         try { tempDir.Delete(true); } catch { }
         outputFile.Refresh();
@@ -1117,14 +1089,7 @@ public sealed class ForumDownloader
 
             destDir.Create();
             var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? downloaded.Values.First().Name : outputName));
-            await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-            {
-                foreach (var part in downloaded.Values)
-                {
-                    await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                    await inStream.CopyToAsync(outStream, cancellationToken);
-                }
-            }
+            await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
 
             try { tempDir.Delete(true); } catch { }
             output.Refresh();
@@ -1254,7 +1219,6 @@ public sealed class ForumDownloader
         {
             Exception? last = null;
             var maxAttempts = encryption == null ? MaxChunkDownloadAttempts : MaxEncryptedPayloadDownloadAttempts;
-            var encryptedTarget = encryption == null ? target : new FileInfo(target.FullName + ".encrypted");
             var networkRetryCount = 0;
             for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
@@ -1265,8 +1229,15 @@ public sealed class ForumDownloader
                 var sourceUrl = useProxy ? part.ProxyUrl : part.Url;
                 try
                 {
-                    encryptedTarget.Directory?.Create();
-                    await using (var outStream = new FileStream(encryptedTarget.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
+                    if (encryption != null && (part.Size <= 0 || part.Size > 64L * 1024 * 1024))
+                        throw new InvalidDataException("O chunk criptografado excede o limite seguro de memória ou possui tamanho inválido.");
+                    using var reservation = encryption == null ? null : await RamUploadBudget.ReserveExternalBytesAsync(
+                        checked(part.Size * 2 + DownloadBufferSize), checked(part.Size * 2 + DownloadBufferSize), cancellationToken);
+                    using var encryptedMemory = encryption == null ? null : new MemoryStream(checked((int)part.Size));
+                    target.Directory?.Create();
+                    await using var diskOutput = encryptedMemory == null
+                        ? new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true) : null;
+                    var outStream = (Stream?)encryptedMemory ?? diskOutput!;
                     {
                         using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
                         request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
@@ -1288,6 +1259,8 @@ public sealed class ForumDownloader
                                 break;
                             }
 
+                            if (part.Size > 0 && countedBytes + read > part.Size)
+                                throw new IOException("O chunk recebido excedeu o tamanho informado pelo servidor.");
                             await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                             countedBytes += read;
                             var currentBytes = Interlocked.Add(ref downloadedBytes, read);
@@ -1302,20 +1275,17 @@ public sealed class ForumDownloader
                         throw new IOException($"Chunk {part.Index + 1} incompleto. Esperado {part.Size} bytes, recebido {countedBytes} bytes.");
                     }
 
-                    encryptedTarget.Refresh();
-                    if (!encryptedTarget.Exists || encryptedTarget.Length == 0)
+                    if (countedBytes == 0)
                     {
                         throw new IOException("Chunk baixado estÃ¡ vazio: " + part.Name);
                     }
 
                     if (encryption != null)
                     {
-                        await _encryption.DecryptFileAsync(
-                            encryptedTarget,
-                            target,
-                            encryption.WithChunkIndex(part.Index),
-                            cancellationToken);
-                        TryDelete(encryptedTarget);
+                        var plaintext = _encryption.DecryptBytes(encryptedMemory!.GetBuffer().AsSpan(0, checked((int)countedBytes)),
+                            encryption.WithChunkIndex(part.Index));
+                        try { await File.WriteAllBytesAsync(target.FullName, plaintext, cancellationToken); }
+                        finally { CryptographicOperations.ZeroMemory(plaintext); }
                     }
 
                     return;
@@ -1330,7 +1300,6 @@ public sealed class ForumDownloader
                     }
 
                     TryDelete(target);
-                    TryDelete(encryptedTarget);
                     AppLogger.Error("Download.ChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}:{(useProxy ? "proxy" : "cdn")}");
                     var isEmptyResponse = ex is IOException io &&
                                           (io.Message.Contains("vazio", StringComparison.OrdinalIgnoreCase) ||
@@ -1359,7 +1328,6 @@ public sealed class ForumDownloader
                     }
 
                     TryDelete(target);
-                    TryDelete(encryptedTarget);
                     break;
                 }
             }
@@ -1381,7 +1349,7 @@ public sealed class ForumDownloader
 
             var percent = totalBytes <= 0
                 ? 0
-                : Math.Clamp((int)Math.Round(currentBytes * 100.0 / totalBytes), 0, 100);
+                : Math.Clamp((int)Math.Round(currentBytes * 80.0 / totalBytes), 0, 80);
             if (Interlocked.Exchange(ref lastDetailedPercent, percent) != percent)
             {
                 onDetailedProgress(new DownloadProgress(percent, part.Name, currentBytes, totalBytes));
@@ -1660,7 +1628,7 @@ public sealed class ForumDownloader
     }
 }
 
-public sealed record DownloadProgress(int Percent, string Message, long DownloadedBytes, long TotalBytes);
+public sealed record DownloadProgress(int Percent, string Message, long DownloadedBytes, long TotalBytes, bool Assembling = false);
 
 
 

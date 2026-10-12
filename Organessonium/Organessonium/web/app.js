@@ -17,7 +17,7 @@ let uploadConflictState = null;
 let settings = {
     accentColorMode:'system', accentColor:'#0078D4',
     cardSize:'medium', downloadThreads:4, uploadThreads:4, forceUploadParallelism:false, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
-    previewEnabled:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
+    previewEnabled:true, generateVideoPreviews:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
 };
@@ -130,6 +130,9 @@ const I18N = {
         small:'Pequeno', medium:'Médio', large:'Grande', previews:'Prévias',
         videoPreviewQuality:'Qualidade do vídeo', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Usa a prévia 480p para carregar vídeos mais rápido.',
+        generateVideoPreviews:'Gerar prévias 480p dos vídeos',
+        generateVideoPreviewsHelp:'Desative para enviar vídeos mais rápido. Miniaturas e reprodução progressiva continuam disponíveis.',
+        cancelFileUpload:'Cancelar upload deste arquivo', cancellingFileUpload:'Cancelando...',
         videoPrefetch:'Chunks antecipados de vídeo', videoPrefetchHelp:'Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.',
         cache:'Cache', clearCache:'Limpar cache', clearCacheHelp:'Limpa prévias e imagens salvas localmente.',
         cacheSize:v => 'Uso atual: ' + v.size,
@@ -268,6 +271,9 @@ const I18N = {
         small:'Small', medium:'Medium', large:'Large', previews:'Previews',
         videoPreviewQuality:'Video quality', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Uses the 480p preview to load videos faster.',
+        generateVideoPreviews:'Generate 480p video previews',
+        generateVideoPreviewsHelp:'Disable to upload videos faster. Thumbnails and progressive playback remain available.',
+        cancelFileUpload:'Cancel this file upload', cancellingFileUpload:'Cancelling...',
         videoPrefetch:'Video chunks to prefetch', videoPrefetchHelp:'RAM-only buffer. Zero disables prefetch; full downloads are not limited.',
         cache:'Cache', clearCache:'Clear cache', clearCacheHelp:'Clears locally saved previews and images.',
         cacheSize:v => 'Current usage: ' + v.size,
@@ -554,6 +560,8 @@ function applyI18n() {
     setText('video-preview-low-text', 'videoPreviewLow');
     setText('video-preview-original-text', 'videoPreviewOriginal');
     setText('setting-video-preview-quality-help', 'videoPreviewQualityHelp');
+    setText('setting-generate-video-previews-label', 'generateVideoPreviews');
+    setText('setting-generate-video-previews-help', 'generateVideoPreviewsHelp');
     setText('setting-video-prefetch-label', 'videoPrefetch');
     setText('setting-video-prefetch-help', 'videoPrefetchHelp');
     setText('setting-cache-label', 'cache');
@@ -2320,7 +2328,7 @@ window._opsAdd = (id, type, name) => {
     refreshOpsTitle();
 };
 
-window._opsUploadBatch = (id, names) => {
+window._opsUploadBatch = (id, names, sizes) => {
     opsPanel.classList.remove('hidden');
     const safeNames = Array.isArray(names) ? names : [];
     const existing = $('op-' + id);
@@ -2332,14 +2340,17 @@ window._opsUploadBatch = (id, names) => {
     item.dataset.opType = 'upload';
     item.dataset.opStatus = 'active';
     item.dataset.itemCount = String(safeNames.length);
-    const rows = safeNames.map((name, index) => `<div class="op-file-row" id="op-file-${id}-${index}" data-file-status="queued">
+    const rows = safeNames.map((name, index) => `<div class="op-file-row" id="op-file-${id}-${index}" data-file-status="queued" data-byte-size="${Math.max(1, Number(sizes?.[index]) || 1)}">
         <span class="op-file-icon">${icon('description',16)}</span>
         <div class="op-file-copy">
             <div class="op-file-name" title="${esc(name)}">${esc(name)}</div>
             <div class="op-file-detail" id="op-file-detail-${id}-${index}">${esc(t('queuedUpload'))}</div>
         </div>
         <span class="op-file-percent" id="op-file-percent-${id}-${index}">0%</span>
-        <span class="op-file-progress queued" id="op-file-progress-${id}-${index}" style="--progress:0" aria-label="0%"></span>
+        <span class="op-file-action">
+            <span class="op-file-progress queued" id="op-file-progress-${id}-${index}" style="--progress:0" aria-label="0%"></span>
+            <button type="button" class="op-file-cancel" data-file-index="${index}" aria-label="${esc(t('cancelFileUpload'))}: ${esc(name)}">${icon('close',16)}</button>
+        </span>
     </div>`).join('');
     item.innerHTML = `<div class="op-batch-summary">
             <span id="op-msg-${id}">${esc(t('startingUploads'))}</span>
@@ -2352,6 +2363,15 @@ window._opsUploadBatch = (id, names) => {
         e.stopPropagation();
         requestCancelUploadBatch(id);
     });
+    item.querySelectorAll('.op-file-cancel').forEach(button => button.addEventListener('click', e => {
+        e.stopPropagation();
+        const index = Number(button.dataset.fileIndex);
+        const row = $('op-file-' + id + '-' + index);
+        if (!row || ['done','error','cancelled'].includes(row.dataset.fileStatus)) return;
+        button.disabled = true;
+        $('op-file-detail-' + id + '-' + index).textContent = t('cancellingFileUpload');
+        if (window.bridge?.cancelUploadFile) window.bridge.cancelUploadFile(id, index);
+    }));
     opsList.appendChild(item);
     opsList.scrollTop = opsList.scrollHeight;
     refreshOpsTitle();
@@ -2363,6 +2383,8 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     const normalizedStatus = ['active', 'waiting', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
     if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && normalizedStatus === 'active') return;
     row.dataset.fileStatus = normalizedStatus;
+    const cancelButton = row.querySelector('.op-file-cancel');
+    if (cancelButton) cancelButton.disabled = ['done','error','cancelled'].includes(normalizedStatus);
     const detail = $('op-file-detail-' + id + '-' + fileIndex);
     if (detail && message) detail.textContent = message;
     const indicator = $('op-file-progress-' + id + '-' + fileIndex);
@@ -2570,15 +2592,10 @@ function refreshBatchProgress(id) {
         setOpProgress(id, 100);
         return;
     }
-    const byteTotal = Number(item.dataset.metricByteTotal) || 0;
-    if (byteTotal > 0) {
-        const cap = rows.every(row => row.dataset.fileStatus === 'done') ? 100
-            : (rows.length === 1 ? Math.min(99, Number(rows[0].dataset.progress) || 0) : 99);
-        setOpProgress(id, Math.min(cap, (Number(item.dataset.metricBytes) || 0) * 100 / byteTotal));
-        return;
-    }
-    const total = rows.reduce((sum, row) => sum + Math.max(0, Number(row.dataset.progress) || 0), 0);
-    setOpProgress(id, total / rows.length);
+    const weight = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1), 0);
+    const total = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1) *
+        (['done','error','cancelled'].includes(row.dataset.fileStatus) ? 100 : Math.max(0, Number(row.dataset.progress) || 0)), 0);
+    setOpProgress(id, total / weight);
 }
 
 function formatTransferRate(bytesPerSecond) {
@@ -2877,6 +2894,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('setting-threads').addEventListener('input', e => { settings.downloadThreads=+e.target.value; $('thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-preview-threads').addEventListener('input', e => { settings.previewThreads=+e.target.value; $('preview-thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-video-prefetch').addEventListener('input', e => { settings.videoPrefetchChunks=+e.target.value; $('video-prefetch-val').textContent=e.target.value; queueSettingsSave(); });
+    $('setting-generate-video-previews').addEventListener('change', e => { settings.generateVideoPreviews=e.target.checked; queueSettingsSave(); });
     $('setting-upload-files').addEventListener('input', e => { settings.maxParallelUploads=+e.target.value; $('upload-files-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-upload-threads').addEventListener('input', e => { settings.uploadThreads=+e.target.value; $('upload-thr-val').textContent=e.target.value; queueSettingsSave(); });
     $('setting-force-upload').addEventListener('click', () => {
@@ -5687,6 +5705,7 @@ function loadSettings() {
     $('setting-video-prefetch').value=settings.videoPrefetchChunks; $('video-prefetch-val').textContent=settings.videoPrefetchChunks;
     $('setting-dlpath').value=settings.downloadPath||''; $('setting-tmppath').value=settings.tempPath||''; $('setting-datapath').value=settings.dataPath||'';
     $('setting-preview').checked=settings.previewEnabled!==false;
+    $('setting-generate-video-previews').checked=settings.generateVideoPreviews!==false;
     $('setting-animations').checked=settings.animationsEnabled!==false;
     $('setting-hardware').checked=settings.hardwareAcceleration!==false;
     loadProxySettings();
@@ -5790,7 +5809,8 @@ function saveSettings(showStatus = true) {
         settings.videoPrefetchChunks,
         settings.forceUploadParallelism === true,
         settings.accentColorMode,
-        settings.accentColor
+        settings.accentColor,
+        settings.generateVideoPreviews !== false
     );
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);

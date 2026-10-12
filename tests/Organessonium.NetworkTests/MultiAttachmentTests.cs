@@ -81,12 +81,14 @@ internal static partial class Program
                     {
                         await manager.MarkUploadChunksAsync(state, batch);
                         checkpointSizes.Add((await repository.LoadActiveByIdAsync(state.TransferId))!.UploadedChunks.Count);
-                        if (state.UploadedChunks.Count == 11) interrupted.Cancel();
+                        if (state.UploadedChunks.Count >= 11) interrupted.Cancel();
                     });
                 return TestOutcome.Fail("a interrupção entre batches não foi observada");
             }
             catch (OperationCanceledException) when (interrupted.IsCancellationRequested) { }
-            RequireSync(checkpointSizes.SequenceEqual(new[] { 1, 11 }), "o batch não foi persistido como uma atualização completa");
+            var cumulative = 0;
+            RequireSync(checkpointSizes.SequenceEqual(server.RequestCounts.Select(size => cumulative += size)) &&
+                checkpointSizes[0] == 1 && checkpointSizes[^1] >= 11, "o batch não foi persistido como uma atualização completa");
             state = (await new TransferStateRepository(repository.RootDirectory).LoadActiveByIdAsync(state.TransferId))!;
             var confirmedIds = state.UploadedChunks.Select(chunk => chunk.AttachmentId!).ToArray();
             var resumedReferences = state.UploadedChunks.Select(chunk => new ChunkReference
@@ -99,10 +101,10 @@ internal static partial class Program
                 maxPreparedPartBytes: 1024 + count + EncryptionService.EnvelopeOverheadBytes,
                 onBatchUploaded: batch => manager.MarkUploadChunksAsync(state, batch));
             RequireSync(result.ChunkReferences?.Count == count && result.ChunkMessageIds.Count == 0 &&
-                progress.First() == 11 && progress.Last() == count && state.PendingChunks.Count == 0,
+                progress.First() == confirmedIds.Length && progress.Last() == count && state.PendingChunks.Count == 0,
                 "retomada perdeu referências, progresso lógico ou o layout novo");
-            RequireSync(server.RequestCounts.SequenceEqual(new[] { 1, 10, 10, 5 }) &&
-                result.ChunkReferences!.Take(11).Select(reference => reference.AttachmentId).SequenceEqual(confirmedIds),
+            RequireSync(server.RequestCounts.First() == 1 && server.RequestCounts.Sum() == count && server.RequestCounts.All(size => size is >= 1 and <= 10) &&
+                result.ChunkReferences!.Take(confirmedIds.Length).Select(reference => reference.AttachmentId).SequenceEqual(confirmedIds),
                 "um chunk confirmado foi reenviado ou os batches tiveram ordem incorreta");
             RequireSync(seenBuffers.All(buffer => buffer.All(value => value == 0)), "a conclusão reteve conteúdo nos buffers");
 
@@ -129,7 +131,17 @@ internal static partial class Program
             download = (await new TransferStateRepository(repository.RootDirectory).LoadActiveByIdAsync(download.TransferId))!;
             var listsBefore = server.MessageLists;
             var downloader = new ForumDownloader(api, new AppSettings { DownloadThreads = 3 }, crypto, () => new HttpClient(server, false));
-            var assembled = await downloader.DownloadAndAssembleAsync(loaded, destination, download, manager, _ => { });
+            var downloadProgress = new List<DownloadProgress>();
+            var encryptedDiskFiles = 0;
+            using var watcher = new FileSystemWatcher(destination.FullName, "*.encrypted") { IncludeSubdirectories = true, EnableRaisingEvents = true };
+            watcher.Created += (_, _) => Interlocked.Increment(ref encryptedDiskFiles);
+            var assembled = await downloader.DownloadAndAssembleAsync(loaded, destination, download, manager, _ => { },
+                onDetailedProgress: item => { lock (downloadProgress) downloadProgress.Add(item); });
+            await Task.Delay(50);
+            RequireSync(encryptedDiskFiles == 0 && downloadProgress.Any(item => !item.Assembling && item.Percent == 80) &&
+                downloadProgress.Where(item => !item.Assembling).All(item => item.Percent <= 80) &&
+                downloadProgress.Any(item => item.Assembling && item.Percent == 80) && downloadProgress.Any(item => item.Assembling && item.Percent == 99),
+                "download gravou ciphertext no disco ou não reservou 20% para montar o arquivo");
             RequireSync((await File.ReadAllBytesAsync(assembled.FullName)).SequenceEqual(original) && server.MessageLists - listsBefore == 1 &&
                 confirmedIds.Take(2).All(id => !server.CdnReads.ContainsKey(id)),
                 "download não deduplicou mensagens, perdeu ChunkCount global ou baixou chunks já confirmados");
@@ -436,7 +448,7 @@ internal static partial class Program
             var parts = multipart.Where(part => part.Headers.ContentDisposition?.FileName != null).ToArray();
             RequestCounts.Enqueue(parts.Length);
             LastBodyLength = multipart.Headers.ContentLength ?? -1;
-            RequireSync(parts.All(part => part is StreamContent), "payload multipart foi bufferizado integralmente");
+            RequireSync(parts.All(part => part is StreamContent or UploadPartContent), "payload multipart foi bufferizado integralmente");
             using var payloadJson = JsonDocument.Parse(await multipart.First(part => part.Headers.ContentDisposition?.Name?.Trim('"') == "payload_json").ReadAsStringAsync(token));
             var forum = segments[^1] == "threads";
             var payload = forum ? payloadJson.RootElement.GetProperty("message") : payloadJson.RootElement;

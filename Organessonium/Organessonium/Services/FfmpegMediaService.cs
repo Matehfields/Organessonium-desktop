@@ -2,13 +2,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
 namespace Organessonium.Services;
 
-// CLI only: no libav linking, no media files or complete preview buffers on disk.
+// CLI only. Thumbnail output stays in RAM; video output is consumed by the staging writer.
 internal static class FfmpegMediaService
 {
-    internal const int PreviewChunkBytes = 2 * 1024 * 1024;
+    internal static int PreviewChunkBytes => EncryptionService.MaximumPlaintextPayloadBytes;
     private const long WorkingBytes = 192L * 1024 * 1024;
     private static readonly SemaphoreSlim Gate = new(1, 1);
     internal static string Executable => Path.Combine(AppContext.BaseDirectory, "media", "ffmpeg.exe");
@@ -53,7 +54,7 @@ internal static class FfmpegMediaService
 
     internal static async Task ReadOutputAsync(FileInfo source, bool hardwareAcceleration, bool thumbnail,
         Func<Stream, CancellationToken, Task> consume, CancellationToken token, string? executable = null,
-        Action<TimeSpan>? encodedTime = null)
+        Action<TimeSpan>? encodedTime = null, Action<int>? generationProgress = null)
     {
         using var admission = CancellationTokenSource.CreateLinkedTokenSource(token);
         admission.CancelAfter(TimeSpan.FromSeconds(30));
@@ -83,7 +84,7 @@ internal static class FfmpegMediaService
             try
             {
                 registration = AppMemoryBudget.RegisterMediaWorker(process);
-                errors = DrainProgressAsync(process.StandardError, encodedTime);
+                errors = DrainProgressAsync(process.StandardError, encodedTime, generationProgress);
                 await consume(process.StandardOutput.BaseStream, token).ConfigureAwait(false);
                 await process.WaitForExitAsync(token).ConfigureAwait(false);
                 await errors.ConfigureAwait(false);
@@ -92,14 +93,6 @@ internal static class FfmpegMediaService
                     throw new IOException($"O FFmpeg não pôde gerar a prévia (código {process.ExitCode}). O arquivo original foi preservado.");
             }
             catch (Exception) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }
-            catch (EndOfStreamException ex)
-            {
-                await process.WaitForExitAsync(token).ConfigureAwait(false);
-                if (errors != null) await errors.ConfigureAwait(false);
-                throw new IOException(process.ExitCode == 0
-                    ? "O tamanho da prévia mudou entre as duas gerações. " + ex.Message
-                    : $"O FFmpeg encerrou a geração da prévia com erro (código {process.ExitCode}).", ex);
-            }
             finally
             {
                 Stop(process);
@@ -114,7 +107,7 @@ internal static class FfmpegMediaService
 
     private static IEnumerable<string> Arguments(FileInfo source, bool hardwareAcceleration, bool thumbnail)
     {
-        var args = new List<string> { "-hide_banner", "-loglevel", "error", "-nostdin", "-nostats", "-progress", "pipe:2",
+        var args = new List<string> { "-hide_banner", "-loglevel", thumbnail ? "error" : "info", "-nostdin", "-nostats", "-progress", "pipe:2",
             "-threads", "2", "-filter_threads", "1" };
         if (hardwareAcceleration && !thumbnail) args.AddRange(["-hwaccel", "auto"]);
         args.AddRange(["-i", source.FullName, "-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1"]);
@@ -127,8 +120,8 @@ internal static class FfmpegMediaService
         else
         {
             args.AddRange(["-map", "0:a:0?", "-vf",
-                "scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
-                "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-threads", "1",
+                "fps=30,scale=w='min(854,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+                "-r", "30", "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-threads", Math.Min(4, Environment.ProcessorCount).ToString(CultureInfo.InvariantCulture),
                 "-pix_fmt", "yuv420p", "-b:v", "1000k", "-maxrate", "1000k", "-bufsize", "1000k",
                 "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
                 "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-fflags", "+bitexact", "-flags:v", "+bitexact", "-flags:a", "+bitexact",
@@ -137,14 +130,26 @@ internal static class FfmpegMediaService
         return args;
     }
 
-    private static async Task DrainProgressAsync(StreamReader reader, Action<TimeSpan>? encodedTime)
+    private static async Task DrainProgressAsync(StreamReader reader, Action<TimeSpan>? encodedTime, Action<int>? generationProgress)
     {
+        double duration = 0;
         while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
         {
             // Never retain stderr: codec errors can include source paths and embedded metadata.
+            if (line.TrimStart().StartsWith("Duration:", StringComparison.Ordinal))
+            {
+                var match = Regex.Match(line, @"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", RegexOptions.CultureInvariant);
+                if (match.Success && double.TryParse(match.Groups[1].Value, CultureInfo.InvariantCulture, out var hours) &&
+                    double.TryParse(match.Groups[2].Value, CultureInfo.InvariantCulture, out var minutes) &&
+                    double.TryParse(match.Groups[3].Value, CultureInfo.InvariantCulture, out var seconds))
+                    duration = hours * 3600 + minutes * 60 + seconds;
+            }
             if (line.StartsWith("out_time_us=", StringComparison.Ordinal) &&
                 long.TryParse(line.AsSpan(12), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) && value >= 0)
+            {
                 encodedTime?.Invoke(TimeSpan.FromMicroseconds(value));
+                if (duration > 0) generationProgress?.Invoke((int)Math.Clamp(value / 10000d / duration, 0, 99));
+            }
         }
     }
 

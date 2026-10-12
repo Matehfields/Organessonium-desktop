@@ -111,6 +111,7 @@ public sealed partial class AppController : IAsyncDisposable
     private string _thumbnailRequestKey = "";
     private readonly ConcurrentDictionary<string, TaskCompletionSource<UploadConflictResponse>> _uploadConflictResponses = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _transferOperations = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _uploadFileOperations = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _transferCompletions = new();
     private readonly SemaphoreSlim _registryLoadGate = new(1, 1);
     private readonly TransferManager _transferManager;
@@ -284,6 +285,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "startFolderUpload": return StartFolderUploadDialogAsync();
             case "resolveUploadConflict": ResolveUploadConflict(args); return Task.CompletedTask;
             case "cancelTransfers": CancelTransfers(ArgString(args, 0)); return Task.CompletedTask;
+            case "cancelUploadFile": CancelUploadFile(ArgString(args, 0), ArgInt(args, 1, -1)); return Task.CompletedTask;
             case "resumeTransfers": _ = RunAsync(ResumeInterruptedTransfersAsync); return Task.CompletedTask;
             case "failInterruptedTransfers": _ = RunAsync(FailInterruptedTransfersAsync); return Task.CompletedTask;
             case "startDownload": return StartDownloadAsync(ArgString(args, 0), ArgString(args, 1));
@@ -1007,7 +1009,7 @@ public sealed partial class AppController : IAsyncDisposable
         folderIds.Add(string.IsNullOrWhiteSpace(folderId) ? AppRegistry.RootFolderId : folderId);
     }
 
-    private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries)
+    private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries, bool refreshStatistics = true)
     {
         foreach (var entry in entries)
         {
@@ -1016,7 +1018,7 @@ public sealed partial class AppController : IAsyncDisposable
 
         _loadedApps = entries;
         await _bridge.CallAsync("_onLocalAppsChanged", entries);
-        _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
+        if (refreshStatistics) _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
     }
 
     private async Task PublishLibraryFileCountAsync(AppRegistry registry)
@@ -2111,7 +2113,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var opId = NewId();
-        await OpsUploadBatchAsync(opId, tasks.Select(task => task.File.Name).ToArray());
+        await OpsUploadBatchAsync(opId, tasks.Select(task => task.File.Name).ToArray(), tasks.Select(task => task.File.Length).ToArray());
         if (skipped > 0)
         {
             await OpsProgressAsync(opId, 0, $"{skipped} item(ns) sem acesso foram ignorados");
@@ -2132,7 +2134,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
-                await LoadAppsAsync();
+                await PublishLocalRegistryAsync(registry, all);
             }
             finally
             {
@@ -2322,6 +2324,7 @@ public sealed partial class AppController : IAsyncDisposable
         var uploadedEntries = new ConcurrentDictionary<int, AppEntry>();
         var done = 0;
         var failed = 0;
+        var cancelled = 0;
         var active = 0;
         var nextIndex = -1;
         var stoppedByApi = 0;
@@ -2338,7 +2341,9 @@ public sealed partial class AppController : IAsyncDisposable
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
         long transmittedBytes = 0;
-        await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
+        var fileCancellations = tasks.Select(_ => CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)).ToArray();
+        for (var index = 0; index < fileCancellations.Length; index++)
+            _uploadFileOperations[opId + ":" + index] = fileCancellations[index];
 
         var workers = Enumerable.Range(0, fileParallelism).Select(async _ =>
         {
@@ -2352,6 +2357,13 @@ public sealed partial class AppController : IAsyncDisposable
 
                 cancellationToken.ThrowIfCancellationRequested();
                 var task = tasks[index];
+                var fileToken = fileCancellations[index].Token;
+                if (fileToken.IsCancellationRequested)
+                {
+                    Interlocked.Increment(ref cancelled);
+                    await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
+                    continue;
+                }
                 var activeNow = Interlocked.Increment(ref active);
                 await OpsUploadFileProgressAsync(opId, index, "active", 0, "Preparando...");
                 await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + Volatile.Read(ref failed), tasks.Count), $"{activeNow} upload(s) ativo(s)");
@@ -2368,7 +2380,7 @@ public sealed partial class AppController : IAsyncDisposable
                         registry,
                         settings,
                         new UiThrottle(),
-                        cancellationToken,
+                        fileToken,
                         adaptiveUploadGate: uploadGate,
                         memoryCoordinator: memoryCoordinator,
                         maxParallelPartsPerFile: partsPerFile,
@@ -2389,8 +2401,16 @@ public sealed partial class AppController : IAsyncDisposable
                         },
                         transferActivity: transferActivity,
                         deferSerialSynchronization: true,
-                        replacement: task.Replacement), cancellationToken);
+                        replacement: task.Replacement,
+                        onPreviewSize: size => Interlocked.Add(ref totalBytes, size)), fileToken);
                     uploadedEntries[index] = uploaded;
+                    List<AppEntry> visibleEntries;
+                    lock (allEntries)
+                    {
+                        ReplaceLocalEntry(allEntries, uploaded);
+                        visibleEntries = allEntries.ToList();
+                    }
+                    await PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
                     var completed = Interlocked.Increment(ref done);
                     await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
                     await OpsTransferMetricsAsync(
@@ -2407,7 +2427,8 @@ public sealed partial class AppController : IAsyncDisposable
                 catch (OperationCanceledException)
                 {
                     await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
-                    throw;
+                    Interlocked.Increment(ref cancelled);
+                    if (cancellationToken.IsCancellationRequested) throw;
                 }
                 catch (Exception ex)
                 {
@@ -2433,10 +2454,16 @@ public sealed partial class AppController : IAsyncDisposable
 
         try
         {
+            await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
             await Task.WhenAll(workers);
         }
         finally
         {
+            for (var index = 0; index < fileCancellations.Length; index++)
+            {
+                _uploadFileOperations.TryRemove(opId + ":" + index, out _);
+                fileCancellations[index].Dispose();
+            }
             foreach (var pair in uploadedEntries.OrderBy(pair => pair.Key))
             {
                 ReplaceLocalEntry(allEntries, pair.Value);
@@ -2446,11 +2473,12 @@ public sealed partial class AppController : IAsyncDisposable
 
         var status = Volatile.Read(ref stoppedByApi) != 0
             ? "waiting"
-            : (done == tasks.Count ? "done" : "error");
+            : failed > 0 ? "error" : done == 0 && cancelled > 0 ? "cancelled" : "done";
         var summary = Volatile.Read(ref stoppedByApi) != 0
             ? $"{done}/{tasks.Count} concluídos - limite do Discord; upload preservado para retomar"
             : failed > 0
                 ? $"{done}/{tasks.Count} concluídos, {failed} falharam"
+                : cancelled > 0 ? $"{done}/{tasks.Count} concluídos, {cancelled} cancelado(s)"
                 : $"{done}/{tasks.Count} concluídos";
         await OpsUpdateAsync(opId, status, summary);
     }
@@ -2504,7 +2532,8 @@ public sealed partial class AppController : IAsyncDisposable
         Func<long, long, Task>? onBytesUploaded = null,
         TransferActivityClock? transferActivity = null,
         bool deferSerialSynchronization = false,
-        FileReplacement? replacement = null)
+        FileReplacement? replacement = null,
+        Action<long>? onPreviewSize = null)
     {
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2513,7 +2542,8 @@ public sealed partial class AppController : IAsyncDisposable
         var originalFile = file;
         var partParallelism = Math.Clamp(maxParallelPartsPerFile ?? settings.EffectiveUploadThreads, 1, 16);
         var sourceLength = file.Length;
-        var progressTracker = new UploadProgressTracker(ThumbnailCache.IsImage(name));
+        var progressTracker = new UploadProgressTracker(ThumbnailCache.IsImage(name),
+            PreviewType(name) == "video" && settings.GenerateVideoPreviews);
         await ReportUploadItemProgressAsync(
             opId,
             fileIndex,
@@ -2802,7 +2832,8 @@ public sealed partial class AppController : IAsyncDisposable
                         transferState.FileId,
                         transferState.Encryption,
                         EncryptedPayloadRoles.Preview,
-                        0));
+                        0),
+                adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded);
 
             await ReportUploadItemProgressAsync(
                 opId,
@@ -2849,10 +2880,10 @@ public sealed partial class AppController : IAsyncDisposable
                 progressTracker: progressTracker);
             transferState.FileId = entry.FileId;
             transferState.MetadataMessageId = entry.MetadataMessageId;
-            await _transferManager.CompleteAsync(transferState, settings.KeepTransferHistory, cancellationToken);
+            await _transferManager.CompleteAsync(transferState, settings.KeepTransferHistory, CancellationToken.None);
             try
             {
-                await uploader.ArchiveThreadAsync(threadId, cancellationToken, ReportRateLimitWaitAsync);
+                await uploader.ArchiveThreadAsync(threadId, CancellationToken.None, ReportRateLimitWaitAsync);
             }
             catch (OperationCanceledException)
             {
@@ -2918,7 +2949,9 @@ public sealed partial class AppController : IAsyncDisposable
         ForumUploader uploader, AppSettings settings, UiThrottle throttle,
         Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken,
         TransferState? transferState = null, bool useBatchUi = false,
-        UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null)
+        UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null,
+        AdaptiveUploadGate? adaptiveUploadGate = null, TransferActivityClock? transferActivity = null,
+        Action<long>? onPreviewSize = null, Func<long, long, Task>? onPreviewBytes = null)
     {
         var previewMessageId = transferState?.ThumbnailMessageId ?? "";
         IReadOnlyList<string> videoChunks = transferState?.VideoPreview480pChunks ?? [];
@@ -2975,7 +3008,7 @@ public sealed partial class AppController : IAsyncDisposable
             await _bridge.CallAsync("_onNonfatalError", "O arquivo original foi enviado, mas a miniatura não pôde ser gerada.");
         }
 
-        if (video && !settings.VideoPreviewQuality.Equals("original", StringComparison.OrdinalIgnoreCase) && videoChunks.Count == 0)
+        if (video && settings.GenerateVideoPreviews && videoChunks.Count == 0)
         {
             try
             {
@@ -2985,13 +3018,27 @@ public sealed partial class AppController : IAsyncDisposable
                 if (FfmpegMediaService.Available)
                 {
                     void Report(string status) => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
-                        progressTracker?.VideoPreviewUpload(0) ?? 99, status, throttle,
+                        progressTracker?.Current ?? 80, status, throttle,
                         status == "Concluindo", useBatchUi, progressTracker: progressTracker);
+                    long previewSent = 0;
                     var streamed = await FfmpegPreviewUpload.UploadAsync(file, VideoPreviewFileName(name), threadId,
                         uploader, _encryption, encryption, references, settings.HardwareAcceleration, Report,
-                        (sent, total) => Report(sent >= total ? "Concluindo"
-                            : $"Prévia 480p: {FormatTransferBytes(sent)} / {FormatTransferBytes(total)} enviados"),
-                        cancellationToken, onRateLimitWait);
+                        (sent, total) =>
+                        {
+                            var delta = Math.Max(0, sent - Interlocked.Exchange(ref previewSent, sent));
+                            if (onPreviewBytes != null) _ = onPreviewBytes(delta, delta);
+                            _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                                progressTracker?.VideoPreviewUpload((int)Math.Clamp(sent * 100d / Math.Max(1, total), 0, 100)) ?? 99,
+                                sent >= total ? "Concluindo" : $"Prévia 480p: {FormatTransferBytes(sent)} / {FormatTransferBytes(total)} enviados",
+                                throttle, sent >= total, useBatchUi, progressTracker: progressTracker);
+                        },
+                        cancellationToken, onRateLimitWait,
+                        generationProgress: percent => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                            progressTracker?.VideoPreviewGeneration(percent) ?? 80, $"Gerando prévia 480p - {percent}%",
+                            throttle, percent is 0 or 100, useBatchUi, progressTracker: progressTracker),
+                        maxParallelParts: settings.EffectiveUploadThreads, adaptiveUploadGate: adaptiveUploadGate,
+                        onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
+                        onPreviewSize: onPreviewSize);
                     result = new VideoPreviewUploadResult(streamed.SizeBytes, streamed.Upload.ChunkMessageIds, streamed.Upload.ChunkReferences);
                 }
                 else
@@ -3045,7 +3092,7 @@ public sealed partial class AppController : IAsyncDisposable
             var message = bytes.LogicalBytes >= generated.Length ? "Concluindo"
                 : $"Prévia 480p: {FormatTransferBytes(bytes.LogicalBytes)} / {FormatTransferBytes(generated.Length)} enviados";
             _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
-                progressTracker?.VideoPreviewUpload(0) ?? 99, message, throttle,
+                progressTracker?.VideoPreviewUpload((int)Math.Clamp(bytes.LogicalBytes * 100d / Math.Max(1, generated.Length), 0, 100)) ?? 99, message, throttle,
                 bytes.LogicalBytes >= generated.Length, useBatchUi, progressTracker: progressTracker);
         }
         var result = await uploader.UploadResumableGeneratedAsync(VideoPreviewFileName(originalName), totalParts,
@@ -3117,10 +3164,13 @@ public sealed partial class AppController : IAsyncDisposable
                         cancellationToken,
                         progress =>
                         {
-                            Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
-                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent),
-                                $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
-                            _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Assembling ? progress.Message
+                                : $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
+                            if (!progress.Assembling)
+                            {
+                                Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                            }
                         });
                     await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                 }
@@ -3129,10 +3179,13 @@ public sealed partial class AppController : IAsyncDisposable
                     await Downloader().DownloadAndAssembleAsync(threadId, dest, msg => _ = OpsUpdateAsync(opId, "active", msg), cancellationToken,
                         progress =>
                         {
-                            Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
-                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent),
-                                $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
-                            _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Assembling ? progress.Message
+                                : $"{FormatTransferBytes(progress.DownloadedBytes)} / {FormatTransferBytes(progress.TotalBytes)} baixados");
+                            if (!progress.Assembling)
+                            {
+                                Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                            }
                         });
                 }
 
@@ -3251,11 +3304,11 @@ public sealed partial class AppController : IAsyncDisposable
                                 Interlocked.Exchange(ref currentFileTotal, Math.Max(0, progress.TotalBytes));
                                 var aggregate = completedBeforeFile + Math.Max(0, progress.DownloadedBytes);
                                 var overallPercent = totalBytes > 0
-                                    ? Math.Clamp((int)Math.Round(aggregate * 100.0 / totalBytes), 0, 100)
+                                    ? Math.Clamp((int)Math.Round((completedBeforeFile + Math.Max(0, app.SizeBytes) * progress.Percent / 100d) * 100.0 / totalBytes), 0, 100)
                                     : Percent(done, toDownload.Count);
                                 _ = OpsProgressAsync(opId, Math.Min(99, overallPercent),
-                                    $"{FormatTransferBytes(aggregate)} / {FormatTransferBytes(totalBytes)} baixados");
-                                _ = OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, aggregate, totalBytes);
+                                    progress.Assembling ? progress.Message : $"{FormatTransferBytes(aggregate)} / {FormatTransferBytes(totalBytes)} baixados");
+                                if (!progress.Assembling) _ = OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, aggregate, totalBytes);
                             });
                         await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                         var measuredTotal = Math.Max(Math.Max(0, app.SizeBytes), Math.Max(Interlocked.Read(ref currentFileTotal), Interlocked.Read(ref currentFileBytes)));
@@ -4216,6 +4269,7 @@ public sealed partial class AppController : IAsyncDisposable
         settings.ForceUploadParallelism = ArgBool(args, 22, settings.ForceUploadParallelism);
         settings.AccentColorMode = WindowsAccentService.NormalizeMode(ArgString(args, 23, settings.AccentColorMode));
         settings.AccentColor = WindowsAccentService.NormalizeColor(ArgString(args, 24, settings.AccentColor));
+        settings.GenerateVideoPreviews = ArgBool(args, 25, settings.GenerateVideoPreviews);
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var _))
         {
             settings.Proxy.Mode = ProxyMode.Automatic;
@@ -4350,9 +4404,9 @@ public sealed partial class AppController : IAsyncDisposable
         await _bridge.CallAsync("_opsAdd", id, type, name);
     }
 
-    private async Task OpsUploadBatchAsync(string id, IReadOnlyList<string> names)
+    private async Task OpsUploadBatchAsync(string id, IReadOnlyList<string> names, IReadOnlyList<long>? sizes = null)
     {
-        await _bridge.CallAsync("_opsUploadBatch", id, names);
+        await _bridge.CallAsync("_opsUploadBatch", id, names, sizes);
     }
 
     private async Task OpsUploadFileProgressAsync(string id, int fileIndex, string status, int percent, string message)
@@ -4485,6 +4539,14 @@ public sealed partial class AppController : IAsyncDisposable
 
         ThumbnailCache.Clear();
         _thumbnailLoads.Clear();
+    }
+
+    private void CancelUploadFile(string opId, int fileIndex)
+    {
+        if (_uploadFileOperations.TryGetValue(opId + ":" + fileIndex, out var cancellation))
+        {
+            try { cancellation.Cancel(); } catch (ObjectDisposedException) { }
+        }
     }
 
     private void CancelTransfers(string idsJson)
@@ -5013,6 +5075,7 @@ public sealed partial class AppController : IAsyncDisposable
 
             foreach (var child in dirs)
             {
+                if (FfmpegPreviewUpload.IsStagingDirectory(child.Name)) continue;
                 var childFolder = await CreateUploadFolderEntryAsync(
                     registry,
                     all,
@@ -6948,12 +7011,14 @@ private static string ClassifyConnectError(Exception ex)
     private sealed class UploadProgressTracker
     {
         private readonly bool _isImage;
+        private readonly bool _hasVideoPreview;
         private readonly object _sync = new();
         private int _current;
 
-        public UploadProgressTracker(bool isImage)
+        public UploadProgressTracker(bool isImage, bool hasVideoPreview = false)
         {
             _isImage = isImage;
+            _hasVideoPreview = hasVideoPreview;
         }
 
         public int Current
@@ -6971,7 +7036,7 @@ private static string ClassifyConnectError(Exception ex)
 
         public int Original(int percent)
         {
-            return Report(0, _isImage ? 98 : 99, percent);
+            return Report(0, _hasVideoPreview ? 80 : _isImage ? 98 : 99, percent);
         }
 
         public int ThumbnailGeneration(int percent)
@@ -6984,9 +7049,9 @@ private static string ClassifyConnectError(Exception ex)
             return _isImage ? Report(98, 99, percent) : Current;
         }
 
-        public int VideoPreviewGeneration(int percent) => Current;
+        public int VideoPreviewGeneration(int percent) => _hasVideoPreview ? Report(80, 90, percent) : Current;
 
-        public int VideoPreviewUpload(int percent) => Current;
+        public int VideoPreviewUpload(int percent) => _hasVideoPreview ? Report(90, 99, percent) : Current;
 
         public int Metadata(int percent) => Current;
 

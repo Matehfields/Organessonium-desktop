@@ -1,5 +1,4 @@
 using System.IO;
-using System.Security.Cryptography;
 using Organessonium.Models;
 
 namespace Organessonium.Services;
@@ -8,111 +7,87 @@ internal sealed record FfmpegPreviewUploadResult(long SizeBytes, ForumUploadResu
 
 internal static class FfmpegPreviewUpload
 {
+    internal const string StagingPrefix = ".organessonium-preview-";
+    internal static bool IsStagingDirectory(string name) => name.StartsWith(StagingPrefix, StringComparison.OrdinalIgnoreCase) &&
+        Guid.TryParseExact(name[StagingPrefix.Length..], "N", out _);
+
     internal static async Task<FfmpegPreviewUploadResult> UploadAsync(FileInfo source, string previewName,
         string threadId, ForumUploader uploader, EncryptionService encryption, EncryptedPayloadContext? payload,
         bool useAttachmentReferences, bool hardwareAcceleration, Action<string>? status, Action<long, long>? progress,
-        CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, string? executable = null)
+        CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, string? executable = null,
+        Action<int>? generationProgress = null, int maxParallelParts = 4, AdaptiveUploadGate? adaptiveUploadGate = null,
+        Action<bool>? onTransferActivity = null, Action<long>? onPreviewSize = null)
     {
-        using var gate = await FfmpegMediaService.EnterAsync(token).ConfigureAwait(false);
-        using var sourceLock = FfmpegMediaService.OpenSourceLock(source);
-        status?.Invoke("Analisando prévia 480p");
-        long length = 0;
-        byte[] expectedHash;
-        using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+        using var staged = new StagedPreview(source);
+        status?.Invoke("Gerando prévia 480p");
+        generationProgress?.Invoke(0);
+        using (await FfmpegMediaService.EnterAsync(token).ConfigureAwait(false))
+        using (FfmpegMediaService.OpenSourceLock(source))
         {
-            await FfmpegMediaService.ReadOutputAsync(source, hardwareAcceleration, false, async (input, cancellation) =>
-            {
-                var buffer = new byte[64 * 1024];
-                try
-                {
-                    int read;
-                    while ((read = await input.ReadAsync(buffer, cancellation).ConfigureAwait(false)) > 0)
-                    {
-                        length = checked(length + read);
-                        hash.AppendData(buffer, 0, read);
-                    }
-                }
-                finally { CryptographicOperations.ZeroMemory(buffer); }
-            }, token, executable, time => status?.Invoke("Analisando prévia 480p: " + FormatTime(time))).ConfigureAwait(false);
-            expectedHash = hash.GetHashAndReset();
+            await FfmpegMediaService.ReadOutputAsync(source, hardwareAcceleration, false,
+                (input, cancellation) => input.CopyToAsync(staged.Output, 128 * 1024, cancellation), token, executable,
+                generationProgress: generationProgress).ConfigureAwait(false);
         }
+        await staged.Output.FlushAsync(token).ConfigureAwait(false);
+        var length = staged.Output.Length;
         if (length == 0) throw new IOException("O gerador não produziu vídeo para a prévia 480p.");
-        var chunks = ArchiveSplitter.GetPartCount(length, FfmpegMediaService.PreviewChunkBytes);
+        staged.File.Refresh();
+        generationProgress?.Invoke(100);
+        onPreviewSize?.Invoke(length);
+        status?.Invoke("Enviando prévia 480p");
+
+        var chunkBytes = payload == null ? DiscordLimits.AttachmentBytes : FfmpegMediaService.PreviewChunkBytes;
+        var chunks = ArchiveSplitter.GetPartCount(length, chunkBytes);
         var context = payload?.WithChunkCount(chunks);
-        ForumUploadResult? result = null;
+        using var memory = new UploadMemoryCoordinator(maxParallelParts);
+        using var localGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(maxParallelParts, adaptive: false) : null;
         long sent = 0;
-        var bytes = new UploadByteProgress(length, FfmpegMediaService.PreviewChunkBytes, context != null,
+        var bytes = new UploadByteProgress(length, chunkBytes, context != null,
             (logical, _) => progress?.Invoke(Interlocked.Add(ref sent, logical), length));
-        using var actualHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        try
-        {
-            // The existing v1 header authenticates ChunkCount. Count without retaining media, then
-            // repeat the same deterministic encode and verify it before publishing preview metadata.
-            await FfmpegMediaService.ReadOutputAsync(source, hardwareAcceleration, false, async (input, cancellation) =>
-            {
-                var next = 0;
-                async Task<PreparedUploadPart> Prepare(int index)
-                {
-                    if (index != next) throw new InvalidDataException("A prévia foi solicitada fora da ordem de geração.");
-                    var count = checked((int)Math.Min(FfmpegMediaService.PreviewChunkBytes,
-                        length - (long)index * FfmpegMediaService.PreviewChunkBytes));
-                    var encryptedLength = checked(count + (context == null ? 0 : EncryptionService.EnvelopeOverheadBytes));
-                    await RamUploadBudget.Preparation.WaitAsync(cancellation).ConfigureAwait(false);
-                    UploadChunkBufferLease? lease = null;
-                    var slot = false;
-                    try
-                    {
-                        await RamUploadBudget.Chunks.WaitAsync(cancellation).ConfigureAwait(false);
-                        slot = true;
-                        lease = RamUploadBudget.Pool.Rent(context == null ? 0 : count, encryptedLength,
-                            () => RamUploadBudget.Chunks.Release(), exactSize: true);
-                        var plaintext = context == null ? lease.Ciphertext[..count] : lease.Plaintext[..count];
-                        var read = 0;
-                        while (read < count)
-                        {
-                            var received = await input.ReadAsync(plaintext[read..], cancellation).ConfigureAwait(false);
-                            if (received == 0)
-                                throw new EndOfStreamException($"Bloco {index + 1}/{chunks}: {read}/{count} bytes recebidos.");
-                            read += received;
-                        }
-                        actualHash.AppendData(plaintext.Span);
-                        if (index == chunks - 1)
-                        {
-                            var tail = new byte[1];
-                            if (await input.ReadAsync(tail, cancellation).ConfigureAwait(false) != 0 ||
-                                !CryptographicOperations.FixedTimeEquals(actualHash.GetHashAndReset(), expectedHash))
-                                throw new InvalidDataException("A geração da prévia mudou entre as etapas. O arquivo original foi preservado.");
-                        }
-                        if (context != null)
-                            encryption.EncryptBytesInto(plaintext.Span, lease.Ciphertext.Span, context.WithChunkIndex(index));
-                        lease.ReleasePlaintext();
-                        next++;
-                        var name = context == null ? (chunks == 1 ? previewName : $"{previewName}.{index + 1:D3}")
-                            : EncryptedPayloadProtocol.FileName(context.Role, index, chunks);
-                        return new PreparedUploadPart(name, encryptedLength, count, lease);
-                    }
-                    catch
-                    {
-                        if (lease != null) lease.Dispose(); else if (slot) RamUploadBudget.Chunks.Release();
-                        throw;
-                    }
-                    finally { RamUploadBudget.Preparation.Release(); }
-                }
-                status?.Invoke("Gerando e enviando prévia 480p");
-                result = await uploader.UploadResumableGeneratedAsync(previewName, chunks, Prepare, threadId, "",
-                    new Dictionary<int, string>(), cancellationToken: cancellation, onRateLimitWait: onRateLimitWait,
-                    // Forward-only encoder. The bounded producer prepares batches in index order.
-                    maxParallelParts: 1, encryptedPayload: context,
-                    useAttachmentReferences: context != null && useAttachmentReferences,
-                    batchPreparationGate: RamUploadBudget.Batches,
-                    onPartTransferProgress: (index, wire) => bytes.Report(index, wire),
-                    maxPreparedPartBytes: FfmpegMediaService.PreviewChunkBytes + EncryptionService.EnvelopeOverheadBytes,
-                    legacyPreviewKind: context == null ? "video-480" : null).ConfigureAwait(false);
-            }, token, executable).ConfigureAwait(false);
-            return new FfmpegPreviewUploadResult(length, result ?? throw new IOException("A prévia não foi confirmada."));
-        }
-        finally { CryptographicOperations.ZeroMemory(expectedHash); }
+        var result = await uploader.UploadResumableGeneratedAsync(previewName, chunks,
+            index => context != null
+                ? memory.PreparePartAsync(encryption, staged.File, length, chunkBytes, context.WithChunkIndex(index), token,
+                    deferBuffers: useAttachmentReferences, openSource: staged.OpenRead)
+                : UploadMemoryCoordinator.PreparePlainPartAsync(staged.File, length, chunkBytes, index, token, staged.OpenRead),
+            threadId, "", new Dictionary<int, string>(), cancellationToken: token, onRateLimitWait: onRateLimitWait,
+            maxParallelParts: 16, encryptedPayload: context, adaptiveUploadGate: adaptiveUploadGate ?? localGate,
+            onTransferActivity: onTransferActivity,
+            useAttachmentReferences: context != null && useAttachmentReferences,
+            batchPreparationGate: memory.BatchPreparationGate,
+            streamPreparedParts: context != null && useAttachmentReferences,
+            onPartTransferProgress: (index, wire) => bytes.Report(index, wire),
+            maxPreparedPartBytes: checked(chunkBytes + (context == null ? 0 : EncryptionService.EnvelopeOverheadBytes)),
+            legacyPreviewKind: context == null ? "video-480" : null).ConfigureAwait(false);
+        status?.Invoke("Concluindo");
+        return new FfmpegPreviewUploadResult(length, result);
     }
 
-    private static string FormatTime(TimeSpan value) => value.ToString(value.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss");
+    private sealed class StagedPreview : IDisposable
+    {
+        private readonly DirectoryInfo _directory;
+        internal FileInfo File { get; }
+        internal FileStream Output { get; }
+
+        internal StagedPreview(FileInfo source)
+        {
+            _directory = Directory.CreateDirectory(Path.Combine(source.DirectoryName!, StagingPrefix + Guid.NewGuid().ToString("N")));
+            try
+            {
+                _directory.Attributes |= FileAttributes.Hidden;
+                File = new FileInfo(Path.Combine(_directory.FullName, "preview.mp4"));
+                Output = new FileStream(File.FullName, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete,
+                    64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+            }
+            catch { try { _directory.Delete(); } catch (IOException) { } throw; }
+        }
+
+        internal Stream OpenRead() => new FileStream(File.FullName, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        public void Dispose()
+        {
+            Output.Dispose();
+            try { _directory.Delete(); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
 }

@@ -24,7 +24,7 @@ internal static partial class Program
             var source = new FileInfo(Path.Combine(directory.FullName, "gameplay.mkv"));
             var info = new ProcessStartInfo(ffmpeg!) { UseShellExecute = false, CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardError = true };
-            foreach (var arg in new[] { "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=1280x720:r=30",
+            foreach (var arg in new[] { "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=1280x720:r=120",
                 "-f", "lavfi", "-i", "sine=frequency=440", "-t", "2", "-c:v", "libx265", "-preset", "ultrafast",
                 "-x265-params", "pools=1:frame-threads=1", "-c:a", "aac", source.FullName }) info.ArgumentList.Add(arg);
             using (var encoder = Process.Start(info)!)
@@ -79,6 +79,21 @@ internal static partial class Program
                 ready = await view.ExecuteScriptAsync("(()=>{const v=document.querySelector('video.preview-media-player');return v?.readyState>=1&&v.videoHeight===480&&!v.error&&document.getElementById('preview-video-quality-button')?.textContent.includes('480p')})()") == "true";
             }
             RequireSync(ready && !IsWindowVisible(host), "o player não abriu a prévia 480p ou exibiu uma janela");
+            await view.ExecuteScriptAsync("closePreview();window.__savedSettings=null;window.bridge.saveSettings=(...args)=>window.__savedSettings=args;openSettings();");
+            RequireSync(await view.ExecuteScriptAsync("document.getElementById('setting-generate-video-previews').checked") == "true",
+                "a opção de gerar prévias não está ativada por padrão");
+            await view.ExecuteScriptAsync("document.getElementById('setting-generate-video-previews').click();");
+            await Task.Delay(400);
+            RequireSync(await view.ExecuteScriptAsync("window.__savedSettings?.[25]===false") == "true", "a opção de prévia não foi salva pela UI");
+            await view.ExecuteScriptAsync("closeSettings();document.documentElement.style.setProperty('--accent','#ff0000');window.__cancelledFile=null;window.bridge.cancelUploadFile=(id,index)=>window.__cancelledFile={id,index};window._opsUploadBatch('phase',['movie.mkv','other.bin'],[100,100]);window._opsUploadFileProgress('phase',0,'active',80,'Gerando prévia');window._opsTransferMetrics('phase','upload',0,2,200,200,null);document.querySelector('#op-file-phase-0 .op-file-cancel').focus();");
+            using var mousePoint = JsonDocument.Parse(await view.ExecuteScriptAsync("(()=>{const r=document.querySelector('#op-file-phase-0 .op-file-action').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()"));
+            await view.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", JsonSerializer.Serialize(new
+                { type = "mouseMoved", x = mousePoint.RootElement.GetProperty("x").GetDouble(), y = mousePoint.RootElement.GetProperty("y").GetDouble() }));
+            RequireSync(await view.ExecuteScriptAsync("document.getElementById('op-percent-phase').textContent==='40%'&&getComputedStyle(document.querySelector('#op-file-phase-0 .op-file-cancel')).opacity==='1'&&getComputedStyle(document.getElementById('ops-panel')).borderColor!=='rgb(255, 0, 0)'&&!getComputedStyle(document.getElementById('op-file-progress-phase-0')).backgroundImage.includes('255, 0, 0')") == "true",
+                "barra total ignora a etapa de prévia, X não apareceu ou o progresso continua com destaque vermelho");
+            await view.ExecuteScriptAsync("document.querySelector('#op-file-phase-0 .op-file-cancel').click();window._opsUploadFileProgress('phase',0,'done',100,'Concluído');window._opsUploadFileProgress('phase',1,'done',100,'Concluído');");
+            RequireSync(await view.ExecuteScriptAsync("window.__cancelledFile?.id==='phase'&&window.__cancelledFile.index===0&&document.getElementById('op-percent-phase').textContent==='100%'") == "true",
+                "X não cancelou apenas o arquivo escolhido ou a conclusão não chegou a 100%");
             return TestOutcome.Pass();
         }
         finally
@@ -119,7 +134,7 @@ internal static partial class Program
         RequireSync(streams.Any(stream => stream.GetProperty("codec_type").GetString() == "audio") == audio, "a prévia perdeu/adicionou áudio");
     }
 
-    private static async Task<TestOutcome> FfmpegLongPreviewRamOnlyAsync()
+    private static async Task<TestOutcome> FfmpegLongPreviewStagedAsync()
     {
         var ffmpeg = Environment.GetEnvironmentVariable("ORGANESSONIUM_FFMPEG_TEST_EXE");
         if (!File.Exists(ffmpeg)) return TestOutcome.Fail("FFmpeg não informado para a fixture");
@@ -131,7 +146,7 @@ internal static partial class Program
             var info = new ProcessStartInfo(ffmpeg!) { UseShellExecute = false, CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardError = true };
             foreach (var arg in new[] { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
-                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1200", "-c:v", "libx264", "-preset", "ultrafast",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1800", "-c:v", "libx264", "-preset", "ultrafast",
                 "-threads", "2", "-crf", "28", "-c:a", "aac", source.FullName }) info.ArgumentList.Add(arg);
             using (var fixture = Process.Start(info)!)
             {
@@ -140,7 +155,7 @@ internal static partial class Program
                 await errors;
                 RequireSync(fixture.ExitCode == 0, "a fixture longa não pôde ser criada");
             }
-            Console.WriteLine("Real MKV fixture: 20 minutes; streaming encode/upload started.");
+            Console.WriteLine("Real MKV fixture: 30 minutes; one encode followed by grouped upload.");
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(6));
             using var probe = StartMediaProbe(ffmpeg!);
             using var registeredProbe = AppMemoryBudget.RegisterMediaWorker(probe);
@@ -149,25 +164,34 @@ internal static partial class Program
             var probeErrors = probe.StandardError.ReadToEndAsync();
             var crypto = CreateEncryptionService(out _);
             var context = new EncryptedPayloadContext("long-preview", crypto.CreateFileEncryption(EncryptionModes.Standard), EncryptedPayloadRoles.Video480p, 0, 1);
-            using var receiver = new StreamingPreviewReceiver(crypto, context, probe.StandardInput.BaseStream);
+            var generationComplete = false;
+            using var receiver = new StreamingPreviewReceiver(crypto, context, probe.StandardInput.BaseStream, () => generationComplete);
             using var api = new DiscordApiClient("long-preview-" + Guid.NewGuid(), new HttpClient(receiver, false));
             long sent = 0;
             var before = Directory.GetFiles(Path.GetTempPath(), "*", SearchOption.TopDirectoryOnly)
                 .Where(path => Path.GetFileName(path).StartsWith("organessonium_video", StringComparison.Ordinal)).ToArray();
             var result = await FfmpegPreviewUpload.UploadAsync(source, "480.mp4", "thread", new ForumUploader(api, "files"),
-                crypto, context, true, false, null, (current, _) => sent = current, timeout.Token, executable: ffmpeg);
+                crypto, context, true, false, null, (current, _) => sent = current, timeout.Token, executable: ffmpeg,
+                generationProgress: percent => generationComplete |= percent == 100,
+                onPreviewSize: length =>
+                {
+                    var staged = directory.EnumerateDirectories(".organessonium-preview-*").Single();
+                    RequireSync(staged.Attributes.HasFlag(FileAttributes.Hidden) && staged.GetFiles("preview.mp4").Single().Length == length,
+                        "a prévia não foi gerada por inteiro na pasta oculta ao lado da origem");
+                });
             probe.StandardInput.Close();
             await probe.WaitForExitAsync(timeout.Token);
             await probeErrors;
             using var json = JsonDocument.Parse(await probeOutput);
             CheckMediaProbe(json.RootElement, probe.ExitCode, true);
             RequireSync(json.RootElement.GetProperty("streams").EnumerateArray().Where(stream => stream.GetProperty("codec_type").GetString() == "video")
-                .All(stream => int.Parse(stream.GetProperty("nb_read_packets").GetString()!) >= 35990), "o vídeo longo foi truncado");
+                .All(stream => int.Parse(stream.GetProperty("nb_read_packets").GetString()!) >= 53990), "o vídeo longo foi truncado");
             RequireSync(result.SizeBytes > VideoPreviewWorker.MaximumPreviewBytes && receiver.Bytes == result.SizeBytes && sent == result.SizeBytes,
                 "a prévia longa foi limitada a 128 MiB ou os bytes enviados divergiram");
-            RequireSync(receiver.Indices == result.Upload.ChunkReferences!.Count && receiver.MaximumAttachments == 10,
+            RequireSync(receiver.Indices == result.Upload.ChunkReferences!.Count && receiver.MaximumAttachments == 10 &&
+                receiver.MaximumPartBytes == DiscordLimits.AttachmentBytes,
                 "o fluxo perdeu chunks ou não preservou batches de dez anexos");
-            RequireSync(directory.EnumerateFiles().Count() == 1 && before.SequenceEqual(Directory.GetFiles(Path.GetTempPath(), "*", SearchOption.TopDirectoryOnly)
+            RequireSync(directory.EnumerateFiles().Count() == 1 && !directory.EnumerateDirectories(".organessonium-preview-*").Any() && before.SequenceEqual(Directory.GetFiles(Path.GetTempPath(), "*", SearchOption.TopDirectoryOnly)
                 .Where(path => Path.GetFileName(path).StartsWith("organessonium_video", StringComparison.Ordinal))), "o gerador gravou mídia intermediária");
             RequireSync(AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes, "o fluxo longo excedeu 1 GB");
             Console.WriteLine($"Long preview: {result.SizeBytes / 1024d / 1024d:F1} MiB; RAM peak: {AppMemoryBudget.PeakCommittedBytes / 1024d / 1024d:F1} MiB.");
@@ -176,36 +200,53 @@ internal static partial class Program
         finally { directory.Delete(true); }
     }
 
-    private sealed class StreamingPreviewReceiver(EncryptionService crypto, EncryptedPayloadContext context, Stream destination) : HttpMessageHandler
+    private sealed class StreamingPreviewReceiver(EncryptionService crypto, EncryptedPayloadContext context, Stream destination, Func<bool> generated) : HttpMessageHandler
     {
         public long Bytes;
-        public int Indices, MaximumAttachments;
+        public int Indices, MaximumAttachments, MaximumPartBytes;
         private int _nextMessage;
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly SortedDictionary<int, byte[]> _pending = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            RequireSync(generated(), "o envio começou antes de a geração terminar");
             if (request.Method == HttpMethod.Patch) return Reply(new { id = "thread" });
             var multipart = (MultipartFormDataContent)request.Content!;
             var files = multipart.Where(part => part.Headers.ContentDisposition?.FileName != null).ToArray();
-            MaximumAttachments = Math.Max(MaximumAttachments, files.Length);
-            var message = new DiscordMessageDto { Id = (++_nextMessage).ToString(), Content = "" };
+            var message = new DiscordMessageDto { Id = Interlocked.Increment(ref _nextMessage).ToString(), Content = "" };
             foreach (var file in files)
             {
                 var encrypted = await file.ReadAsByteArrayAsync(token);
                 var index = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encrypted.AsSpan(10, 4))) - 1;
                 var count = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encrypted.AsSpan(14, 4)));
-                RequireSync(index == Indices, "o encoder/uploader reordenou os chunks");
                 var plaintext = crypto.DecryptBytes(encrypted, context.WithChunkCount(count).WithChunkIndex(index));
-                try { await destination.WriteAsync(plaintext, token); Bytes += plaintext.Length; }
-                finally { CryptographicOperations.ZeroMemory(plaintext); }
+                await _gate.WaitAsync(token);
+                try
+                {
+                    MaximumPartBytes = Math.Max(MaximumPartBytes, encrypted.Length);
+                    MaximumAttachments = Math.Max(MaximumAttachments, files.Length);
+                    _pending.Add(index, plaintext);
+                    while (_pending.Remove(Indices, out var next))
+                    {
+                        try { await destination.WriteAsync(next, token); Bytes += next.Length; }
+                        finally { CryptographicOperations.ZeroMemory(next); }
+                        Indices++;
+                    }
+                }
+                finally { _gate.Release(); }
                 message.Attachments.Add(new DiscordAttachmentDto { Id = "attachment-" + index,
                     FileName = file.Headers.ContentDisposition!.FileName!.Trim('"'), Size = encrypted.Length, Url = "https://fixture/" + index });
                 CryptographicOperations.ZeroMemory(encrypted);
-                Indices++;
             }
             message.Attachments.Reverse();
             return Reply(message);
         }
         private static HttpResponseMessage Reply(object value) => new(HttpStatusCode.OK)
         { Content = new StringContent(JsonSerializer.Serialize(value, JsonOptions.Web), System.Text.Encoding.UTF8, "application/json") };
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { foreach (var bytes in _pending.Values) CryptographicOperations.ZeroMemory(bytes); _gate.Dispose(); }
+            base.Dispose(disposing);
+        }
     }
 }
