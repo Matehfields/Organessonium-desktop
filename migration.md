@@ -4,6 +4,50 @@ Inventário técnico compartilhado do desktop C# e do cliente Flutter durante de
 
 ## Compatibilidades atuais
 
+### DIAGNOSTICS-TEMP-001
+
+Status: ativo, infraestrutura temporária de desenvolvimento.
+
+Descrição: Coletor local opcional iniciado antes da construção do WPF, com rastros JSONL, observação de exceções, requisições, bridge, WebView2, recursos e períodos sem resposta. Não modifica fluxos de negócio ou seus tratamentos de erros.
+
+Introduzido por: Diagnóstico de travamentos sem correções especulativas.
+
+Motivo: Obter evidências técnicas reproduzíveis durante desenvolvimento. Não representa dependência de protocolo remoto ou compatibilidade Flutter.
+
+Código relacionado: DesktopEntryPoint; StartupObject no Organessonium.csproj; Services/Diagnostics; hooks no AppLogger, AppController.HandleJsonMessageAsync/RunAsync, DiscordApiClient.SendAsync, WebMessageBridge e MainWindow; web/diagnostics.js e seção correspondente do index.html.
+
+Comportamento atual: Ativo por padrão no executável desktop normal/background; desativável por ORGANESSONIUM_DIAGNOSTICS=0; auxiliar de mídia não abre outra sessão. Evidências permanecem locais e limitadas, sem segredos/conteúdo. Não há captura de memória ou serviço externo.
+
+Pode ser removido quando: Os travamentos tiverem evidências suficientes e a instrumentação temporária não for mais necessária.
+
+Impacto da remoção: Deixam de existir os rastros e a vigilância adicionais; os fluxos observados e a política anterior de erros continuam funcionando. Não exige alteração dos metadados, cache ou canais Discord.
+
+Procedimento para remoção:
+
+1. Remover StartupObject do csproj e DesktopEntryPoint.cs, retomando o Main gerado pelo WPF.
+2. Remover as chamadas DevelopmentDiagnostics/DiagnosticWebView nos pontos de integração mencionados, inclusive o descarte na recuperação/fechamento e o case developmentDiagnostic do host.
+3. Remover Services/Diagnostics, web/diagnostics.js, sua tag script e a seção Diagnóstico temporário.
+4. Remover somente os três testes diagnostic* e a opção --diagnostic-probe do runner; manter loggingPersistsOnlyErrors e os testes das funcionalidades existentes.
+5. Atualizar README e este registro. Não apagar logs antigos sem decisão deliberada.
+
+### LOGGING-LEGACY-001
+
+Status: ativo.
+
+Descrição: Logger anterior de arquivos .log por erro, com filtro de áreas, preservado como fallback quando o coletor temporário não está ativo ou está indisponível.
+
+Introduzido por: Anterior ao coletor temporário; preservado nesta implementação para permitir sua remoção sem depender dele.
+
+Motivo: Não remover a política existente de logs enquanto o sistema temporário é avaliado.
+
+Código relacionado: AppLogger.Error/Write e loggingPersistsOnlyErrors. Coletor ativo intercepta erros antes do filtro e usa JSONL sanitizado; o fallback conserva formato/política existentes. Não há leitura automática ou migração dos .log antigos.
+
+Pode ser removido quando: Houver decisão explícita sobre o logger definitivo, independente da remoção do coletor temporário.
+
+Impacto da remoção: Sem outra implementação, o app ficaria sem logs de erro quando a coleta estiver desativada ou indisponível.
+
+Procedimento para remoção: Escolher/validar um logger definitivo, substituir somente o fallback, atualizar seu teste e a documentação; não apagar os .log existentes. O formato legado pode conter mensagens/caminhos e não deve ser tratado como automaticamente seguro para publicação.
+
 ### METADATA-LEGACY-001
 
 Status: ativo

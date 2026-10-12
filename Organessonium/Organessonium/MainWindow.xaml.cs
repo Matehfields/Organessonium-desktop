@@ -28,6 +28,7 @@ public partial class MainWindow : Window
     private WebMessageBridge? _bridge;
     private AppController? _controller;
     private WebView2PreviewAdapter? _previewAdapter;
+    private Services.Diagnostics.DiagnosticWebView? _diagnosticWebView;
     private string? _pendingSetupError;
     private bool _draggingFiles;
     private HwndSource? _windowSource;
@@ -341,6 +342,7 @@ public partial class MainWindow : Window
         WebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
         WebView.CoreWebView2.ProcessFailed += OnWebViewProcessFailed;
         WebView.CoreWebView2.ContainsFullScreenElementChanged += OnContainsFullScreenElementChanged;
+        _diagnosticWebView = await Services.Diagnostics.DiagnosticWebView.AttachAsync(WebView.CoreWebView2);
         _previewAdapter = new WebView2PreviewAdapter(WebView.CoreWebView2, _controller!.PreviewResources);
         _previewAdapter.Attach();
     }
@@ -373,6 +375,8 @@ public partial class MainWindow : Window
         }
         finally
         {
+            _diagnosticWebView?.Dispose();
+            _diagnosticWebView = null;
             WebView.Dispose();
             Closing -= OnClosing;
             Close();
@@ -538,6 +542,8 @@ public partial class MainWindow : Window
 
     private void UnwireCoreWebView(WebView2 webView)
     {
+        _diagnosticWebView?.Dispose();
+        _diagnosticWebView = null;
         try
         {
             if (webView.CoreWebView2 == null)
@@ -632,6 +638,8 @@ public partial class MainWindow : Window
 
             switch (methodElement.GetString())
             {
+                case "developmentDiagnostic":
+                    return true;
                 case "retryStartupConnect":
                     RetryStartupConnect();
                     return true;

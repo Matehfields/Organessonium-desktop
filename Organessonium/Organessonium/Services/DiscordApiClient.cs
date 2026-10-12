@@ -989,6 +989,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = await Task.Run(requestFactory, cancellationToken).ConfigureAwait(false);
+            using var diagnosticRequest = Diagnostics.DevelopmentDiagnostics.Http(request);
             using var bodySlot = request.Options.TryGetValue(UploadBodySlot.RequestKey, out var slot) ? slot : null;
             if (bodySlot != null) await bodySlot.EnterAsync(cancellationToken).ConfigureAwait(false);
             var routeKey = DiscordRequestLimiter.RouteKey(request);
@@ -1011,6 +1012,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     onTransferActivity?.Invoke(true);
                     transferActivityStarted = onTransferActivity != null;
                     response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    diagnosticRequest?.HttpStatus((int)response.StatusCode);
                     reservation.Observe(response);
                 }
                 catch (HttpRequestException) when (shouldWaitForTransientNetwork || attempt < 11)

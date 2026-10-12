@@ -15,6 +15,7 @@ public static class AppLogger
 
     public static void Error(string area, Exception exception, string? details = null)
     {
+        if (Diagnostics.DevelopmentDiagnostics.Error(area, exception)) return;
         if (area is "App.DispatcherUnhandledException" or "App.UnhandledException" or
             "App.UnobservedTaskException" or "Video.Stream" or "Video.FastStart" or "Video.Progress")
         {
@@ -29,16 +30,19 @@ public static class AppLogger
 
     public static void Info(string area, string details)
     {
+        Diagnostics.DevelopmentDiagnostics.Signal("log.info", area);
         // Logs are reserved for unexpected errors.
     }
 
     public static void Debug(string area, string details)
     {
+        Diagnostics.DevelopmentDiagnostics.Signal("log.debug", area);
         // Debug events are not persisted.
     }
 
     internal static void SyncEvent(string area, string summary, bool warning = false)
     {
+        Diagnostics.DevelopmentDiagnostics.Signal(warning ? "log.warning" : "log.info", area);
         // Synchronization status is shown in the UI; only errors are persisted.
     }
 

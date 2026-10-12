@@ -32,11 +32,14 @@ public sealed class WebMessageBridge
 
     public Task NotifyReadyAsync()
     {
-        return ExecuteAsync("if(typeof window.onBridgeReady==='function')window.onBridgeReady();");
+        var status = JsonSerializer.Serialize(Services.Diagnostics.DevelopmentDiagnostics.Status(), JsonOptions.Web);
+        return ExecuteAsync("if(typeof window.onBridgeReady==='function')window.onBridgeReady();" +
+            $"if(typeof window._onDiagnosticStatus==='function')window._onDiagnosticStatus({status});");
     }
 
     public Task CallAsync(string functionName, params object?[] args)
     {
+        Services.Diagnostics.DevelopmentDiagnostics.Signal("ui.callback", functionName);
         var name = JsonSerializer.Serialize(functionName, JsonOptions.Web);
         var jsonArgs = JsonSerializer.Serialize(args, JsonOptions.Web);
         return ExecuteAsync($"var f=window[{name}];if(typeof f==='function')f(...{jsonArgs});");

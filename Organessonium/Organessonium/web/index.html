@@ -661,6 +661,14 @@
                 <small id="sync-background-help">No modo background, a sincronização continua sem WebView2. A opção de fechamento só muda quando você a selecionar.</small>
             </div>
         </section>
+        <section class="settings-section" id="development-diagnostics">
+            <h3>Diagnóstico temporário</h3>
+            <div class="setting-row col">
+                <span id="diagnostic-status" role="status">Aguardando estado do coletor...</span>
+                <small>Registra falhas e tempos de resposta, sem conteúdo dos arquivos ou credenciais.</small>
+                <code id="diagnostic-directory" style="overflow-wrap:anywhere;user-select:text"></code>
+            </div>
+        </section>
         <section class="settings-section">
             <h3 id="settings-connection-title">Conexão</h3>
             <div class="setting-row">
@@ -680,5 +688,6 @@
 <script src="appearance.js"></script>
 <script src="file-details.js"></script>
 <script src="sync.js"></script>
+<script src="diagnostics.js"></script>
 </body>
 </html>

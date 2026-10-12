@@ -186,6 +186,7 @@ public sealed partial class AppController : IAsyncDisposable
             return;
         }
 
+        using var diagnosticOperation = Services.Diagnostics.DevelopmentDiagnostics.Begin("bridge", message.Method);
         try
         {
             await DispatchAsync(message.Method, message.Args ?? []);
@@ -4383,6 +4384,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task RunAsync(Func<Task> work)
     {
+        using var diagnosticOperation = Services.Diagnostics.DevelopmentDiagnostics.Begin("work");
         try
         {
             await work();

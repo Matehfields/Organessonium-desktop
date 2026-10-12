@@ -15,6 +15,9 @@ internal static partial class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),
+        ("diagnosticLoggingAndBounds", DiagnosticLoggingAndBoundsAsync),
+        ("diagnosticHiddenBrowserAndStall", DiagnosticHiddenBrowserAndStallAsync),
+        ("diagnosticAbruptExit", DiagnosticAbruptExitAsync),
         ("fileVersionsLifecycle", FileVersionsLifecycleAsync),
         ("fileActionsHiddenBrowser", FileActionsHiddenBrowserAsync),
         ("appearanceHiddenBrowser", AppearanceHiddenBrowserAsync),
@@ -116,6 +119,7 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "--diagnostic-probe") return await RunDiagnosticProbeAsync(args[1]);
         if (args.Length == 1 && args[0] == "--live-upload-cadence")
             return await RunLiveUploadCadenceAsync();
         var passed = 0;
