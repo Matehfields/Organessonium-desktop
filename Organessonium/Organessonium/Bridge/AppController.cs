@@ -2979,16 +2979,32 @@ public sealed partial class AppController : IAsyncDisposable
         {
             try
             {
-                using var generated = await VideoPreviewGenerator.Create480pAsync(file, settings.HardwareAcceleration,
-                    progress => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
-                        progressTracker?.VideoPreviewGeneration(progress) ?? 99,
-                        $"Gerando prévia 480p - {progress}%", throttle, progress is 0 or 100, useBatchUi, progressTracker: progressTracker),
-                    cancellationToken);
-                var result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
-                    generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
-                    settings.EffectiveUploadThreads, progressTracker,
-                    previewEncryption == null ? null : previewEncryption with { Role = EncryptedPayloadRoles.Video480p },
-                    transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment);
+                VideoPreviewUploadResult result;
+                var encryption = previewEncryption == null ? null : previewEncryption with { Role = EncryptedPayloadRoles.Video480p };
+                var references = transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment;
+                if (FfmpegMediaService.Available)
+                {
+                    void Report(string status) => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                        progressTracker?.VideoPreviewUpload(0) ?? 99, status, throttle,
+                        status == "Concluindo", useBatchUi, progressTracker: progressTracker);
+                    var streamed = await FfmpegPreviewUpload.UploadAsync(file, VideoPreviewFileName(name), threadId,
+                        uploader, _encryption, encryption, references, settings.HardwareAcceleration, Report,
+                        (sent, total) => Report(sent >= total ? "Concluindo"
+                            : $"Prévia 480p: {FormatTransferBytes(sent)} / {FormatTransferBytes(total)} enviados"),
+                        cancellationToken, onRateLimitWait);
+                    result = new VideoPreviewUploadResult(streamed.SizeBytes, streamed.Upload.ChunkMessageIds, streamed.Upload.ChunkReferences);
+                }
+                else
+                {
+                    using var generated = await VideoPreviewGenerator.Create480pAsync(file, settings.HardwareAcceleration,
+                        progress => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                            progressTracker?.VideoPreviewGeneration(progress) ?? 99,
+                            $"Gerando prévia 480p - {progress}%", throttle, progress is 0 or 100, useBatchUi, progressTracker: progressTracker),
+                        cancellationToken);
+                    result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
+                        generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
+                        settings.EffectiveUploadThreads, progressTracker, encryption, references);
+                }
                 videoChunks = result.ChunkMessageIds;
                 videoReferences = result.ChunkReferences;
                 videoSize = result.SizeBytes;

@@ -21,6 +21,10 @@ internal static partial class Program
             var files = Directory.GetFiles(logs, "*.log", SearchOption.AllDirectories);
             var valid = files.Length == 1 && File.ReadAllText(files[0]).Contains("Level: ERROR") &&
                 File.ReadAllText(files[0]).Contains("isolated test error");
+            AppLogger.Error("VideoPreviewUpload", new IOException("sensitive-filename-and-metadata"));
+            var mediaLogs = Directory.GetFiles(logs, "*.log", SearchOption.AllDirectories).Select(File.ReadAllText).ToArray();
+            valid &= mediaLogs.Any(text => text.Contains("Area: VideoPreviewUpload") && text.Contains("IOException")) &&
+                !mediaLogs.Any(text => text.Contains("sensitive-filename-and-metadata"));
             return Task.FromResult(valid ? TestOutcome.Pass() : TestOutcome.Fail("erro não foi preservado no log"));
         }
         finally { temporary.Delete(true); }

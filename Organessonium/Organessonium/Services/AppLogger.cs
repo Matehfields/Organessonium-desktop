@@ -20,6 +20,11 @@ public static class AppLogger
         {
             Write("ERROR", area, details, exception);
         }
+        else if (area is "PreviewUpload" or "VideoPreviewUpload")
+        {
+            // Do not persist codec stderr, file names, paths or decrypted metadata.
+            Write("ERROR", area, null, new IOException($"Media failure: {exception.GetType().Name}; HResult=0x{exception.HResult:X8}"));
+        }
     }
 
     public static void Info(string area, string details)

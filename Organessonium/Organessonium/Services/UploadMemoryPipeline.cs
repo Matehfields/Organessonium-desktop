@@ -365,16 +365,19 @@ internal sealed class UploadChunkBufferPool : IDisposable
     internal long AllocatedBytes => Interlocked.Read(ref _allocatedBytes);
 
     public UploadChunkBufferLease Rent(int plaintextLength, int ciphertextLength, Action releaseWorker)
+        => Rent(plaintextLength, ciphertextLength, releaseWorker, exactSize: false);
+
+    internal UploadChunkBufferLease Rent(int plaintextLength, int ciphertextLength, Action releaseWorker, bool exactSize)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
             throw new ObjectDisposedException(nameof(UploadChunkBufferPool));
         }
 
-        var plaintext = Rent(_plaintext, plaintextLength);
+        var plaintext = Rent(_plaintext, plaintextLength, exactSize);
         try
         {
-            var ciphertext = Rent(_ciphertext, ciphertextLength);
+            var ciphertext = Rent(_ciphertext, ciphertextLength, exactSize);
             return new UploadChunkBufferLease(this, plaintext, ciphertext, releaseWorker);
         }
         catch
@@ -394,11 +397,11 @@ internal sealed class UploadChunkBufferPool : IDisposable
         Return(_ciphertext, buffer);
     }
 
-    private byte[] Rent(ConcurrentBag<byte[]> buffers, int minimumLength)
+    private byte[] Rent(ConcurrentBag<byte[]> buffers, int minimumLength, bool exactSize)
     {
         while (buffers.TryTake(out var buffer))
         {
-            if (buffer.Length >= minimumLength)
+            if (buffer.Length >= minimumLength && (!exactSize || buffer.Length == minimumLength))
             {
                 return buffer;
             }

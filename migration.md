@@ -624,6 +624,22 @@ Impacto da remoção: retomar um upload antigo pode misturar bytes remuxados/ori
 
 Procedimento: concluir ou descartar estados antigos com autorização, verificar os payloads remotos e somente então retirar o branch de compatibilidade, seus testes e esta documentação. O fallback operacional de MP4 não suportado e a falha segura de prévias acima do limite de RAM não são dívida legada removível.
 
+### MEDIA-ENCODER-LEGACY-001
+
+Status: verificar antes da remoção
+
+Descrição: `VideoPreviewWorker` mantém o gerador Windows para miniaturas de imagens e para prévias em instalações sem FFmpeg ou Windows de 32 bits. O caminho 480p legado depende de codecs Windows e mantém a saída seekable em até 128 MiB. Miniaturas usam reserva separada de 96 MiB/8 MiB e não aceitam um ícone genérico como imagem. FFmpeg gera vídeo/MKV em fluxo sem esse teto de saída.
+
+Introduzido por: correção de miniaturas e prévias 480p longas via motor separado.
+
+Código relacionado: `Services/VideoPreviewGenerator.cs`, `VideoPreviewWorker.cs`, `FfmpegMediaService.cs`, `FfmpegPreviewUpload.cs`, `Bridge/AppController.cs` (`TryUploadGeneratedPreviewAsync`).
+
+Comportamento atual: previews remotos existentes, MP4 flat, `chunks` unitários, plaintext antigo e `chunkRefs` permanecem legíveis. Nenhuma entrada é regravada para trocar o encoder. Retomadas antigas podem enviar prévias pelo layout unitário; uploads novos agrupam até dez anexos. ORGAESGC v1 e o metadata de vídeo não mudam; chunks de prévia podem ter 2 MiB, e leitores usam tamanhos reais, não o limite de upload.
+
+Pode ser removido quando: houver motor de mídia disponível e validado para todas as instalações/arquiteturas suportadas, e a política de distribuição/licenciamento estiver concluída. O gerador Windows de imagens é um caminho operacional útil, não dívida descartável automaticamente.
+
+Impacto/procedimento: remover fallback sem essa decisão impede gerar mídia em instalações antigas/32 bits. Inventariar plataformas, confirmar pacote e codecs, validar miniaturas/prévias e somente então remover os branches/tests correspondentes. Não excluir previews ou conteúdo original remoto.
+
 ## Fronteiras e itens que não são dívida automaticamente
 
 - Não foi encontrado protocolo de compartilhamento JSON neste desktop. Não existe evidência para inventar SHARE-LEGACY-001. Exportação OEK1 é recuperação de chave, não share de arquivo.

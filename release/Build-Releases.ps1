@@ -13,6 +13,9 @@ $solutionPath = Join-Path $repoRoot 'Organessonium\Organessonium.slnx'
 $iconPath = Join-Path $repoRoot 'Organessonium\Organessonium\Assets\app.ico'
 $settingsPath = Join-Path $PSScriptRoot 'release-settings.json'
 $localSettingsPath = Join-Path $PSScriptRoot 'release-settings.local.json'
+$mediaRoot = Join-Path (Split-Path -Parent $projectPath) 'media'
+# Check before creating/replacing any release artifact.
+& (Join-Path $mediaRoot 'Verify-Sources.ps1')
 
 function Write-Step {
     param([string]$Message)
@@ -347,6 +350,45 @@ function New-PortableSourceZip {
     }
 }
 
+function New-FfmpegSourcePackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Directory
+    )
+
+    $manifest = Read-JsonObjectUtf8 -Path (Join-Path $Root 'source-manifest.json')
+    if ($manifest.redistributionReady -eq $true) {
+        $destination = Join-Path $Directory 'ffmpeg-corresponding-source.zip'
+        Copy-Item -LiteralPath (Join-Path $Root $manifest.correspondingSourceArchive.path) -Destination $destination
+        return $destination
+    }
+
+    $rootPrefix = [System.IO.Path]::GetFullPath($Root) + [System.IO.Path]::DirectorySeparatorChar
+    $files = @('GPL-3.0.txt', 'BtbN-LICENSE.txt', 'NOTICE.md', 'source-manifest.json', 'Verify-Sources.ps1')
+    foreach ($source in $manifest.sources) {
+        $archivePath = [System.IO.Path]::GetFullPath((Join-Path $Root $source.archive))
+        if (-not $archivePath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+            [System.IO.Path]::GetExtension($archivePath) -ne '.zip') {
+            throw 'Um arquivo de fontes está fora do diretório de mídia ou não é ZIP.'
+        }
+        if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+            $uri = [uri]$source.url
+            if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'codeload.github.com') {
+                throw 'Origem de fontes não suportada; use os snapshots HTTPS identificados no manifesto.'
+            }
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $archivePath)
+            Invoke-WebRequest -Uri $uri -OutFile $archivePath -UseBasicParsing
+        }
+        if ((Get-Sha256Hex -Path $archivePath) -ne $source.sha256) {
+            throw "O SHA-256 das fontes de $($source.name) não corresponde ao manifesto."
+        }
+        $files += [string]$source.archive
+    }
+    $destination = Join-Path $Directory 'ffmpeg-source-reference.zip'
+    New-PortableSourceZip -RelativePaths $files -Root $Root -Destination $destination
+    return $destination
+}
+
 function Test-SourceZip {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -354,7 +396,8 @@ function Test-SourceZip {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
         $entries = @($archive.Entries | ForEach-Object { $_.FullName })
-        foreach ($required in @('Organessonium.slnx', 'Organessonium/Organessonium.csproj', 'README.md', 'implementation.md', 'implementation old.md', 'implementation old 2.md', 'migration.md')) {
+        foreach ($required in @('Organessonium.slnx', 'Organessonium/Organessonium.csproj', 'README.md', 'implementation.md', 'implementation old.md', 'implementation old 2.md', 'migration.md',
+            'Organessonium/media/GPL-3.0.txt', 'Organessonium/media/BtbN-LICENSE.txt', 'Organessonium/media/NOTICE.md', 'Organessonium/media/source-manifest.json')) {
             if ($required -notin $entries) {
                 throw "O ZIP de código-fonte não contém $required."
             }
@@ -672,6 +715,7 @@ Test-PublicSourceFiles -RelativePaths $trackedFiles -Root $repoRoot
 $sourceZip = Join-Path $outputDirectory 'Organessonium-windows-source.zip'
 New-PortableSourceZip -RelativePaths $trackedFiles -Root $repoRoot -Destination $sourceZip
 Test-SourceZip -Path $sourceZip
+$ffmpegSourceZip = New-FfmpegSourcePackage -Root $mediaRoot -Directory $outputDirectory
 
 $sourceVerifyDirectory = Join-Path $verifyDirectory 'source'
 $null = New-Item -ItemType Directory -Force -Path $sourceVerifyDirectory
@@ -752,6 +796,7 @@ foreach ($architecture in $architectures) {
     $assetsDirectory = Join-Path $msixStageDirectory 'Assets'
     $null = New-Item -ItemType Directory -Force -Path $assetsDirectory
     Copy-Item -LiteralPath $publishedExecutables[$architecture.Name] -Destination (Join-Path $msixStageDirectory 'Organessonium.exe') -Force
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $publishedExecutables[$architecture.Name]) 'media') -Destination $msixStageDirectory -Recurse
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'StoreLogo.png') -Width 50 -Height 50 -LogoSize 44
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square44x44Logo.png') -Width 44 -Height 44 -LogoSize 38
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square150x150Logo.png') -Width 150 -Height 150 -LogoSize 128
@@ -824,7 +869,7 @@ if ($RunWack) {
 }
 
 Write-Step 'Gerando hashes SHA-256'
-$releaseFiles = @($msiPaths.Values) + @($sourceZip, $bundlePath) + @($msixPaths.Values)
+$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath) + @($msixPaths.Values)
 $hashLines = foreach ($file in $releaseFiles) {
     $relativeOutputPath = [System.IO.Path]::GetFullPath($file).Substring([System.IO.Path]::GetFullPath($outputDirectory).Length).TrimStart('\').Replace('\', '/')
     '{0}  {1}' -f (Get-Sha256Hex -Path $file), $relativeOutputPath

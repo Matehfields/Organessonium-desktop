@@ -45,7 +45,26 @@
       <LogicalName>web/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
     <Resource Include="Assets\app.ico" />
+    <Content Include="media\**\*" Exclude="media\sources\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
   </ItemGroup>
+
+  <Target Name="VerifyMediaRuntime" BeforeTargets="PrepareForPublish">
+    <Error Condition="!Exists('media\ffmpeg.exe')" Text="FFmpeg ausente. Prepare media/ffmpeg.exe e sua licença conforme media/NOTICE.md antes de publicar." />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\media\Verify-Sources.ps1&quot;" />
+  </Target>
+
+  <Target Name="CopyMediaRuntime" AfterTargets="Publish">
+    <ItemGroup>
+      <_MediaRuntimeFile Include="media\**\*" Exclude="media\sources\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_MediaRuntimeFile)"
+          DestinationFiles="@(_MediaRuntimeFile->'$(PublishDir)media\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
   <Target Name="RemoveGeneratedWebFolder" AfterTargets="Build;Publish">
     <RemoveDir Directories="$(OutDir)web" Condition="Exists('$(OutDir)web')" />

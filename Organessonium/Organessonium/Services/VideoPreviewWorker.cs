@@ -17,6 +17,8 @@ public static class VideoPreviewWorker
     public const string Argument = "--media-preview-worker";
     internal const int MaximumPreviewBytes = 128 * 1024 * 1024;
     internal const long WorkingReservationBytes = 320L * 1024 * 1024;
+    internal const int MaximumThumbnailBytes = 8 * 1024 * 1024;
+    internal const long ThumbnailWorkingReservationBytes = 96L * 1024 * 1024;
     private static readonly SemaphoreSlim WorkerGate = new(1, 1);
 
     internal static async Task<RamMediaPreview> GenerateAsync(FileInfo source, bool video,
@@ -33,7 +35,9 @@ public static class VideoPreviewWorker
             admission.CancelAfter(TimeSpan.FromSeconds(30));
             try
             {
-                reservation = await RamUploadBudget.ReserveExternalBytesAsync(WorkingReservationBytes, MaximumPreviewBytes, admission.Token).ConfigureAwait(false);
+                reservation = await RamUploadBudget.ReserveExternalBytesAsync(
+                    video ? WorkingReservationBytes : ThumbnailWorkingReservationBytes,
+                    video ? MaximumPreviewBytes : MaximumThumbnailBytes, admission.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!token.IsCancellationRequested)
             {
@@ -62,7 +66,7 @@ public static class VideoPreviewWorker
                     : "O gerador de prévias falhou. O arquivo original foi preservado.");
             }
             var size = BinaryPrimitives.ReadInt32LittleEndian(header);
-            if (size <= 0 || size > MaximumPreviewBytes) throw new InvalidDataException("Saída inválida do gerador de prévias.");
+            if (size <= 0 || size > (video ? MaximumPreviewBytes : MaximumThumbnailBytes)) throw new InvalidDataException("Saída inválida do gerador de prévias.");
             var bytes = new byte[size];
             try
             {
@@ -110,7 +114,7 @@ public static class VideoPreviewWorker
         try
         {
             var source = await StorageFile.GetFileFromPathAsync(Path.GetFullPath(arguments[2]));
-            using var output = new BoundedPreviewStream();
+            using var output = new BoundedPreviewStream(arguments[1] == "thumbnail" ? MaximumThumbnailBytes : MaximumPreviewBytes);
             using var target = output.AsRandomAccessStream();
             if (arguments[1] == "thumbnail")
             {
@@ -130,6 +134,7 @@ public static class VideoPreviewWorker
                 if (image == null)
                 {
                     using var thumbnail = await source.GetThumbnailAsync(ThumbnailMode.SingleItem, 512, ThumbnailOptions.ResizeThumbnail);
+                    if (thumbnail?.Type != ThumbnailType.Image) throw new IOException("O Windows não forneceu uma miniatura da mídia.");
                     image = await ThumbnailBytesAsync(thumbnail);
                 }
                 if (image == null) throw new IOException("Miniatura indisponível.");
@@ -187,9 +192,9 @@ public static class VideoPreviewWorker
         return bytes;
     }
     private sealed class PreviewMemoryLimitException : IOException { }
-    private sealed class BoundedPreviewStream() : MemoryStream(1024 * 1024)
+    private sealed class BoundedPreviewStream(int maximumBytes) : MemoryStream(1024 * 1024)
     {
-        private void Check(long length) { if (length > MaximumPreviewBytes) throw new PreviewMemoryLimitException(); }
+        private void Check(long length) { if (length > maximumBytes) throw new PreviewMemoryLimitException(); }
         public override void SetLength(long value) { Check(value); base.SetLength(value); }
         public override void Write(byte[] buffer, int offset, int count) { Check(checked(Position + count)); base.Write(buffer, offset, count); }
         public override void Write(ReadOnlySpan<byte> buffer) { Check(checked(Position + buffer.Length)); base.Write(buffer); }

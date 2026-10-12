@@ -1,0 +1,27 @@
+{
+  "runtime": "N-126168-gb16b5f2a01-20260815",
+  "architecture": "win-x64",
+  "license": "GPL-3.0-or-later",
+  "sha256": "4762609c60e0c6acfa478b6421d06fd1d1ebba4f5f033aac51ea316d960b8d1d",
+  "redistributionReady": false,
+  "note": "FFmpeg core and supplier recipe revision are verified. The supplier updates cc during the rav1e build; exact transitive revisions and complete dependency sources still require verification.",
+  "supplierBuild": "https://github.com/BtbN/FFmpeg-Builds/actions/runs/31883715790",
+  "sources": [
+    {
+      "name": "FFmpeg",
+      "commit": "b16b5f2a01f3c4f8c9a7769d7a35e8b193946d3e",
+      "url": "https://codeload.github.com/FFmpeg/FFmpeg/zip/b16b5f2a01f3c4f8c9a7769d7a35e8b193946d3e",
+      "archive": "sources/ffmpeg-source.zip",
+      "sha256": "4127c816b3f969d4b3422968ecf56c4bf4be77b8262b34c18b46b0df2c617ffc",
+      "verified": true
+    },
+    {
+      "name": "BtbN build recipes confirmed by supplier workflow head_sha",
+      "commit": "590a6612d7d961e9258429e501619e0b7d7cbedf",
+      "url": "https://codeload.github.com/BtbN/FFmpeg-Builds/zip/590a6612d7d961e9258429e501619e0b7d7cbedf",
+      "archive": "sources/build-recipes.zip",
+      "sha256": "0a6f3f2f4e9b8d4d4eb7040f1d53d3aa43963866b641fd15e7f87831abdde5e8",
+      "verified": true
+    }
+  ]
+}

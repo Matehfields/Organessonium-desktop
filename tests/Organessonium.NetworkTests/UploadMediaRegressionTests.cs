@@ -1,14 +1,84 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 using Organessonium.Services;
+using Organessonium.Models;
 
 namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static async Task<TestOutcome> ThumbnailFormatsRamOnlyAsync()
+    {
+        var executable = Environment.GetEnvironmentVariable("ORGANESSONIUM_MEDIA_TEST_EXE");
+        var ffmpeg = Environment.GetEnvironmentVariable("ORGANESSONIUM_FFMPEG_TEST_EXE");
+        if (!File.Exists(executable) || !File.Exists(ffmpeg)) return TestOutcome.Fail("executáveis do teste de mídia não informados");
+        AppMemoryBudget.Initialize();
+        var directory = Directory.CreateTempSubdirectory("organessonium-thumbnail-formats-test-");
+        try
+        {
+            var residentCache = new byte[288 * 1024 * 1024];
+            Array.Fill(residentCache, (byte)7);
+            foreach (var extension in new[] { "png", "jpg", "webp", "mkv", "hevc.mkv" })
+            {
+                var source = new FileInfo(Path.Combine(directory.FullName, "source." + extension));
+                var info = new ProcessStartInfo(ffmpeg!) { UseShellExecute = false, CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardError = true };
+                var arguments = new List<string> { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=12" };
+                if (extension == "hevc.mkv") arguments.AddRange(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
+                    "-t", "2", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1", "-c:a", "aac"]);
+                else if (extension == "mkv") arguments.AddRange(["-t", "2", "-c:v", "libx264", "-preset", "ultrafast"]);
+                else arguments.AddRange(["-frames:v", "1"]);
+                arguments.Add(source.FullName);
+                foreach (var argument in arguments) info.ArgumentList.Add(argument);
+                using (var encoder = Process.Start(info)!)
+                {
+                    var errors = encoder.StandardError.ReadToEndAsync();
+                    await encoder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+                    await errors;
+                    RequireSync(encoder.ExitCode == 0, "não foi possível criar a fixture " + extension);
+                }
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+                using var thumbnail = ThumbnailCache.IsVideo(source.Name)
+                    ? await FfmpegMediaService.ThumbnailAsync(source, timeout.Token, ffmpeg)
+                    : await VideoPreviewWorker.GenerateAsync(source, false, false, null, timeout.Token, executable);
+                using var image = new MemoryStream(thumbnail.Bytes);
+                var frame = System.Windows.Media.Imaging.BitmapDecoder.Create(image,
+                    System.Windows.Media.Imaging.BitmapCreateOptions.None, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad).Frames[0];
+                var rgb = new System.Windows.Media.Imaging.FormatConvertedBitmap(frame, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+                var pixel = new byte[4];
+                rgb.CopyPixels(new System.Windows.Int32Rect(100, 100, 1, 1), pixel, 4, 0);
+                RequireSync(frame.PixelWidth == 200 && frame.PixelHeight == 200 && pixel[2] > 180 && pixel[1] < 70 && pixel[0] < 70,
+                    extension + ": a miniatura contém ícone genérico em vez da imagem/frame");
+                Console.WriteLine("Thumbnail format passed: " + extension);
+                if (extension.EndsWith("mkv", StringComparison.Ordinal))
+                {
+                    var crypto = CreateEncryptionService(out _);
+                    var context = new EncryptedPayloadContext("mkv-preview", crypto.CreateFileEncryption(EncryptionModes.Standard),
+                        EncryptedPayloadRoles.Video480p, 0, 1);
+                    using var server = new GroupedDiscordFixture();
+                    using var api = new DiscordApiClient("mkv-" + Guid.NewGuid(), new HttpClient(server, false));
+                    var uploaded = await FfmpegPreviewUpload.UploadAsync(source, "480.mp4", "thread", new ForumUploader(api, "files"),
+                        crypto, context, true, false, null, null, timeout.Token, executable: ffmpeg);
+                    var encrypted = server.AttemptPayloads.Single().Single();
+                    var preview = crypto.DecryptBytes(encrypted, context);
+                    RequireSync(preview.AsSpan(4, 4).SequenceEqual("ftyp"u8) && uploaded.Upload.ChunkReferences?.Count == 1,
+                        "MKV não produziu e enviou uma prévia MP4 autenticada");
+                    await ProbeMediaBytesAsync(preview, extension == "hevc.mkv", ffmpeg!, timeout.Token);
+                    CryptographicOperations.ZeroMemory(preview);
+                }
+            }
+            GC.KeepAlive(residentCache);
+            RequireSync(directory.EnumerateFiles().Count() == 5, "o gerador criou arquivos intermediários");
+            RequireSync(AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes, "o gerador excedeu 1 GB");
+            return TestOutcome.Pass();
+        }
+        finally { directory.Delete(true); }
+    }
+
     private static async Task<TestOutcome> LargeVirtualMp4RangesAsync()
     {
         AppMemoryBudget.Initialize();
