@@ -124,6 +124,10 @@ internal static partial class Program
             await view.ExecuteScriptAsync("window._opsAdd('bytes-download','download','source.bin');window._opsProgress('bytes-download',64,'640 MB / 1 GB baixados');window._onNonfatalError('A prévia falhou. O original foi preservado.');");
             await Check("document.getElementById('op-msg-bytes-download').textContent.includes('640 MB')&&!document.getElementById('confirm-overlay').classList.contains('hidden')&&document.getElementById('confirm-message').textContent.includes('original foi preservado')&&document.getElementById('confirm-cancel').classList.contains('hidden')", "o download em bytes ou o aviso de falha não apareceram na interface");
             await view.ExecuteScriptAsync("document.getElementById('confirm-ok').click();");
+            await view.ExecuteScriptAsync("window._opsUploadBatch('finished',['a.bin','b.bin']);window._opsTransferMetrics('finished','upload',0,2,990000,1000000,2,990000);window._opsUploadFileProgress('finished',0,'done',100,'Concluído');window._opsUploadFileProgress('finished',1,'active',99,'Concluindo');");
+            await Check("document.getElementById('op-percent-finished').textContent==='99%'", "o lote chegou a 100% antes de concluir todos os arquivos");
+            await view.ExecuteScriptAsync("window._opsUploadFileProgress('finished',1,'done',100,'Concluído');window._opsTransferMetrics('finished','upload',2,2,990000,1000000,2,990000);");
+            await Check("document.getElementById('op-percent-finished').textContent==='100%'&&document.getElementById('op-file-percent-finished-1').textContent==='100%'", "o lote concluído ficou abaixo de 100% com métricas atrasadas");
             AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
             RequireSync(!IsWindowVisible(window), "o teste exibiu uma janela");
             RequireSync(AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes, "o job ultrapassou 1 GB");

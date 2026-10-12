@@ -2566,6 +2566,10 @@ function refreshBatchProgress(id) {
     if (!item || !item.classList.contains('op-batch')) return;
     const rows = Array.from(item.querySelectorAll('.op-file-row'));
     if (!rows.length) return;
+    if (item.dataset.opStatus === 'done' || rows.every(row => row.dataset.fileStatus === 'done')) {
+        setOpProgress(id, 100);
+        return;
+    }
     const byteTotal = Number(item.dataset.metricByteTotal) || 0;
     if (byteTotal > 0) {
         const cap = rows.every(row => row.dataset.fileStatus === 'done') ? 100
