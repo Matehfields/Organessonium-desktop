@@ -16,7 +16,8 @@ internal static class FfmpegPreviewUpload
         bool useAttachmentReferences, bool hardwareAcceleration, Action<string>? status, Action<long, long>? progress,
         CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, string? executable = null,
         Action<int>? generationProgress = null, int maxParallelParts = 4, AdaptiveUploadGate? adaptiveUploadGate = null,
-        Action<bool>? onTransferActivity = null, Action<long>? onPreviewSize = null)
+        Action<bool>? onTransferActivity = null, Action<long>? onPreviewSize = null,
+        SharedUploadContext? sharedUpload = null)
     {
         using var staged = new StagedPreview(source);
         status?.Invoke("Gerando prévia 480p");
@@ -47,7 +48,7 @@ internal static class FfmpegPreviewUpload
         var result = await uploader.UploadResumableGeneratedAsync(previewName, chunks,
             index => context != null
                 ? memory.PreparePartAsync(encryption, staged.File, length, chunkBytes, context.WithChunkIndex(index), token,
-                    deferBuffers: useAttachmentReferences, openSource: staged.OpenRead)
+                    deferBuffers: useAttachmentReferences, openSource: staged.OpenRead, isolateSendCancellation: sharedUpload != null)
                 : UploadMemoryCoordinator.PreparePlainPartAsync(staged.File, length, chunkBytes, index, token, staged.OpenRead),
             threadId, "", new Dictionary<int, string>(), cancellationToken: token, onRateLimitWait: onRateLimitWait,
             maxParallelParts: 16, encryptedPayload: context, adaptiveUploadGate: adaptiveUploadGate ?? localGate,
@@ -57,7 +58,7 @@ internal static class FfmpegPreviewUpload
             streamPreparedParts: context != null && useAttachmentReferences,
             onPartTransferProgress: (index, wire) => bytes.Report(index, wire),
             maxPreparedPartBytes: checked(chunkBytes + (context == null ? 0 : EncryptionService.EnvelopeOverheadBytes)),
-            legacyPreviewKind: context == null ? "video-480" : null).ConfigureAwait(false);
+            legacyPreviewKind: context == null ? "video-480" : null, sharedUpload: sharedUpload).ConfigureAwait(false);
         status?.Invoke("Concluindo");
         return new FfmpegPreviewUploadResult(length, result);
     }

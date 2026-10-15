@@ -1,4 +1,5 @@
 using System.IO;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -116,10 +117,21 @@ internal static partial class Program
         private readonly Dictionary<string, Dictionary<string, DiscordMessageDto>> _channels = new();
         private readonly Dictionary<string, byte[]> _attachments = new();
         private readonly Dictionary<string, string> _parents = new();
+        private readonly Dictionary<string, string> _threadNames = new();
         private ulong _next = 930000000000000000;
         public int PayloadPosts { get; private set; }
         public bool RejectNextFileProjection;
         public bool RejectNextMetadataUpdate;
+        internal bool DiscardBinaryPayloads;
+        internal long PayloadBytesRead;
+        internal bool RejectNextUnarchive;
+        internal bool RejectNextAttachmentEdit;
+        internal Dictionary<string, bool> ArchivedThreads { get; } = new();
+        internal Dictionary<string, bool> LockedThreads { get; } = new();
+        internal ConcurrentDictionary<(string Thread, string Message), int> MessageReads { get; } = new();
+        internal List<(string Thread, string Message)> DeletedMessages { get; } = [];
+        internal IReadOnlyList<DiscordMessageDto> Messages(string channel) { lock (_gate) return _channels.GetValueOrDefault(channel)?.Values.ToArray() ?? []; }
+        internal IReadOnlyList<string> FileThreads() { lock (_gate) return _parents.Where(pair => pair.Value == "files").Select(pair => pair.Key).ToArray(); }
         public List<string> DeletedChannels { get; } = [];
         public List<string> PublishedContents { get; } = [];
         public List<string> PublishedMetadataAttachments { get; } = [];
@@ -141,7 +153,8 @@ internal static partial class Program
         public DiscordMessageDto SeedLegacyMetadata(string json)
         {
             var message = Add("root-thread", "");
-            Attach(message, [("metadata.json", Encoding.UTF8.GetBytes(json))]);
+            var bytes = Encoding.UTF8.GetBytes(json);
+            Attach(message, [("metadata.json", bytes, bytes.Length)]);
             return message;
         }
 
@@ -152,7 +165,7 @@ internal static partial class Program
             var path = request.RequestUri!.AbsolutePath;
             if (path.StartsWith("/attachments/", StringComparison.Ordinal))
             { lock (_gate) return new(HttpStatusCode.OK) { Content = new ByteArrayContent(_attachments[path.Split('/')[^1]]) }; }
-            if (path.Contains("/guilds/", StringComparison.Ordinal)) return Json(new { threads = Array.Empty<object>() });
+            if (path.Contains("/guilds/", StringComparison.Ordinal)) { lock (_gate) return Json(new { threads = Threads().Where(thread => !thread.ThreadMetadata!.Archived).ToArray() }); }
             var offset = path.IndexOf("/channels/", StringComparison.Ordinal);
             if (offset < 0) return new(HttpStatusCode.NotFound);
             var parts = path[(offset + 10)..].Split('/'); var channel = parts[0];
@@ -160,9 +173,11 @@ internal static partial class Program
             {
                 lock (_gate)
                 {
-                    if (parts.Length == 1) return Json(new { id = channel, type = channel is "folders" or "files" ? 15 : 11, guild_id = "fixture" });
-                    if (parts.Length > 2 && parts[1] == "threads") return Json(new { threads = Array.Empty<object>(), has_more = false });
-                    if (parts.Length == 3 && _channels.GetValueOrDefault(channel)?.TryGetValue(parts[2], out var m) == true) return Json(m);
+                    if (parts.Length == 1) return Json(new { id = channel, type = channel is "folders" or "files" ? 15 : 11, guild_id = "fixture",
+                        thread_metadata = new { archived = ArchivedThreads.GetValueOrDefault(channel), locked = LockedThreads.GetValueOrDefault(channel) } });
+                    if (parts.Length > 2 && parts[1] == "threads") return Json(new { threads = Threads().Where(thread => thread.ParentId == channel).ToArray(), has_more = false });
+                    if (parts.Length == 3 && _channels.GetValueOrDefault(channel)?.TryGetValue(parts[2], out var m) == true)
+                    { MessageReads.AddOrUpdate((channel, parts[2]), 1, (_, count) => count + 1); return Json(m); }
                     if (parts.Length == 2 && parts[1] == "messages")
                     {
                         var query = request.RequestUri.Query.TrimStart('?').Split('&').Select(p => p.Split('=')).Where(p => p.Length == 2).ToDictionary(p => p[0], p => p[1]);
@@ -177,20 +192,45 @@ internal static partial class Program
             {
                 lock (_gate)
                 {
-                    if (parts.Length == 3) _channels.GetValueOrDefault(channel)?.Remove(parts[2]);
+                    if (parts.Length == 3) { _channels.GetValueOrDefault(channel)?.Remove(parts[2]); DeletedMessages.Add((channel, parts[2])); }
                     else { DeletedChannels.Add(channel); _channels.Remove(channel); }
                     return new(HttpStatusCode.NoContent);
                 }
             }
-            if (request.Method == HttpMethod.Patch && parts.Length == 1) return Json(new { id = channel });
+            if (request.Method == HttpMethod.Patch && parts.Length == 1)
+            {
+                using var state = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+                lock (_gate)
+                {
+                    if (state.RootElement.TryGetProperty("archived", out var archived))
+                    {
+                        if (!archived.GetBoolean() && RejectNextUnarchive) { RejectNextUnarchive = false; return new(HttpStatusCode.Forbidden); }
+                        ArchivedThreads[channel] = archived.GetBoolean();
+                    }
+                    return Json(new { id = channel });
+                }
+            }
             JsonDocument document;
-            var uploadedFiles = new List<(string Name, byte[] Bytes)>();
+            var uploadedFiles = new List<(string Name, byte[] Bytes, long Length)>();
             if (request.Content is MultipartFormDataContent multipart)
             {
                 document = JsonDocument.Parse(await multipart.First(p => p.Headers.ContentDisposition?.Name?.Trim('"') == "payload_json").ReadAsStringAsync(token));
                 foreach (var file in multipart.Where(p => p.Headers.ContentDisposition?.FileName != null))
-                    uploadedFiles.Add((file.Headers.ContentDisposition?.FileNameStar ?? file.Headers.ContentDisposition!.FileName!.Trim('"'),
-                        await file.ReadAsByteArrayAsync(token)));
+                {
+                    var name = file.Headers.ContentDisposition?.FileNameStar ?? file.Headers.ContentDisposition!.FileName!.Trim('"');
+                    if (DiscardBinaryPayloads && name != "serial.bin" && name.EndsWith(".bin", StringComparison.Ordinal))
+                    {
+                        var size = file.Headers.ContentLength ?? throw new InvalidDataException("Multipart sem tamanho.");
+                        await file.CopyToAsync(Stream.Null, token);
+                        Interlocked.Add(ref PayloadBytesRead, size);
+                        uploadedFiles.Add((name, [], size));
+                    }
+                    else
+                    {
+                        var bytes = await file.ReadAsByteArrayAsync(token);
+                        uploadedFiles.Add((name, bytes, bytes.Length));
+                    }
+                }
             }
             else document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
             using (document)
@@ -212,19 +252,29 @@ internal static partial class Program
                     {
                         PublishedTitles.Add(document.RootElement.GetProperty("name").GetString()!);
                         var thread = (++_next).ToString(); _channels[thread] = []; _parents[thread] = channel;
+                        _threadNames[thread] = document.RootElement.GetProperty("name").GetString()!;
                         var message = Add(thread, content); Attach(message, uploadedFiles);
                         if (channel == "files") PayloadPosts++;
                         return Json(new { id = thread, message });
                     }
                     var result = request.Method == HttpMethod.Post ? Add(channel, content) : new DiscordMessageDto { Id = parts[2], Content = content };
-                    if (request.Method == HttpMethod.Patch && !payload.TryGetProperty("attachments", out _) &&
-                        _channels[channel].TryGetValue(parts[2], out var previous)) result.Attachments = previous.Attachments;
+                    if (request.Method == HttpMethod.Patch && _channels[channel].TryGetValue(parts[2], out var previous))
+                    {
+                        if (!payload.TryGetProperty("content", out _)) result.Content = previous.Content;
+                        if (uploadedFiles.Count == 0 && payload.TryGetProperty("attachments", out var keep))
+                        {
+                            if (RejectNextAttachmentEdit) { RejectNextAttachmentEdit = false; return new(HttpStatusCode.Forbidden); }
+                            var ids = keep.EnumerateArray().Select(attachment => attachment.GetProperty("id").GetString()).ToHashSet();
+                            result.Attachments = previous.Attachments.Where(attachment => ids.Contains(attachment.Id)).ToList();
+                        }
+                        else if (!payload.TryGetProperty("attachments", out _)) result.Attachments = previous.Attachments;
+                    }
                     Attach(result, uploadedFiles); _channels[channel][result.Id] = result;
                     return Json(result);
                 }
             }
         }
-        private void Attach(DiscordMessageDto message, IReadOnlyList<(string Name, byte[] Bytes)> files)
+        private void Attach(DiscordMessageDto message, IReadOnlyList<(string Name, byte[] Bytes, long Length)> files)
         {
             if (files.Count == 0) return;
             message.Attachments = [];
@@ -232,9 +282,12 @@ internal static partial class Program
             {
                 var attachmentId = (++_next).ToString();
                 _attachments[attachmentId] = file.Bytes;
-                message.Attachments.Add(new DiscordAttachmentDto { Id = attachmentId, FileName = file.Name, Size = file.Bytes.Length,
+                message.Attachments.Add(new DiscordAttachmentDto { Id = attachmentId, FileName = file.Name, Size = file.Length,
                     Url = "https://sync.fixture/attachments/" + attachmentId });
             }
         }
+        private IEnumerable<DiscordChannelDto> Threads() => _parents.Select(pair => new DiscordChannelDto
+            { Id = pair.Key, ParentId = pair.Value, Name = _threadNames.GetValueOrDefault(pair.Key, ""), Type = 11,
+                ThreadMetadata = new DiscordThreadMetadataDto { Archived = ArchivedThreads.GetValueOrDefault(pair.Key) } });
     }
 }

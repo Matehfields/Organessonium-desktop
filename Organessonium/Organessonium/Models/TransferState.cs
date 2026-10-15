@@ -36,10 +36,21 @@ public static class TransferPayloadLayouts
 {
     public const int SingleAttachment = 1;
     public const int MultiAttachment = 2;
+    public const int SharedStorage = 3;
 }
 
 public sealed class TransferState
 {
+    [JsonPropertyName("sharedAllocationPending")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool SharedAllocationPending { get; set; }
+    [JsonPropertyName("storage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StorageLayout? Storage { get; set; }
+
+    [JsonPropertyName("thumbnailRef")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AttachmentReference? ThumbnailRef { get; set; }
     [JsonPropertyName("replacement")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public FileReplacement? Replacement { get; set; }
@@ -158,8 +169,12 @@ public sealed class TransferState
 
     public void Normalize()
     {
-        if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment))
+        if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage))
             throw new InvalidDataException("O layout desta transferência ainda não é suportado.");
+        Storage?.Validate();
+        ThumbnailRef?.Validate();
+        if (PayloadLayoutVersion == TransferPayloadLayouts.SharedStorage && Storage?.Shared != true)
+            throw new InvalidDataException("O checkpoint compartilhado não contém a identidade do armazenamento.");
         TransferId = string.IsNullOrWhiteSpace(TransferId) ? Guid.NewGuid().ToString("N") : TransferId;
         Status = string.IsNullOrWhiteSpace(Status) ? TransferStatuses.Queued : Status;
         CreatedAt = string.IsNullOrWhiteSpace(CreatedAt) ? Now() : CreatedAt;

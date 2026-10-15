@@ -16,6 +16,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
     private readonly EncryptionService _encryption;
     private readonly EncryptedPayloadContext? _context;
     private readonly HttpClient _http;
+    internal IAsyncDisposable? ReadLease { get; set; }
 
     public DiscordVideoChunkProvider(DiscordApiClient discord, string threadId,
         IReadOnlyList<VideoAttachment> attachments, EncryptionService encryption,
@@ -54,7 +55,9 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                 {
                     if (string.IsNullOrWhiteSpace(attachment.MessageId))
                         throw new IOException("O anexo do vídeo não está mais disponível.");
-                    var message = await _discord.GetMessageAsync(_threadId, attachment.MessageId, cancellationToken).ConfigureAwait(false);
+                    var message = await _discord.ResolvePayloadMessageAsync(_threadId, attachment.MessageId, cancellationToken).ConfigureAwait(false);
+                    if (message.Attachments.Any(item => item.Id == attachment.AttachmentId && item.Url == attachment.Url))
+                        message = await _discord.ResolvePayloadMessageAsync(_threadId, attachment.MessageId, cancellationToken, refresh: true).ConfigureAwait(false);
                     var renewed = string.IsNullOrWhiteSpace(attachment.AttachmentId)
                         ? message.Attachments.FirstOrDefault(a => a.FileName == attachment.Name)
                         : message.Attachments.SingleOrDefault(a => a.Id == attachment.AttachmentId);
@@ -92,5 +95,15 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
         throw new IOException("Não foi possível carregar o chunk do vídeo após quatro tentativas.", last);
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        var lease = ReadLease; ReadLease = null;
+        if (lease != null) _ = ReleaseReadAsync(lease);
+    }
+    private static async Task ReleaseReadAsync(IAsyncDisposable lease)
+    {
+        try { await lease.DisposeAsync(); }
+        catch (Exception error) { AppLogger.Error("Video.ReadRelease", error); }
+    }
 }

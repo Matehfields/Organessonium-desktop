@@ -58,7 +58,8 @@ internal static partial class Program
             var changes = transport.Archives.Where(change => change.Thread == transport.IndexThreadId).ToArray();
             RequireSync(changes.Length == 2 && !changes[0].Archived && changes[1].Archived,
                 "o índice continuou alternando arquivamento por arquivo");
-            RequireSync(server.PayloadPosts == 12 && paths.All(File.Exists) && visible.Any(entry => entry.FileId == existing.FileId) &&
+            RequireSync(server.PayloadPosts == 1 && server.FileThreads().Sum(thread => server.Messages(thread).Sum(message => message.Attachments.Count)) == 12 &&
+                paths.All(File.Exists) && visible.Any(entry => entry.FileId == existing.FileId) &&
                 paths.All(path => visible.Any(entry => entry.Name == Path.GetFileName(path) && entry.Path == "/Fotos")),
                 "o lote perdeu arquivos da pasta recarregada, publicou incompleto ou alterou os originais");
             var cached = await registry.LoadCachedFolderAsync("photos", "/Fotos");

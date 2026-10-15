@@ -221,7 +221,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
 
     internal Task<PreparedUploadPart> PreparePartAsync(EncryptionService encryption, FileInfo source,
         long expectedLength, int chunkBytes, EncryptedPayloadContext context, CancellationToken token,
-        bool deferBuffers = false, Func<Stream>? openSource = null)
+        bool deferBuffers = false, Func<Stream>? openSource = null, bool isolateSendCancellation = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!deferBuffers) return PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, token, openSource: openSource);
@@ -233,7 +233,7 @@ internal sealed class UploadMemoryCoordinator : IDisposable
             checked(length + EncryptionService.EnvelopeOverheadBytes), length,
             async sendToken =>
             {
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, sendToken);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(isolateSendCancellation ? CancellationToken.None : token, sendToken);
                 return await PrepareMaterializedAsync(encryption, source, expectedLength, chunkBytes, context, linked.Token, replay, openSource).ConfigureAwait(false);
             }, replay));
     }

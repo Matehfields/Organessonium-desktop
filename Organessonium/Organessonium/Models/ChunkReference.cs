@@ -42,6 +42,16 @@ public sealed record ChunkReference
 
     internal static void ValidateJsonPresence(JsonElement metadata)
     {
+        if (metadata.TryGetProperty("storage", out var storage) && (storage.ValueKind != JsonValueKind.Object ||
+            !storage.TryGetProperty("version", out var storageVersion) || !storageVersion.TryGetInt32(out _) ||
+            !storage.TryGetProperty("mode", out var mode) || mode.ValueKind != JsonValueKind.String))
+            throw new InvalidDataException("storage deve declarar version e mode explicitamente.");
+        if (metadata.TryGetProperty("preview", out var thumbnailPreview) && thumbnailPreview.ValueKind == JsonValueKind.Object &&
+            thumbnailPreview.TryGetProperty("thumbnailRef", out var thumbnail) &&
+            (thumbnail.ValueKind != JsonValueKind.Object || !thumbnail.TryGetProperty("messageId", out var message) ||
+                message.ValueKind != JsonValueKind.String || !thumbnail.TryGetProperty("attachmentId", out var attachment) ||
+                attachment.ValueKind != JsonValueKind.String))
+            throw new InvalidDataException("thumbnailRef deve conter os IDs exatos da mensagem e do attachment.");
         if (metadata.TryGetProperty("chunkRefs", out var references) && references.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException("chunkRefs deve ser um array válido, não um valor nulo ou outro formato.");
         if (metadata.TryGetProperty("preview", out var preview) && preview.ValueKind == JsonValueKind.Object &&

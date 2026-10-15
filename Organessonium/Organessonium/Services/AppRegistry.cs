@@ -33,6 +33,7 @@ public sealed partial class AppRegistry
     private readonly SemaphoreSlim _serialSynchronizationGate = new(1, 1);
     private readonly SemaphoreSlim _serverIndexRefreshGate = new(1, 1);
     private int _remoteSerialCleanupStarted;
+    internal SharedStorageManager SharedStorage { get; }
 
     public AppRegistry(DiscordApiClient discord, SettingsStore store, AppSettings settings)
     {
@@ -40,6 +41,7 @@ public sealed partial class AppRegistry
         _store = store;
         _settings = settings;
         _metadata = new MetadataService(MetadataCodec.ForStore(store), discord.DownloadAttachmentBytesAsync);
+        SharedStorage = new SharedStorageManager(discord, store, settings);
         _serials = new SerialIndexService(discord, store, settings);
         _mappings = new ConcurrentDictionary<string, FolderIndexMapping>(
             store.LoadFolderIndexMappings(),
@@ -820,14 +822,19 @@ public sealed partial class AppRegistry
         bool synchronizeSerials = true)
     {
         await _entryMutationGate.WaitAsync(cancellationToken);
+        string messageId;
         try
         {
-            return await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials);
+            await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
+            messageId = await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials);
         }
         finally
         {
             _entryMutationGate.Release();
         }
+        if (entry.Type == "file")
+            await SharedStorage.PublishFileReferenceAsync(entry, (await GetMappingAsync(NormalizeFolderId(entry.ParentFolderId), cancellationToken)).ThreadId, cancellationToken);
+        return messageId;
     }
 
     public async Task SynchronizeFolderSerialsAsync(
@@ -879,6 +886,7 @@ public sealed partial class AppRegistry
 
         try
         {
+            await SharedStorage.ReconcileAsync(cancellationToken);
             await _serials.CleanupSupersededRemoteSerialsAsync(
                 MappingSnapshot(),
                 _settings.SearchWorkers,
@@ -966,7 +974,8 @@ public sealed partial class AppRegistry
     public async Task UpdateEntryAsync(
         AppEntry entry,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        FileMetadata? expectedPayload = null)
     {
         if (entry.Type == "file" && entry.LogicalChunkCount == 0)
         {
@@ -974,6 +983,22 @@ public sealed partial class AppRegistry
             CopyFilePayload(details, entry);
         }
         entry.Normalize();
+        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
+        if (entry.Type == "file" && (entry.Storage?.Shared == true || expectedPayload?.Storage?.Shared == true))
+        {
+            var basis = expectedPayload == null ? entry : _metadata.ToAppEntry(new MetadataEnvelope(entry.MetadataMessageId, expectedPayload))!;
+            basis.Path = entry.Path;
+            var current = await LoadFileDetailsAsync(basis, cancellationToken, forceRefresh: true);
+            if (expectedPayload == null) CopyFilePayload(current, entry);
+            else
+            {
+                if (current.VersionId != (expectedPayload.VersionId ?? "") || current.BatchId != expectedPayload.BatchId)
+                    throw new IOException("O conteúdo remoto mudou antes da publicação. As versões existentes foram preservadas.");
+                entry.Favorite = current.Favorite;
+                if (entry.Sync?.RevisionId == current.Sync?.RevisionId)
+                { entry.Name = current.Name; entry.Trash = current.Trash; entry.Sync = current.Sync; }
+            }
+        }
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         entry.ParentFolderId = parentFolderId;
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
@@ -1008,6 +1033,8 @@ public sealed partial class AppRegistry
             await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
 
+        if (entry.Type == "file")
+            await SharedStorage.PublishFileReferenceAsync(entry, parent.ThreadId, cancellationToken);
         await RebuildFavoritesSerialAsync(cancellationToken);
     }
 
@@ -1034,6 +1061,9 @@ public sealed partial class AppRegistry
             await UpdateEntryAsync(entry, cancellationToken, onRateLimitWait);
             return;
         }
+        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
+        if (entry.Type == "file" && entry.Storage?.Shared == true)
+            CopyFilePayload(await LoadFileDetailsAsync(entry, cancellationToken, forceRefresh: true), entry);
 
         var source = await GetMappingAsync(sourceFolderId, cancellationToken);
         await _discord.UnarchiveThreadAsync(source.ThreadId, cancellationToken, onRateLimitWait);
@@ -1075,6 +1105,8 @@ public sealed partial class AppRegistry
             await ArchiveFolderThreadAsync(destination.ThreadId, cancellationToken);
         }
 
+        if (entry.Type == "file")
+            await SharedStorage.PublishFileReferenceAsync(entry, destination.ThreadId, cancellationToken);
         if (synchronizeSerials && entry.Type == "folder")
         {
             var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
@@ -1098,10 +1130,11 @@ public sealed partial class AppRegistry
 
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         var parent = await GetFolderMappingForDeletionAsync(parentFolderId, null, cancellationToken);
+        var metadataChannel = entry.Type == "file" ? await SharedStorage.LocateMetadataAsync(entry, cancellationToken) : parent.ThreadId;
         await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken);
         try
         {
-            await _metadata.DeleteEntryAsync(_discord, parent.ThreadId, entry, cancellationToken);
+            await _metadata.DeleteEntryAsync(_discord, metadataChannel, entry, cancellationToken);
             var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
             RemoveEntry(siblings, entry);
             _store.CacheFolderEntries(parentFolderId, siblings);
@@ -1941,6 +1974,8 @@ public sealed partial class AppRegistry
         target.SizeBytes = source.SizeBytes;
         target.MetadataMessageId = source.MetadataMessageId;
         target.FileId = source.FileId;
+        target.Storage = source.Storage;
+        target.ThumbnailRef = source.ThumbnailRef;
         target.FolderId = source.FolderId;
         target.ParentFolderId = source.ParentFolderId;
         target.FolderColor = source.FolderColor;
@@ -1966,6 +2001,8 @@ public sealed partial class AppRegistry
 
     private static void CopyFilePayload(AppEntry source, AppEntry target)
     {
+        target.Storage = source.Storage;
+        target.ThumbnailRef = source.ThumbnailRef;
         if (source.LogicalChunkCount == 0)
             throw new InvalidDataException("Os metadados completos do arquivo não puderam ser carregados.");
         target.ChunkMessageIds = source.ChunkMessageIds.ToList();

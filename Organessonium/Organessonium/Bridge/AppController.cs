@@ -973,6 +973,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string EntryCacheKey(AppEntry app)
     {
+        if (app.Type == "file" && !string.IsNullOrWhiteSpace(app.FileId)) return "file:" + app.FileId;
         if (!string.IsNullOrWhiteSpace(app.ThreadId))
         {
             return "thread:" + app.ThreadId;
@@ -1154,8 +1155,8 @@ public sealed partial class AppController : IAsyncDisposable
             var appsByThread = (libraryView == "favorites" ? _favoriteApps :
                     libraryView == "devices" ? _deviceApps.Concat(_loadedApps) :
                     CurrentLocalEntries())
-                .Where(app => visibleIdSet.Contains(app.ThreadId))
-                .GroupBy(app => app.ThreadId, StringComparer.Ordinal)
+                .Where(app => visibleIdSet.Contains(app.RequestId))
+                .GroupBy(app => app.RequestId, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
             var apps = visibleIds
                 .Where(appsByThread.ContainsKey)
@@ -1174,12 +1175,14 @@ public sealed partial class AppController : IAsyncDisposable
                     {
                         return null;
                     }
+                    if (app.Type == "file" && app.LogicalChunkCount == 0)
+                        app = await Registry().LoadFileDetailsAsync(app, cancellationToken);
 
                     var ownsLoad = false;
                     for (var attempt = 0; attempt < 5 && !ownsLoad; attempt++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        ownsLoad = _thumbnailLoads.TryAdd(app.ThreadId, 0);
+                        ownsLoad = _thumbnailLoads.TryAdd(app.PayloadCacheKey, 0);
                         if (!ownsLoad)
                         {
                             await Task.Delay(40, cancellationToken);
@@ -1192,7 +1195,7 @@ public sealed partial class AppController : IAsyncDisposable
 
                     try
                     {
-                        var cached = ThumbnailCache.Get(app.ThreadId);
+                        var cached = ThumbnailCache.Get(app.ThumbnailCacheKey);
                         if (cached != null)
                         {
                             return cached;
@@ -1209,8 +1212,8 @@ public sealed partial class AppController : IAsyncDisposable
                                         app.FileId,
                                         app.Encryption,
                                         EncryptedPayloadRoles.Preview,
-                                        0))
-                            : await downloader.DownloadMarkedPreviewBytesAsync(
+                                        0), attachmentId: app.ThumbnailRef?.AttachmentId)
+                            : app.Storage?.Shared == true ? null : await downloader.DownloadMarkedPreviewBytesAsync(
                                 app.ThreadId,
                                 "PREVIEW|",
                                 cancellationToken: cancellationToken) ??
@@ -1221,7 +1224,7 @@ public sealed partial class AppController : IAsyncDisposable
                         string? thumb;
                         if (previewBytes is { Length: > 0 })
                         {
-                            thumb = ThumbnailCache.Store(app.ThreadId, previewBytes);
+                            thumb = ThumbnailCache.Store(app.ThumbnailCacheKey, previewBytes);
                         }
                         else
                         {
@@ -1242,7 +1245,7 @@ public sealed partial class AppController : IAsyncDisposable
                             }
 
                             var data = await http.GetByteArrayAsync(url, cancellationToken);
-                            thumb = ThumbnailCache.GenerateAndStore(app.ThreadId, data);
+                            thumb = ThumbnailCache.GenerateAndStore(app.PayloadCacheKey, data);
                         }
 
                         return thumb;
@@ -1258,7 +1261,7 @@ public sealed partial class AppController : IAsyncDisposable
                     }
                     finally
                     {
-                        _thumbnailLoads.TryRemove(app.ThreadId, out _);
+                        _thumbnailLoads.TryRemove(app.PayloadCacheKey, out _);
                     }
                 }
                 finally
@@ -1276,7 +1279,7 @@ public sealed partial class AppController : IAsyncDisposable
                     if (thumbnail != null)
                     {
                         await DeliverThumbnailAsync(
-                            apps[index].ThreadId,
+                            apps[index].RequestId,
                             thumbnail,
                             path,
                             visibleIdSet,
@@ -1661,7 +1664,12 @@ public sealed partial class AppController : IAsyncDisposable
 
     private AppEntry? FindLoadedEntry(string threadId)
     {
-        return LoadedEntriesForLookup().FirstOrDefault(app => app.ThreadId == threadId);
+        var entries = LoadedEntriesForLookup().ToList();
+        var exact = entries.FirstOrDefault(app => app.RequestId == threadId || app.FileId == threadId);
+        if (exact != null) return exact;
+        // A physical thread is a legacy locator only when it identifies one entry.
+        var legacy = entries.Where(app => app.ThreadId == threadId && app.Storage?.Shared != true).Take(2).ToList();
+        return legacy.Count == 1 ? legacy[0] : null;
     }
 
     private async Task<AppEntry?> FindLoadedFileDetailsAsync(string threadId, CancellationToken cancellationToken = default)
@@ -1688,7 +1696,7 @@ public sealed partial class AppController : IAsyncDisposable
         cancellation.ThrowIfCancellationRequested();
         if (_loggingOut) throw new OperationCanceledException();
         var quality = lowQuality ? "480p" : "full";
-        var existing = GetPreviewUrl(entry.ThreadId, quality);
+        var existing = GetPreviewUrl(entry.RequestId, quality);
         if (!string.IsNullOrWhiteSpace(existing))
         {
             return existing;
@@ -1701,13 +1709,13 @@ public sealed partial class AppController : IAsyncDisposable
             await video.WarmUpAsync().WaitAsync(cancellation);
             cancellation.ThrowIfCancellationRequested();
             var url = _previewResources.RegisterVideo(video, lowQuality ? "video/mp4" : MediaMime(entry.Name));
-            _videoSessions[entry.ThreadId + "|" + quality] = video;
-            TrackPreviewUrl(entry.ThreadId, quality, url);
+            _videoSessions[entry.RequestId + "|" + quality] = video;
+            TrackPreviewUrl(entry.RequestId, quality, url);
             video.Failed += ex =>
             {
                 AppLogger.Error("Video.Stream", new IOException("Falha permanente ao carregar bytes autenticados do vídeo."));
-                if (GetPreviewUrl(entry.ThreadId, quality) == url)
-                    _ = _bridge.CallAsync("_onVideoStreamError", entry.ThreadId, ex is EncryptedPayloadException ? ex.Message : "Não foi possível carregar o vídeo. Verifique a conexão e tente abrir novamente.");
+                if (GetPreviewUrl(entry.RequestId, quality) == url)
+                    _ = _bridge.CallAsync("_onVideoStreamError", entry.RequestId, ex is EncryptedPayloadException ? ex.Message : "Não foi possível carregar o vídeo. Verifique a conexão e tente abrir novamente.");
             };
             return url;
         }
@@ -1776,8 +1784,8 @@ public sealed partial class AppController : IAsyncDisposable
                 progress => ReportPreviewProgress(progress, "video480"))
             : LooksLikeDiscordId(entry?.VideoPreviewMessageId ?? "")
                 ? await Downloader().DownloadMessageAttachmentAsync(
-                    threadId,
-                    entry!.VideoPreviewMessageId,
+                    entry!.ThreadId,
+                    entry.VideoPreviewMessageId,
                     tempDir,
                     progress => ReportPreviewProgress(progress, "video480"),
                     encryption: entry.Encryption == null
@@ -1788,13 +1796,13 @@ public sealed partial class AppController : IAsyncDisposable
                             EncryptedPayloadRoles.Video480p,
                             0),
                     outputName: "preview_480p_" + name)
-            : await Downloader().DownloadMarkedPreviewFileAsync(
-                threadId,
+            : entry?.Storage?.Shared == true ? null : await Downloader().DownloadMarkedPreviewFileAsync(
+                entry?.ThreadId ?? threadId,
                 "VIDEO_PREVIEW_480P|",
                 tempDir,
                 progress => ReportPreviewProgress(progress, "video480")) ??
               await Downloader().DownloadPreviewAndAssembleAsync(
-                threadId,
+                entry?.ThreadId ?? threadId,
                 "video-480",
                 tempDir,
                 progress => ReportPreviewProgress(progress, "video480"));
@@ -2124,6 +2132,7 @@ public sealed partial class AppController : IAsyncDisposable
         var cancellationToken = BeginTransferOperation(opId);
         try
         {
+            tasks = await PlanSharedUploadsAsync(tasks, all, registry, cancellationToken);
             await RunUploadQueueAsync(opId, tasks, all, serialFolderIds, cancellationToken);
         }
         catch (OperationCanceledException)
@@ -2331,6 +2340,11 @@ public sealed partial class AppController : IAsyncDisposable
         var nextIndex = -1;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
+        // Single-part shared files are descriptors of one multipart, not ten dedicated uploads.
+        if (tasks.All(task => task.PreparedTransfer?.Storage?.Shared == true && task.PreparedTransfer.TotalChunks == 1))
+            fileParallelism = Math.Min(tasks.Count, Math.Max(fileParallelism, DiscordLimits.MaxAttachmentsPerSharedMessage));
+        await using var poolWrites = await registry.SharedStorage.HoldWritesAsync(tasks.Where(task => task.PreparedTransfer?.Storage?.Shared == true)
+            .Select(task => task.PreparedTransfer!.ThreadId), cancellationToken);
         var uploadWorkers = settings.EffectiveUploadThreads;
         var partsPerFile = UploadConcurrencyPlanner.PartsPerFile(uploadWorkers, fileParallelism, settings.ForceUploadParallelism);
         using var uploadGate = new AdaptiveUploadGate(uploadWorkers, adaptive: !settings.ForceUploadParallelism);
@@ -2383,6 +2397,7 @@ public sealed partial class AppController : IAsyncDisposable
                         settings,
                         new UiThrottle(),
                         fileToken,
+                        existingTransferState: task.PreparedTransfer,
                         adaptiveUploadGate: uploadGate,
                         memoryCoordinator: memoryCoordinator,
                         maxParallelPartsPerFile: partsPerFile,
@@ -2404,7 +2419,7 @@ public sealed partial class AppController : IAsyncDisposable
                         transferActivity: transferActivity,
                         deferSerialSynchronization: true,
                         replacement: task.Replacement,
-                        onPreviewSize: size => Interlocked.Add(ref totalBytes, size)), fileToken);
+                        onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null), fileToken);
                     uploadedEntries[index] = uploaded;
                     Task publication;
                     lock (allEntries)
@@ -2460,6 +2475,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
             await Task.WhenAll(workers);
+            await registry.SharedStorage.ReconcileReservationsAsync(cancellationToken);
         }
         finally
         {
@@ -2537,7 +2553,8 @@ public sealed partial class AppController : IAsyncDisposable
         TransferActivityClock? transferActivity = null,
         bool deferSerialSynchronization = false,
         FileReplacement? replacement = null,
-        Action<long>? onPreviewSize = null)
+        Action<long>? onPreviewSize = null,
+        bool scheduledTransfer = false)
     {
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2582,6 +2599,8 @@ public sealed partial class AppController : IAsyncDisposable
 
         var threadId = "";
         TransferState? transferState = existingTransferState;
+        IAsyncDisposable? payloadLease = null;
+        SharedUploadContext? sharedUpload = null;
         try
         {
             var parentFolderId = string.IsNullOrWhiteSpace(transferState?.TargetFolderId)
@@ -2599,8 +2618,11 @@ public sealed partial class AppController : IAsyncDisposable
                     cancellationToken);
                 transferState.Replacement = replacement;
                 transferState.FileId = replacement?.Metadata.FileId ?? Guid.NewGuid().ToString("N");
-                transferState.ThreadId = replacement?.Metadata.ThreadId ?? "";
+                transferState.ThreadId = sourceLength > DiscordLimits.DedicatedThreadThresholdBytes && replacement?.Metadata.Storage?.Shared != true
+                    ? replacement?.Metadata.ThreadId ?? "" : "";
                 transferState.Encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
+                transferState.SharedAllocationPending = sourceLength <= DiscordLimits.DedicatedThreadThresholdBytes;
+                if (!transferState.SharedAllocationPending) transferState.Storage = new StorageLayout { Mode = "dedicated" };
             }
             else
             {
@@ -2625,10 +2647,27 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
 
+            if (transferState.SharedAllocationPending)
+            {
+                await _transferManager.SaveAsync(transferState, cancellationToken);
+                var reservation = await registry.SharedStorage.ReserveAsync(transferState.FileId, transferState.TransferId, cancellationToken);
+                transferState.Storage = reservation.Layout; transferState.ThreadId = reservation.ThreadId;
+                transferState.PayloadLayoutVersion = TransferPayloadLayouts.SharedStorage; transferState.SharedAllocationPending = false;
+            }
+            if (transferState.Storage?.Shared == true)
+            {
+                var reservation = new SharedStorageReservation(transferState.FileId, transferState.TransferId, transferState.ThreadId, transferState.Storage);
+                if (!scheduledTransfer) await registry.SharedStorage.VerifyReservationAsync(reservation, cancellationToken);
+                sharedUpload = new SharedUploadContext(registry.SharedStorage, reservation);
+                payloadLease = await RequireApi().AcquireThreadWriteAsync(transferState.ThreadId, cancellationToken);
+            }
             transferState.FileName = name;
             transferState.SourcePath = originalFile.FullName;
             transferState.FastStartApplied = preparedVideo.Applied;
             await _transferManager.SaveAsync(transferState, cancellationToken);
+            if (transferState.Replacement != null)
+                await registry.SharedStorage.PublishReferenceAsync("upload:" + transferState.TransferId, transferState.FileId,
+                    SharedStorageManager.Payloads(transferState.Replacement.Metadata), "", "", cancellationToken);
             await ReportUploadItemProgressAsync(
                 opId,
                 fileIndex,
@@ -2678,6 +2717,20 @@ public sealed partial class AppController : IAsyncDisposable
                 await ReportRateLimitWaitAsync(remaining);
             }
 
+            if (sharedUpload != null && existingTransferState != null && !scheduledTransfer)
+            {
+                var recovered = await sharedUpload.Manager.RecoverChunksAsync(sharedUpload.Reservation,
+                    EncryptedPayloadRoles.Original, totalChunks, cancellationToken);
+                foreach (var reference in recovered.Where(reference => !transferState.UploadedChunks.Any(chunk => chunk.Index == reference.Index)))
+                {
+                    var message = await RequireApi().ResolvePayloadMessageAsync(transferState.ThreadId, reference.MessageId, cancellationToken);
+                    var attachment = message.Attachments.Single(item => item.Id == reference.AttachmentId);
+                    var recoveredBatch = string.IsNullOrEmpty(transferState.BatchId) ? transferState.TransferId[..10] : transferState.BatchId;
+                    await _transferManager.MarkUploadChunksAsync(transferState, new ForumUploadedBatch(transferState.ThreadId, recoveredBatch,
+                        [new ForumUploadedChunk(transferState.ThreadId, recoveredBatch, reference.Index, reference.MessageId,
+                            attachment.Size, attachment.Size - EncryptionService.EnvelopeOverheadBytes, reference.AttachmentId)]), cancellationToken);
+                }
+            }
             var uploadedMap = transferState.UploadedChunks
                 .Where(chunk => !string.IsNullOrWhiteSpace(chunk.MessageId))
                 .ToDictionary(chunk => chunk.Index, chunk => chunk.MessageId);
@@ -2735,10 +2788,11 @@ public sealed partial class AppController : IAsyncDisposable
 
             async Task HandleUploadedBatchAsync(ForumUploadedBatch batch)
             {
-                await checkpointGate.WaitAsync(cancellationToken);
+                var checkpointToken = sharedUpload == null ? cancellationToken : CancellationToken.None;
+                await checkpointGate.WaitAsync(checkpointToken);
                 try
                 {
-                    await _transferManager.MarkUploadChunksAsync(transferState, batch, cancellationToken);
+                    await _transferManager.MarkUploadChunksAsync(transferState, batch, checkpointToken);
                     threadId = batch.ThreadId;
                     foreach (var chunk in batch.Chunks) byteProgress.Confirm(chunk.Index);
                 }
@@ -2760,8 +2814,8 @@ public sealed partial class AppController : IAsyncDisposable
                     using var owned = memoryCoordinator == null ? new UploadMemoryCoordinator(partParallelism) : null;
                     return await (memoryCoordinator ?? owned!).PreparePartAsync(_encryption, file, sourceLength,
                         (int)transferState.ChunkSizeBytes, encryptionContext.WithChunkIndex(index), cancellationToken,
-                        deferBuffers: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
-                        openSource: preparedVideo.OpenRead);
+                        deferBuffers: transferState.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment,
+                        openSource: preparedVideo.OpenRead, isolateSendCancellation: sharedUpload != null);
                 }
 
                 upload = await uploader.UploadResumableGeneratedAsync(
@@ -2780,19 +2834,19 @@ public sealed partial class AppController : IAsyncDisposable
                     cleanupPart: TryDeleteFile,
                     adaptiveUploadGate: adaptiveUploadGate,
                     onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
-                    useAttachmentReferences: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
-                    uploadedChunkReferences: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment
+                    useAttachmentReferences: transferState.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment,
+                    uploadedChunkReferences: transferState.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment
                         ? transferState.UploadedChunks.Select(chunk => new ChunkReference
                             { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
                     onBatchUploaded: HandleUploadedBatchAsync,
                     batchPreparationGate: RamUploadBudget.Batches,
-                    streamPreparedParts: transferState.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
+                    streamPreparedParts: transferState.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment,
                     maxPreparedPartBytes: checked((int)transferState.ChunkSizeBytes + EncryptionService.EnvelopeOverheadBytes),
                     onPartTransferProgress: (index, wire) =>
                     {
                         byteProgress.Report(index, wire);
                         ReportUploadedParts(Volatile.Read(ref confirmedParts));
-                    });
+                    }, sharedUpload: sharedUpload);
             }
             else
             {
@@ -2837,7 +2891,7 @@ public sealed partial class AppController : IAsyncDisposable
                         transferState.Encryption,
                         EncryptedPayloadRoles.Preview,
                         0),
-                adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded);
+                adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded, sharedUpload);
 
             await ReportUploadItemProgressAsync(
                 opId,
@@ -2855,6 +2909,8 @@ public sealed partial class AppController : IAsyncDisposable
             entry.VersionUploadedAt = now;
             entry.ModifiedAt = now;
             entry.FileId = transferState.FileId;
+            entry.Storage = transferState.Storage;
+            entry.ThumbnailRef = transferState.ThumbnailRef;
             entry.Encryption = transferState.Encryption?.Clone();
             entry.ParentFolderId = parentFolderId;
             entry.BatchId = upload.BatchId;
@@ -2913,7 +2969,12 @@ public sealed partial class AppController : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            if (!string.IsNullOrWhiteSpace(threadId) && transferState?.Replacement == null)
+            if (transferState?.Storage?.Shared == true)
+            {
+                try { await registry.SharedStorage.CancelReservationAsync(transferState, CancellationToken.None); }
+                catch (Exception error) { AppLogger.Error("SharedStorage.CancelCleanup", error); }
+            }
+            else if (!string.IsNullOrWhiteSpace(threadId) && transferState?.Replacement == null)
             {
                 try { await Downloader().DeleteThreadAsync(threadId); } catch { }
             }
@@ -2946,6 +3007,15 @@ public sealed partial class AppController : IAsyncDisposable
 
             throw;
         }
+        finally
+        {
+            if (transferState?.Replacement != null && transferState.Status is TransferStatuses.Completed or TransferStatuses.Cancelled or TransferStatuses.Failed)
+            {
+                try { await registry.SharedStorage.ReleaseReferenceAsync("upload:" + transferState.TransferId, transferState.FileId, CancellationToken.None); }
+                catch (Exception error) { AppLogger.Error("Storage.UploadRelease", error); }
+            }
+            if (payloadLease != null) await payloadLease.DisposeAsync();
+        }
     }
 
     private async Task<PreviewUploadIds> TryUploadGeneratedPreviewAsync(
@@ -2955,7 +3025,8 @@ public sealed partial class AppController : IAsyncDisposable
         TransferState? transferState = null, bool useBatchUi = false,
         UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null,
         AdaptiveUploadGate? adaptiveUploadGate = null, TransferActivityClock? transferActivity = null,
-        Action<long>? onPreviewSize = null, Func<long, long, Task>? onPreviewBytes = null)
+        Action<long>? onPreviewSize = null, Func<long, long, Task>? onPreviewBytes = null,
+        SharedUploadContext? sharedUpload = null)
     {
         var previewMessageId = transferState?.ThumbnailMessageId ?? "";
         IReadOnlyList<string> videoChunks = transferState?.VideoPreview480pChunks ?? [];
@@ -2972,7 +3043,7 @@ public sealed partial class AppController : IAsyncDisposable
                     progressTracker?.ThumbnailGeneration(0) ?? 0, "Gerando miniatura",
                     throttle, true, useBatchUi, progressTracker: progressTracker);
                 using var thumbnail = await VideoPreviewGenerator.CreateThumbnailAsync(file, cancellationToken);
-                ThumbnailCache.Store(threadId, thumbnail.Bytes);
+                if (sharedUpload == null) ThumbnailCache.Store(threadId, thumbnail.Bytes);
                 await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
                     progressTracker?.ThumbnailUpload(0) ?? 99, "Enviando miniatura",
                     throttle, true, useBatchUi, progressTracker: progressTracker);
@@ -2992,7 +3063,20 @@ public sealed partial class AppController : IAsyncDisposable
                         percent >= 100 ? "Concluindo" : "Enviando miniatura",
                         throttle, percent >= 100, useBatchUi, progressTracker: progressTracker);
                 };
-                previewMessageId = await uploader.UploadPreviewFileToThreadAsync(threadId,
+                if (sharedUpload != null)
+                {
+                    var reference = await sharedUpload.Manager.Batcher.SendAsync(sharedUpload.Reservation, previewEncryption!.WithChunkCount(1), part,
+                        async reference =>
+                        {
+                            transferState!.ThumbnailRef = new AttachmentReference { MessageId = reference.MessageId, AttachmentId = reference.AttachmentId };
+                            transferState.ThumbnailMessageId = reference.MessageId;
+                            await _transferManager.SaveAsync(transferState, CancellationToken.None);
+                        }, cancellationToken, adaptiveUploadGate, onRateLimitWait, transferActivity == null ? null : transferActivity.SetActive);
+                    previewMessageId = reference.MessageId;
+                    ThumbnailCache.Store("file-" + sharedUpload.Reservation.FileId + "-" + sharedUpload.Reservation.VersionId + "-" +
+                        reference.MessageId + "-" + reference.AttachmentId, thumbnail.Bytes);
+                }
+                else previewMessageId = await uploader.UploadPreviewFileToThreadAsync(threadId,
                     previewEncryption == null ? PayloadReference("PREVIEW|" + StripExtension(name)) : PayloadMessage(previewEncryption, 1),
                     part, cancellationToken, onRateLimitWait: onRateLimitWait);
                 await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
@@ -3018,7 +3102,7 @@ public sealed partial class AppController : IAsyncDisposable
             {
                 VideoPreviewUploadResult result;
                 var encryption = previewEncryption == null ? null : previewEncryption with { Role = EncryptedPayloadRoles.Video480p };
-                var references = transferState?.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment;
+                var references = transferState?.PayloadLayoutVersion is TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage;
                 if (FfmpegMediaService.Available)
                 {
                     void Report(string status) => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
@@ -3042,7 +3126,7 @@ public sealed partial class AppController : IAsyncDisposable
                             throttle, percent is 0 or 100, useBatchUi, progressTracker: progressTracker),
                         maxParallelParts: settings.EffectiveUploadThreads, adaptiveUploadGate: adaptiveUploadGate,
                         onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
-                        onPreviewSize: onPreviewSize);
+                        onPreviewSize: onPreviewSize, sharedUpload: sharedUpload);
                     result = new VideoPreviewUploadResult(streamed.SizeBytes, streamed.Upload.ChunkMessageIds, streamed.Upload.ChunkReferences);
                 }
                 else
@@ -3054,7 +3138,7 @@ public sealed partial class AppController : IAsyncDisposable
                         cancellationToken);
                     result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
                         generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
-                        settings.EffectiveUploadThreads, progressTracker, encryption, references);
+                        settings.EffectiveUploadThreads, progressTracker, encryption, references, sharedUpload);
                 }
                 videoChunks = result.ChunkMessageIds;
                 videoReferences = result.ChunkReferences;
@@ -3083,7 +3167,7 @@ public sealed partial class AppController : IAsyncDisposable
         RamMediaPreview generated, ForumUploader uploader, UiThrottle throttle,
         Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken, bool useBatchUi,
         int maxParallelParts, UploadProgressTracker? progressTracker, EncryptedPayloadContext? videoEncryption,
-        bool useAttachmentReferences = false)
+        bool useAttachmentReferences = false, SharedUploadContext? sharedUpload = null)
     {
         using var prepared = await Mp4FastStart.PrepareAsync(generated, cancellationToken);
         var chunkBytes = videoEncryption == null ? DiscordLimits.AttachmentBytes : EncryptionService.MaximumPlaintextPayloadBytes;
@@ -3102,7 +3186,8 @@ public sealed partial class AppController : IAsyncDisposable
         var result = await uploader.UploadResumableGeneratedAsync(VideoPreviewFileName(originalName), totalParts,
             index => context != null
                 ? memory.PreparePartAsync(_encryption, prepared.File, generated.Length, chunkBytes,
-                    context.WithChunkIndex(index), cancellationToken, deferBuffers: useAttachmentReferences, openSource: prepared.OpenRead)
+                    context.WithChunkIndex(index), cancellationToken, deferBuffers: useAttachmentReferences, openSource: prepared.OpenRead,
+                    isolateSendCancellation: sharedUpload != null)
                 : UploadMemoryCoordinator.PreparePlainPartAsync(prepared.File, generated.Length, chunkBytes, index, cancellationToken, prepared.OpenRead),
             threadId, "", new Dictionary<int, string>(), _ => Report(),
             cancellationToken: cancellationToken, onRateLimitWait: onRateLimitWait,
@@ -3111,7 +3196,7 @@ public sealed partial class AppController : IAsyncDisposable
             batchPreparationGate: memory.BatchPreparationGate,
             streamPreparedParts: context != null && useAttachmentReferences,
             onPartTransferProgress: (index, wire) => { bytes.Report(index, wire); Report(); },
-            legacyPreviewKind: context == null ? "video-480" : null);
+            legacyPreviewKind: context == null ? "video-480" : null, sharedUpload: sharedUpload);
         return new VideoPreviewUploadResult(generated.Length, result.ChunkMessageIds, result.ChunkReferences);
     }
 
@@ -3148,8 +3233,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
-                var entry = selectedVersion ?? LoadedEntriesForLookup()
-                    .FirstOrDefault(app => app.ThreadId == threadId);
+                var entry = selectedVersion ?? FindLoadedEntry(threadId);
                 if (entry != null && selectedVersion == null)
                 {
                     entry = await Registry().LoadFileDetailsAsync(entry, cancellationToken);
@@ -3647,10 +3731,16 @@ public sealed partial class AppController : IAsyncDisposable
         bool synchronizeSerials = true)
     {
         var isFolder = entry.Type == "folder" || entry.ThreadId.StartsWith("folder_", StringComparison.Ordinal);
-        if (!isFolder && !string.IsNullOrWhiteSpace(entry.ThreadId))
+        if (!isFolder)
         {
-            await Downloader().DeleteThreadAsync(entry.ThreadId);
-            ThumbnailCache.Remove(entry.ThreadId);
+            entry = await registry.LoadFileDetailsAsync(entry, forceRefresh: true);
+            var cleanup = await registry.SharedStorage.BeginCleanupAsync(entry, CancellationToken.None);
+            await registry.DeleteEntryAsync(entry, synchronizeSerials: synchronizeSerials);
+            if (!await registry.SharedStorage.CompleteCleanupAsync(cleanup, CancellationToken.None))
+                await _bridge.CallAsync("_onStatus", "Arquivo removido. A limpeza segura dos payloads ficou pendente.", false);
+            ThumbnailCache.Remove(entry.ThumbnailCacheKey);
+            _videoProgress.Delete(entry.FileId);
+            return;
         }
 
         await registry.DeleteEntryAsync(entry, synchronizeSerials: synchronizeSerials);
@@ -3820,76 +3910,16 @@ public sealed partial class AppController : IAsyncDisposable
             var existing = all.FirstOrDefault(app => app.MetadataMessageId == metadataMessageId && app.Type == "file");
             if (existing != null) existing = await registry.LoadFileDetailsAsync(existing, forceRefresh: true);
             var replacement = existing == null ? null : FileVersioning.PrepareReplacement(existing);
-            var encryption = _encryption.CreateFileEncryption(settings.EncryptionMode);
-            var fileId = existing?.FileId ?? Guid.NewGuid().ToString("N");
-            var parts = await ArchiveSplitter.SplitAsync(
-                file,
-                cancellationToken: default,
-                maxPartBytes: EncryptionService.MaximumPlaintextPayloadBytes);
-            try
-            {
-                using var memory = new UploadMemoryCoordinator(settings.EffectiveUploadThreads);
-                var encryptedPayload = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.Original, 0, parts.Count);
-                var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
-                var uploadThread = existing?.ThreadId ??
-                    (!string.IsNullOrWhiteSpace(threadId) && !threadId.StartsWith("folder_", StringComparison.Ordinal) ? threadId : "");
-                ForumUploadResult uploadResult;
-                try
-                {
-                    uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
-                        index => memory.PreparePartAsync(_encryption, file, file.Length,
-                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
-                        uploadThread, "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
-                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
-                }
-                catch (DiscordApiException ex) when (!string.IsNullOrEmpty(uploadThread) && (int)ex.StatusCode is 403 or 404)
-                {
-                    // Preserve the editor's existing recovery path, without deleting previous content.
-                    uploadResult = await uploader.UploadResumableGeneratedAsync(safeName, parts.Count,
-                        index => memory.PreparePartAsync(_encryption, file, file.Length,
-                            EncryptionService.MaximumPlaintextPayloadBytes, encryptedPayload.WithChunkIndex(index), default, deferBuffers: true),
-                        "", "", new Dictionary<int, string>(), encryptedPayload: encryptedPayload,
-                        useAttachmentReferences: true, batchPreparationGate: memory.BatchPreparationGate, streamPreparedParts: true);
-                }
-                var newThreadId = uploadResult.ThreadId;
-                var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
-                var updated = AppEntry.File(safeName, newThreadId, now, file.Length, path);
-                updated.VersionId = Guid.NewGuid().ToString("N");
-                updated.VersionUploadedAt = now;
-                updated.ModifiedAt = now;
-                updated.FileId = fileId;
-                updated.Encryption = encryption;
-                updated.BatchId = uploadResult.BatchId;
-                updated.ChunkCount = uploadResult.ChunkCount;
-                updated.ChunkMessageIds = uploadResult.ChunkMessageIds.ToList();
-                updated.ChunkReferences = uploadResult.ChunkReferences?.ToList();
-                updated.ParentFolderId = FolderIdForPath(all, path) ?? AppRegistry.RootFolderId;
-                if (replacement != null)
-                {
-                    updated = await PublishFileVersionAsync(registry, replacement, updated);
-                }
-                else
-                {
-                    await registry.AddEntryAsync(updated);
-                }
-                ReplaceLocalEntry(all, updated);
-
-                await PublishLocalRegistryAsync(registry, all);
-                try
-                {
-                    await uploader.ArchiveThreadAsync(newThreadId);
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Error("MarkdownArchiveThread", ex, newThreadId);
-                }
-
-                await _bridge.CallAsync("_onMarkdownSaved", tabId, updated);
-            }
-            finally
-            {
-                ArchiveSplitter.CleanupParts(parts, file);
-            }
+            var uploader = new ForumUploader(RequireApi(), settings.AppsForumId,
+                Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
+            var operation = NewId();
+            await OpsAddAsync(operation, "upload", safeName);
+            var updated = await UploadSingleAsync(operation, 0, 1, file, path, all, uploader, registry,
+                settings, new UiThrottle(), CancellationToken.None, replacement: replacement);
+            ReplaceLocalEntry(all, updated);
+            await PublishLocalRegistryAsync(registry, all);
+            await OpsUpdateAsync(operation, "done", "Concluído");
+            await _bridge.CallAsync("_onMarkdownSaved", tabId, updated);
         }
         catch (Exception ex)
         {
@@ -4080,7 +4110,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             var all = CurrentLocalEntries();
-            var image = all.FirstOrDefault(app => app.ThreadId == threadId);
+            var image = FindLoadedEntry(threadId);
             if (image?.Encryption != null)
             {
                 await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = "organessonium-drive-image://" + threadId, name = image.Name });
@@ -4136,8 +4166,8 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageThreadId)
     {
-        var image = LoadedEntriesForLookup()
-            .FirstOrDefault(app => app.ThreadId == imageThreadId && app.Encryption != null);
+        var image = FindLoadedEntry(imageThreadId);
+        if (image?.Encryption == null) throw new InvalidDataException("Imagem criptografada não encontrada.");
         if (image == null)
         {
             throw new InvalidOperationException("Não foi possível localizar a imagem criptografada.");
@@ -4377,7 +4407,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private ForumDownloader Downloader()
     {
-        return new ForumDownloader(RequireApi(), _store.Load(), _encryption);
+        return new ForumDownloader(RequireApi(), _store.Load(), _encryption, storageReads: new StorageReadContext(Registry().SharedStorage));
     }
 
     private DiscordApiClient RequireApi()
@@ -4690,7 +4720,7 @@ public sealed partial class AppController : IAsyncDisposable
                 {
                     var entry = all.FirstOrDefault(app =>
                         (!string.IsNullOrWhiteSpace(state.FileId) && app.FileId == state.FileId) ||
-                        (!string.IsNullOrWhiteSpace(state.ThreadId) && app.ThreadId == state.ThreadId));
+                        (state.Storage?.Shared != true && !string.IsNullOrWhiteSpace(state.ThreadId) && app.ThreadId == state.ThreadId));
                     if (entry == null)
                     {
                         throw new InvalidOperationException("Arquivo não encontrado na listagem atual para retomar download.");
@@ -4779,6 +4809,7 @@ public sealed partial class AppController : IAsyncDisposable
             var threads = await RequireApi().GetForumThreadsAsync(settings.AppsForumId);
             var indexed = _store.LoadCachedFileThreadIds();
             var orphanThreadIds = threads
+                .Where(thread => !thread.Name.StartsWith("storage-", StringComparison.Ordinal) && !RequireApi().IsSharedThread(thread.Id))
                 .Select(thread => thread.Id)
                 .Where(id => !string.IsNullOrWhiteSpace(id) && !indexed.Contains(id))
                 .ToHashSet(StringComparer.Ordinal);
@@ -5119,7 +5150,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         try
         {
-            return CurrentLocalEntries().FirstOrDefault(a => a.ThreadId == threadId)?.SizeBytes ?? -1;
+            return FindLoadedEntry(threadId)?.SizeBytes ?? -1;
         }
         catch
         {
@@ -6948,7 +6979,10 @@ private static string ClassifyConnectError(Exception ex)
         [property: JsonPropertyName("method")] string Method,
         [property: JsonPropertyName("args")] JsonElement[] Args);
     private sealed record ResolvedDiscordChannels(string NamesChannelId, string FoldersForumId, string AppsForumId, string SerialChannelId);
-    private sealed record UploadTask(FileInfo File, string Path, FileReplacement? Replacement = null);
+    private sealed record UploadTask(FileInfo File, string Path, FileReplacement? Replacement = null)
+    {
+        internal TransferState? PreparedTransfer { get; init; }
+    }
     private sealed record UploadConflictResponse(string Action, bool ApplyToAll);
     private sealed record UploadConflictResolution(List<UploadTask> Tasks);
     private sealed record PreviewUploadIds(

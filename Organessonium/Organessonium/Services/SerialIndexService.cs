@@ -610,6 +610,8 @@ public sealed class SerialIndexService
                 // A newer payload in the same thread must not reuse the previous chunk list/key context.
                 entry.ChunkMessageIds = [];
                 entry.ChunkReferences = null;
+                entry.ThumbnailRef = null;
+                entry.Storage = null;
                 entry.VideoPreviewChunkMessageIds = [];
                 entry.VideoPreviewChunkReferences = null;
                 entry.VideoPreviewMessageId = "";
@@ -760,6 +762,8 @@ public sealed class SerialIndexService
             SizeBytes = source.SizeBytes,
             MetadataMessageId = source.MetadataMessageId,
             FileId = source.FileId,
+            Storage = source.Storage,
+            ThumbnailRef = source.ThumbnailRef,
             FolderId = source.FolderId,
             ParentFolderId = source.ParentFolderId,
             Path = source.Path,

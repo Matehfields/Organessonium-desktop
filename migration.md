@@ -695,6 +695,108 @@ Impacto/procedimento: remover fallback sem essa decisão impede gerar mídia em 
 - O cache SQLite local continua operacional e pode conter plaintext. Seriais novos usam transporte cifrado; as colunas aditivas para chunkRefs não cifram o restante do banco. CACHE-LEGACY-002 registra essa evolução sem apagar dados.
 - Não existe downgrade de envelope declarado: version futura, Base64 inválido, chave/tag incorretas ou JSON interno inválido não seguem METADATA-LEGACY-001.
 
+### STORAGE-V2-LEGACY-001
+
+Status: ativo
+
+Descrição: metadata sem `storage` continua representando dedicado antigo. `chunks` unitário e `chunkRefs` dedicado anterior permanecem legíveis. Mais de um attachment não identifica shared por inferência.
+
+Introduzido por: Shared Storage V2.
+
+Motivo: conservar arquivos de desenvolvimento, sem migrar posts/conteúdos ao ler.
+
+Código relacionado: `StorageLayout`, `MetadataService`, `ForumDownloader`, `SharedStorageManager.Cleanup`, `DiscordApiClient.Payload`.
+
+Comportamento atual: novos conteúdos elegíveis usam marcador V2; snapshots antigos mantêm formato/threads. Dedicado maior que 1 GiB é comportamento permanente, não fallback removível.
+
+Pode ser removido quando: nenhum metadata sem marcador precisar ser lido e migração/descarte tiver autorização.
+
+Impacto: arquivos sem marcador deixam de ser localizados como dedicado.
+
+Procedimento: inventariar e migrar explicitamente os objetos sem storage; remover apenas a inferência de ausência, manter modo dedicated; atualizar decoder/testes/implementation2.md.
+
+### STORAGE-V2-THUMB-001
+
+Status: ativo
+
+Descrição: leitura de `preview.thumbnailMessageId`/`AppEntry.previewMessageId` dos thumbnails unitários antigos. Shared novo exige `thumbnailRef: { messageId, attachmentId }`.
+
+Introduzido por: coexistência de thumbnails anteriores com Shared Storage V2.
+
+Código relacionado: `PreviewMetadata`, `MetadataService.CreatePreviewMetadata`/`ToAppEntry`, `AppController.LoadVisibleThumbnailsAsync`, `ForumDownloader.DownloadMessageAttachmentBytesAsync`.
+
+Comportamento atual: escrever referência exata em shared; conservar formato antigo nos checkpoints/snapshots dedicados. Mais de um attachment sem ID explícito retorna erro, nunca escolhe o primeiro.
+
+Pode ser removido quando: todos os thumbnails antigos tiverem referência exata validada ou os dados forem descartados deliberadamente.
+
+Impacto: previews antigos só com messageId deixam de aparecer.
+
+Procedimento: resolver e validar attachmentIds dos antigos, atualizar metadados por operação confirmada, remover branches unitários de thumbnail; preservar decoder ORGAESGC e role preview.
+
+### STORAGE-V2-RESUME-001
+
+Status: ativo
+
+Descrição: checkpoints unitários layout 1 e multi-attachment dedicado layout 2, incluindo default 1 quando a propriedade está ausente. Shared novo usa layout 3 com storage/reserva explícitos.
+
+Código relacionado: `TransferState.Normalize`, `TransferManager`, `ForumUploader.UploadResumableGeneratedAsync`, `AppController.SharedStorage`, `CloudSyncRepository.UploadAsync`.
+
+Comportamento atual: não promover upload antigo para shared pelo tamanho. `sharedAllocationPending` só é gravado no planejamento novo; reserva pendente pode ser retomada com fileId/transferId originais. Chunks/salts confirmados não são alterados.
+
+Pode ser removido quando: não houver transferência antiga pendente a preservar.
+
+Impacto: uploads unitários/dedicados em andamento não retomam.
+
+Procedimento: concluir/cancelar pendências com autorização, remover somente leitores de checkpoint antigos, manter upload dedicado atual e testes de leitura de arquivos antigos enquanto necessários.
+
+### STORAGE-V2-CACHE-001
+
+Status: ativo
+
+Descrição: bancos anteriores sem `storage_json`/`thumbnail_ref_json` recebem colunas TEXT nullable aditivas. OSER v3 continua uma visão sem storage/refs completos e precisa de hidratação do metadata.
+
+Código relacionado: `SettingsStore.EnsureColumn`/`ReadCachedEntry`, `SerialIndexService.MaterializeEntries`/`CopyEntry`, `AppRegistry.LoadFileDetailsAsync`, `AppEntry.RequestId`/`ThumbnailCacheKey`.
+
+Comportamento atual: ausência de colunas/detalhes não apaga cache válido; novos detalhes preservam layout/IDs. Ponte WebView2 aceita threadId legado somente quando não é ambíguo; novos DTOs fornecem requestId por arquivo. Thumbnails shared usam identidade incluindo attachmentId.
+
+Pode ser removido quando: bancos/cache antigos puderem ser descartados ou migrados explicitamente e nenhuma ponte antiga precisar ser aceita.
+
+Impacto: cache antigo pode requerer reconstrução. Hidratação de OSER é permanente, não remover como se fosse migração temporária.
+
+Procedimento: coordenar versão mínima, migrar bancos, remover branches de colunas/IDs antigos mantendo a PK por mensagem e o contrato OSER publicado.
+
+### STORAGE-V2-VERSION-001
+
+Status: ativo
+
+Descrição: versões antigas sem versionId/storage conservam os fallbacks de `FILE-VERSION-LEGACY-001`; snapshots podem ter layouts e threads diferentes do conteúdo atual.
+
+Código relacionado: `FileVersioning.PrepareReplacement`/`PreservePrevious`, `AppController.Files.PublishFileVersionAsync`, `MetadataService.Validate`, `SharedStorageManager.Payloads`.
+
+Comportamento atual: ID opaco legado só é materializado ao modificar o arquivo; leitura não regrava conta. Nova versão pode cruzar 1 GiB ou mudar de owner/pool, sem mover histórico. GC considera todos os snapshots.
+
+Pode ser removido quando: não restarem snapshots sem identidade explícita.
+
+Impacto: histórico antigo pode ficar inacessível; comparar somente threadId voltaria a confundir versões/arquivos.
+
+Procedimento: migrar identidade dos snapshots autorizados, retirar somente geração de legacy-id, conservar suporte permanente a snapshots entre layouts/threads e contexto criptográfico de cada versão.
+
+### STORAGE-V2-DELETE-001
+
+Status: ativo
+
+Descrição: exclusão por thread inteira continua somente para dedicado/legado sem referências restantes. Shared usa intent/GC/PATCH seletivo. Metadata antigo pode estar diretamente em names, em vez do índice do pai.
+
+Código relacionado: `AppController.DeleteStoredEntryAsync`, `AppRegistry.DeleteEntryAsync`, `SharedStorageManager.LocateMetadataAsync`/`ReadRemoteReferencesAsync`/`CleanAsync`, `DiscordApiClient.DeleteChannelAsync`.
+
+Comportamento atual: encontrar o canal real do metadata e guardar locator antes de removê-lo; conferir índices remotos, inclusive versões/trash/sync antigos sem ledger. Nunca tratar marcador shared/catálogo ilegível como permissão para DELETE de thread. Leituras/claims externos inconclusivos deixam limpeza pendente.
+
+Pode ser removido quando: não houver metadata dedicado legado/standalone sem catálogo/reference a preservar.
+
+Impacto: exclusão dos objetos antigos passa a exigir migração explícita. Remover proteção de threads compartilhadas causaria perda de outros arquivos.
+
+Procedimento: migrar locators/referências autorizados, remover somente a exclusão legada por thread e lookup antigo em names quando desnecessários, mantendo GC/leases/fences/validação V2.
+
 ## Verificações antes de uma versão definitiva
 
 1. Inventariar objetos/remessas/checkpoints da conta sem imprimir dados privados em logs.

@@ -44,11 +44,11 @@ public sealed partial class AppController
             authoritative.LogicalChunkCount != previous.LogicalChunkCount)
             throw new IOException("O arquivo recebeu outra versão durante o envio. As versões existentes foram preservadas.");
         FileVersioning.PreservePrevious(authoritative, next, next.VersionUploadedAt);
-        await registry.UpdateEntryAsync(next, token, onWait);
-        ClosePreview(next.ThreadId);
-        ThumbnailCache.Remove(next.ThreadId);
-        _store.RemoveFilePreviewCache(next.ThreadId);
-        await _bridge.CallAsync("_onFileVersionPublished", next.ThreadId);
+        await registry.UpdateEntryAsync(next, token, onWait, MetadataService.CreateFileMetadata(authoritative));
+        ClosePreview(next.RequestId);
+        ThumbnailCache.Remove(authoritative.ThumbnailCacheKey);
+        _store.RemoveFilePreviewCache(next.RequestId);
+        await _bridge.CallAsync("_onFileVersionPublished", next.RequestId);
         return next;
     }
 

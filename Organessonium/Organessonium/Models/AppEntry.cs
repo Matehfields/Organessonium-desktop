@@ -4,6 +4,23 @@ namespace Organessonium.Models;
 
 public sealed class AppEntry
 {
+    [JsonPropertyName("storage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StorageLayout? Storage { get; set; }
+
+    [JsonPropertyName("thumbnailRef")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AttachmentReference? ThumbnailRef { get; set; }
+
+    [JsonPropertyName("requestId")]
+    public string RequestId => Type == "folder" ? ThreadId :
+        !string.IsNullOrEmpty(MetadataMessageId) ? MetadataMessageId : !string.IsNullOrEmpty(FileId) ? FileId : ThreadId;
+
+    [JsonIgnore]
+    public string PayloadCacheKey => Storage?.Shared == true ? "file-" + FileId + "-" + VersionId : ThreadId;
+    [JsonIgnore]
+    public string ThumbnailCacheKey => Storage?.Shared == true && ThumbnailRef != null
+        ? PayloadCacheKey + "-" + ThumbnailRef.MessageId + "-" + ThumbnailRef.AttachmentId : PayloadCacheKey;
     [JsonPropertyName("modifiedAt")]
     public string ModifiedAt { get; set; } = "";
 
@@ -134,6 +151,8 @@ public sealed class AppEntry
 
     public void Normalize()
     {
+        Storage?.Validate();
+        ThumbnailRef?.Validate();
         Path = PathRules.Normalize(Path);
         Type = string.IsNullOrWhiteSpace(Type) ? "file" : Type;
         MetadataMessageId ??= "";

@@ -49,7 +49,7 @@ window._onFileInformationError = (id, message) => {
 };
 window._onFileVersionPublished = threadId => {
     if (window._thumbs) delete window._thumbs[threadId];
-    allApps.concat(specialItems, deviceItems).filter(app => app.threadId === threadId).forEach(app => { app.versions = []; });
+    allApps.concat(specialItems, deviceItems).filter(app => fileRequestId(app) === threadId).forEach(app => { app.versions = []; });
 };
 
 function ensureFileDetailsDialog() {

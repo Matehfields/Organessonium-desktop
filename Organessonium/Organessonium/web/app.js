@@ -880,10 +880,15 @@ function showDevicesWorkspace(force = false) {
 window.onBridgeReady = () => { loadSettings(); setStatus(t('loading'), true); window.bridge.loadApps(); };
 
 function appIdentityKey(app) {
+    if (app && app.type !== 'folder' && app.fileId) return 'file:' + app.fileId;
     if (app && app.threadId) return 'thread:' + app.threadId;
     if (app && app.fileId) return 'file:' + app.fileId;
     if (app && app.folderId) return 'folder:' + app.folderId;
     return 'metadata:' + ((app && app.metadataMessageId) || '');
+}
+
+function fileRequestId(app) {
+    return app?.requestId || app?.threadId || app?.metadataMessageId || app?.fileId || '';
 }
 
 let registryValidationUsesCache = false;
@@ -1067,7 +1072,7 @@ function syncOpenMarkdownApps() {
     markdownTabs.forEach(entry => {
         if (!entry || !entry.app) return;
         const fresh = allApps.find(app =>
-            (entry.app.threadId && app.threadId === entry.app.threadId) ||
+            (fileRequestId(entry.app) && fileRequestId(app) === fileRequestId(entry.app)) ||
             (entry.app.metadataMessageId && app.metadataMessageId === entry.app.metadataMessageId));
         if (!fresh) return;
         entry.app = Object.assign(entry.app, fresh);
@@ -1284,11 +1289,11 @@ window._onPreviewReady = (type, name, data) => {
         else player.dispatchEvent(new Event('error'));
         $('preview-open-external')?.addEventListener('click', e => {
             e.stopPropagation();
-            if (previewAppRef) window.bridge.openPreviewMedia(previewAppRef.threadId);
+            if (previewAppRef) window.bridge.openPreviewMedia(fileRequestId(previewAppRef));
         });
         $('preview-media-download')?.addEventListener('click', e => {
             e.stopPropagation();
-            if (previewAppRef) window.bridge.startDownload(previewAppRef.threadId, previewAppRef.name);
+            if (previewAppRef) window.bridge.startDownload(fileRequestId(previewAppRef), previewAppRef.name);
         });
         const qualityButton = $('preview-video-quality-button');
         const qualityOptions = $('preview-video-quality-options');
@@ -1296,7 +1301,7 @@ window._onPreviewReady = (type, name, data) => {
             if (!previewAppRef || !value) return;
             if (value === (player.dataset.quality || currentQuality)) return;
             pendingVideoQualitySwitch = {
-                threadId:previewAppRef.threadId,
+                threadId:fileRequestId(previewAppRef),
                 time:Number.isFinite(player.currentTime) ? player.currentTime : 0,
                 playing:!player.paused,
                 previousQuality:player.dataset.quality || currentQuality
@@ -1306,7 +1311,7 @@ window._onPreviewReady = (type, name, data) => {
             qualityProgress.classList.remove('hidden');
             qualityProgress.querySelector('span').style.width = '0%';
             qualityProgress.querySelector('small').textContent = t('previewDownloading');
-            window.bridge.requestVideoQuality(previewAppRef.threadId, previewAppRef.name, value);
+            window.bridge.requestVideoQuality(fileRequestId(previewAppRef), previewAppRef.name, value);
         };
         qualityButton?.addEventListener('click', e => {
             e.stopPropagation();
@@ -1323,8 +1328,8 @@ window._onPreviewReady = (type, name, data) => {
         const pdf = document.createElement('div');
         pdf.className = 'preview-pdf-doc';
         const meta = safeParseJson(data, {});
-        const threadId = meta.threadId || (previewAppRef ? previewAppRef.threadId : '');
-        if (!previewAppRef || (threadId && previewAppRef.threadId !== threadId)) return;
+        const threadId = meta.threadId || fileRequestId(previewAppRef);
+        if (!previewAppRef || (threadId && fileRequestId(previewAppRef) !== threadId)) return;
         if (meta.directUrl) {
             renderPdfJsPreview(pdf, meta, name, threadId);
             body.appendChild(pdf);
@@ -1373,7 +1378,7 @@ window._onPreviewError = msg => {
 };
 
 window._onVideoQualityReady = (threadId, quality, src, mime) => {
-    if (!previewAppRef || previewAppRef.threadId !== threadId) return;
+    if (!previewAppRef || fileRequestId(previewAppRef) !== threadId) return;
     const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
     const player = shell && shell.querySelector('video');
     if (!player || !src) return;
@@ -1397,7 +1402,7 @@ window._onVideoQualityReady = (threadId, quality, src, mime) => {
 };
 
 window._onVideoQualityError = (threadId, message) => {
-    if (!previewAppRef || previewAppRef.threadId !== threadId) return;
+    if (!previewAppRef || fileRequestId(previewAppRef) !== threadId) return;
     const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
     if (!shell) return;
     shell.querySelector('.preview-media-quality-progress')?.classList.add('hidden');
@@ -1442,7 +1447,7 @@ function reportVideoPlayback(player, force = false, seeking = false) {
 
 function bindVideoPlayback(player, info) {
     player.dataset.fileId = info.fileId || previewAppRef?.fileId || '';
-    player.dataset.threadId = previewAppRef?.threadId || '';
+    player.dataset.threadId = fileRequestId(previewAppRef);
     let lastReport = 0;
     player.addEventListener('loadedmetadata', () => {
         const savedDuration = Number(info.savedDuration) || 0;
@@ -1478,7 +1483,7 @@ function stopVideoPlayback() {
 }
 
 window._onVideoStreamError = (threadId, message) => {
-    if (previewAppRef?.threadId !== threadId) return;
+    if (fileRequestId(previewAppRef) !== threadId) return;
     const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
     if (!shell) return;
     shell.querySelector('video')?.pause();
@@ -1644,7 +1649,7 @@ window._onPreviewNotSupported = () => {
     body.innerHTML = `<div class="preview-unsupported">${icon('insert_drive_file',64,'#333')}<p>${esc(t('previewUnavailable'))}</p><small>${esc(t('unsupportedType'))}</small><div class="preview-media-actions"><button class="btn-secondary" id="preview-unsupported-download">${icon('download',17)}<span>${esc(t('download'))}</span></button></div></div>`;
     $('preview-unsupported-download')?.addEventListener('click', e => {
         e.stopPropagation();
-        if (previewAppRef) window.bridge.startDownload(previewAppRef.threadId, previewAppRef.name);
+        if (previewAppRef) window.bridge.startDownload(fileRequestId(previewAppRef), previewAppRef.name);
     });
 };
 
@@ -2825,7 +2830,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('ctx-copy').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) window.bridge.copyFile(app.metadataMessageId); });
     $('ctx-info').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) openFileDetails(app, false); });
     $('ctx-versions').addEventListener('click', () => { const app = ctxTarget; hideCtx(); if (app) openFileDetails(app, true); });
-    $('ctx-download').addEventListener('click', () => { if (ctxTarget) window.bridge.startDownload(ctxTarget.threadId, ctxTarget.name); hideCtx(); });
+    $('ctx-download').addEventListener('click', () => { if (ctxTarget) window.bridge.startDownload(fileRequestId(ctxTarget), ctxTarget.name); hideCtx(); });
     $('ctx-rename').addEventListener('click', () => { const app = ctxTarget; hideCtx(); openRenameModal(app); });
     $('ctx-favorite').addEventListener('click', () => {
         const app = ctxTarget;
@@ -2865,7 +2870,7 @@ document.addEventListener('DOMContentLoaded', () => {
     $('preview-close').addEventListener('click', closePreview);
     $('preview-prev').addEventListener('click',  previewPrev);
     $('preview-next').addEventListener('click',  previewNext);
-    $('preview-dl').addEventListener('click', () => { if (previewAppRef) window.bridge.startDownload(previewAppRef.threadId, previewAppRef.name); });
+    $('preview-dl').addEventListener('click', () => { if (previewAppRef) window.bridge.startDownload(fileRequestId(previewAppRef), previewAppRef.name); });
     $('preview-body').addEventListener('click', closePreviewFromBackdrop);
 
     // Zoom buttons
@@ -3527,7 +3532,7 @@ function openMarkdownEditor(app) {
     closePreview();
     setupWorkspaceTabs();
     showWorkspaceTabs();
-    const id = 'md-' + app.threadId.replace(/[^a-zA-Z0-9_-]/g, '');
+    const id = 'md-' + fileRequestId(app).replace(/[^a-zA-Z0-9_-]/g, '');
     if (markdownTabs.has(id)) {
         activateWorkspaceTab(id);
         return;
@@ -3560,7 +3565,7 @@ function openMarkdownEditor(app) {
     pendingMarkdownEditorApp = { app, id };
     activateWorkspaceTab(id);
     setStatus(t('loading'), true);
-    window.bridge.requestPreview(app.threadId, app.name);
+    window.bridge.requestPreview(fileRequestId(app), app.name);
 }
 
 function finishMarkdownEditor(name, markdown) {
@@ -4381,7 +4386,7 @@ function pasteIntoMarkdownEditor(e, entry) {
     pendingPastedMarkdownImages.set(entry.id, { entry, selection, alt });
     setStatus(t('editorPasteImage'), true);
     reader.onload = () => {
-        window.bridge.uploadMarkdownImageData(entry.id, entry.app.threadId || '', file.name || 'clipboard.png', String(reader.result || ''));
+        window.bridge.uploadMarkdownImageData(entry.id, fileRequestId(entry.app), file.name || 'clipboard.png', String(reader.result || ''));
     };
     reader.onerror = () => {
         pendingPastedMarkdownImages.delete(entry.id);
@@ -4403,7 +4408,7 @@ function prepareEditorMedia(entry) {
         img.dataset.organessoniumImage = original;
         img.dataset.organessoniumLoading = 'true';
         if (isEncryptedAttachment && window.bridge?.resolveEncryptedMarkdownImage) {
-            window.bridge.resolveEncryptedMarkdownImage(entry.id, entry.app.threadId || '', original);
+            window.bridge.resolveEncryptedMarkdownImage(entry.id, fileRequestId(entry.app), original);
         } else if (isEncryptedDriveImage && window.bridge?.resolveEncryptedDriveMarkdownImage) {
             window.bridge.resolveEncryptedDriveMarkdownImage(entry.id, original.slice('organessonium-drive-image://'.length));
         }
@@ -4503,19 +4508,19 @@ function saveMarkdownNow(entry) {
     entry.queued = false;
     entry.pendingMarkdown = markdown;
     updateMarkdownSaveState(entry, 'saving');
-    window.bridge.saveMarkdown(entry.id, entry.app.threadId, entry.app.metadataMessageId || '', entry.app.name, entry.app.path || '/', markdown);
+    window.bridge.saveMarkdown(entry.id, fileRequestId(entry.app), entry.app.metadataMessageId || '', entry.app.name, entry.app.path || '/', markdown);
 }
 
 function finishMarkdownAutoSave(id, payload) {
     const entry = markdownTabs.get(id);
     if (!entry) return;
-    const oldThreadId = entry.app.threadId;
+    const oldThreadId = fileRequestId(entry.app);
     const oldMetadataMessageId = entry.app.metadataMessageId;
     entry.saving = false;
     entry.lastSavedMarkdown = entry.pendingMarkdown ?? getEditorMarkdown(entry);
     entry.pendingMarkdown = null;
     entry.app = Object.assign(entry.app, payload);
-    const idx = allApps.findIndex(a => (oldMetadataMessageId && a.metadataMessageId === oldMetadataMessageId) || (oldThreadId && a.threadId === oldThreadId));
+    const idx = allApps.findIndex(a => (oldMetadataMessageId && a.metadataMessageId === oldMetadataMessageId) || (oldThreadId && fileRequestId(a) === oldThreadId));
     if (idx >= 0) allApps[idx] = Object.assign(allApps[idx], payload);
     else allApps.push(Object.assign({}, payload));
     filesNeedRefresh = true;
@@ -5076,13 +5081,13 @@ function canPreview(name) { return !!name; }
 function loadPreviewApp(app, showLoading) {
     stopVideoPlayback();
     const previous = previewAppRef;
-    if (previous && previous.threadId !== app.threadId) window.bridge.closePreview(previous.threadId);
+    if (previous && fileRequestId(previous) !== fileRequestId(app)) window.bridge.closePreview(fileRequestId(previous));
     previewAppRef = app;
     $('preview-filename').textContent = app.name;
     $('preview-filesize').textContent = fmtSize(app.sizeBytes);
     updatePreviewNav();
     if (showLoading) window._onPreviewLoading();
-    window.bridge.requestPreview(app.threadId, app.name);
+    window.bridge.requestPreview(fileRequestId(app), app.name);
 }
 
 function openPreview(app) {
@@ -5091,7 +5096,7 @@ function openPreview(app) {
     previewFiles  = sorted(activeLibraryView === 'favorites'
         ? specialItems.filter(item => item.type !== 'folder')
         : filesAt(appsForActiveView(), currentPath)).filter(a => canPreview(a.name));
-    previewIndex  = previewFiles.findIndex(a => a.threadId === app.threadId);
+    previewIndex  = previewFiles.findIndex(a => fileRequestId(a) === fileRequestId(app));
     if (previewIndex < 0) previewIndex = 0;
     previewOverlay.classList.remove('hidden');
     scheduleNativeTitleBarDragRegion(0);
@@ -5113,7 +5118,7 @@ function closePreview() {
     $('preview-body').innerHTML = `<div class="preview-load-state">
         <div class="preview-progress-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
     </div>`;
-    if (previewAppRef) { window.bridge.closePreview(previewAppRef.threadId); previewAppRef = null; }
+    if (previewAppRef) { window.bridge.closePreview(fileRequestId(previewAppRef)); previewAppRef = null; }
 }
 
 function previewPrev() {
@@ -5519,10 +5524,10 @@ function renderEditorImageDriveList() {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'editor-image-drive-item';
-        btn.dataset.threadId = app.threadId;
+        btn.dataset.threadId = fileRequestId(app);
         btn.innerHTML = icon('image', 18, TYPE_COLOR.image) + '<span><strong>' + esc(app.name || 'imagem') + '</strong><small>' + esc(app.path || '/') + ' · ' + esc(fmtSize(app.sizeBytes || 0)) + '</small></span>';
         btn.addEventListener('click', () => {
-            editorImageState.driveThreadId = app.threadId;
+            editorImageState.driveThreadId = fileRequestId(app);
             $('editor-image-alt').value = $('editor-image-alt').value || (app.name || '').replace(/\.[^.]+$/, '');
             list.querySelectorAll('.editor-image-drive-item').forEach(item => item.classList.remove('selected'));
             btn.classList.add('selected');
@@ -5551,7 +5556,7 @@ function confirmEditorImageDialog() {
 function chooseLocalMarkdownImage() {
     if (!editorImageState) return;
     $('editor-image-status').textContent = t('editorUploadingImage');
-    window.bridge.uploadMarkdownImage(editorImageState.entry.id, editorImageState.entry.app.threadId || '');
+    window.bridge.uploadMarkdownImage(editorImageState.entry.id, fileRequestId(editorImageState.entry.app));
 }
 
 function captureEditorInsertionState(entry, expandWord) {
@@ -6143,6 +6148,11 @@ function syncRenderedItems(container, items, kind, create) {
         let node = existing.get(key);
         existing.delete(key);
         if (!node || node.dataset.renderSignature !== signature) {
+            const previous = node ? safeParseJson(node.dataset.renderSignature, [])[2] : null;
+            const changedSalt = previous?.encryption?.salt && source?.encryption?.salt && previous.encryption.salt !== source.encryption.salt;
+            const changedThumbnail = previous?.thumbnailRef && source?.storage?.mode === 'shared' &&
+                JSON.stringify(previous.thumbnailRef) !== JSON.stringify(source.thumbnailRef);
+            if ((changedSalt || changedThumbnail) && window._thumbs) delete window._thumbs[fileRequestId(source)];
             const replacement = create(item);
             replacement.dataset.renderKey = key;
             replacement.dataset.renderSignature = signature;
@@ -6293,7 +6303,7 @@ function makeFileCard(app) {
     const isThumbable=type==='image' || type==='video';
 
     card.innerHTML=(isThumbable
-            ?`<div class="card-preview" data-thumb="${esc(app.threadId)}">${icon(fileIcon(type),48,clr)}</div>`
+            ?`<div class="card-preview" data-thumb="${esc(fileRequestId(app))}">${icon(fileIcon(type),48,clr)}</div>`
             :`<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`)
         +`<div class="card-footer">
             <span class="card-name" title="${esc(app.name)}">${esc(truncate(app.name,22))}</span>
@@ -6301,9 +6311,9 @@ function makeFileCard(app) {
         </div>`;
 
     // Aplica thumb já em cache
-    if (isThumbable && window._thumbs && window._thumbs[app.threadId]) {
+    if (isThumbable && window._thumbs && window._thumbs[fileRequestId(app)]) {
         const prev=card.querySelector('.card-preview');
-        applyThumbnailElement(prev, window._thumbs[app.threadId]);
+        applyThumbnailElement(prev, window._thumbs[fileRequestId(app)]);
     }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);
@@ -6436,14 +6446,14 @@ function makeDriveFileCard(app) {
         </div>
         <div class="card-media">
             ${isThumbable
-                ? `<div class="card-preview" data-thumb="${esc(app.threadId)}">${icon(fileIcon(type),48,clr)}</div>`
+                ? `<div class="card-preview" data-thumb="${esc(fileRequestId(app))}">${icon(fileIcon(type),48,clr)}</div>`
                 : `<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`}
             ${app.favorite ? `<span class="item-favorite card-favorite" title="${esc(t('removeFavorite'))}">${icon('star',18)}</span>` : ''}
         </div>`;
 
-    if (isThumbable && window._thumbs && window._thumbs[app.threadId]) {
+    if (isThumbable && window._thumbs && window._thumbs[fileRequestId(app)]) {
         const prev = card.querySelector('.card-preview');
-        applyThumbnailElement(prev, window._thumbs[app.threadId]);
+        applyThumbnailElement(prev, window._thumbs[fileRequestId(app)]);
     }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);
@@ -6571,7 +6581,7 @@ function makeFileRow(app) {
     const [dl,mv,del]=row.querySelectorAll('.btn-row-action');
     mv.classList.toggle('hidden', isTrashApp(app));
     del.title = t(isTrashApp(app) ? 'permanentDelete' : 'moveToTrash');
-    dl.addEventListener('click',  e=>{ e.stopPropagation(); window.bridge.startDownload(app.threadId,app.name); });
+    dl.addEventListener('click',  e=>{ e.stopPropagation(); window.bridge.startDownload(fileRequestId(app),app.name); });
     mv.addEventListener('click',  e=>{ e.stopPropagation(); openMoveModal(app); });
     del.addEventListener('click', e=>{ e.stopPropagation();
         requestDelete([app], isTrashApp(app));
@@ -6581,7 +6591,7 @@ function makeFileRow(app) {
 }
 
 // ─── Tipos e ícones ───────────────────────────────────────────────────────────
-function itemKey(app) { return app && (app.metadataMessageId || app.threadId || app.name); }
+function itemKey(app) { return app && (app.metadataMessageId || app.fileId || app.folderId || app.threadId || app.name); }
 function appsForActiveView() {
     if (activeLibraryView === 'favorites') return specialItems.filter(app => !isTrashApp(app));
     if (activeLibraryView === 'devices' && currentPath === '/@synchronized') return deviceItems;
@@ -6718,7 +6728,7 @@ function moveIdsToPath(ids, path) {
     clearSelection();
 }
 function downloadSelected() {
-    getSelectedApps().forEach(app => window.bridge.startDownload(app.threadId, app.name));
+    getSelectedApps().forEach(app => window.bridge.startDownload(fileRequestId(app), app.name));
     clearSelection();
 }
 function deleteSelected(permanently = false) {

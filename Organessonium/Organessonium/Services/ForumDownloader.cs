@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
@@ -38,7 +39,7 @@ public sealed class EncryptedPayloadIntegrityException : IOException
     public string EncryptionMode { get; }
 }
 
-public sealed class ForumDownloader
+public sealed partial class ForumDownloader
 {
     private const int DownloadBufferSize = 1024 * 1024;
     private const int MaxChunkDownloadAttempts = 8;
@@ -51,14 +52,17 @@ public sealed class ForumDownloader
     private readonly EncryptionService _encryption;
     private readonly Func<HttpClient> _downloadClientFactory;
     private readonly MetadataService _metadata;
+    private readonly StorageReadContext? _storageReads;
 
-    public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption, Func<HttpClient>? downloadClientFactory = null)
+    public ForumDownloader(DiscordApiClient discord, AppSettings settings, EncryptionService encryption, Func<HttpClient>? downloadClientFactory = null,
+        StorageReadContext? storageReads = null)
     {
         _discord = discord;
         _settings = settings;
         _encryption = encryption;
         _metadata = new MetadataService(MetadataCodec.ForEncryption(encryption));
         _downloadClientFactory = downloadClientFactory ?? (() => NetworkConfig.Current.CreateClient());
+        _storageReads = storageReads;
     }
 
     private DiscordMessageDto DecodeReference(DiscordMessageDto message)
@@ -77,7 +81,7 @@ public sealed class ForumDownloader
 
     private async Task<DiscordMessageDto> GetPayloadMessageAsync(string threadId, string messageId,
         CancellationToken cancellationToken, bool waitForTransientNetwork = false) =>
-        DecodeReference(await _discord.GetMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: waitForTransientNetwork));
+        DecodeReference(await _discord.ResolvePayloadMessageAsync(threadId, messageId, cancellationToken));
 
     public async Task<FileInfo> DownloadAndAssembleAsync(
         string threadId,
@@ -129,8 +133,8 @@ public sealed class ForumDownloader
         Action<string> onProgress,
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
-        => await Task.Run(() => DownloadEntryCoreAsync(entry, destDir, onProgress,
-            cancellationToken, onDetailedProgress), cancellationToken).ConfigureAwait(false);
+        => await DownloadWithReadLeaseAsync(entry, null, () => Task.Run(() => DownloadEntryCoreAsync(entry, destDir, onProgress,
+            cancellationToken, onDetailedProgress), cancellationToken), cancellationToken).ConfigureAwait(false);
 
     private async Task<FileInfo> DownloadEntryCoreAsync(AppEntry entry, DirectoryInfo destDir,
         Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
@@ -211,8 +215,8 @@ public sealed class ForumDownloader
         Action<string> onProgress,
         CancellationToken cancellationToken = default,
         Action<DownloadProgress>? onDetailedProgress = null)
-        => await Task.Run(() => DownloadResumableCoreAsync(entry, destDir, state, transferManager, onProgress,
-            cancellationToken, onDetailedProgress), cancellationToken).ConfigureAwait(false);
+        => await DownloadWithReadLeaseAsync(entry, state, () => Task.Run(() => DownloadResumableCoreAsync(entry, destDir, state, transferManager, onProgress,
+            cancellationToken, onDetailedProgress), cancellationToken), cancellationToken).ConfigureAwait(false);
 
     private async Task<FileInfo> DownloadResumableCoreAsync(
         AppEntry entry, DirectoryInfo destDir, TransferState state, TransferManager transferManager,
@@ -606,7 +610,8 @@ public sealed class ForumDownloader
         string messageId,
         Action<DownloadProgress>? onProgress = null,
         CancellationToken cancellationToken = default,
-        EncryptedPayloadContext? encryption = null)
+        EncryptedPayloadContext? encryption = null,
+        string? attachmentId = null)
     {
         if (string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(messageId))
         {
@@ -614,15 +619,31 @@ public sealed class ForumDownloader
         }
 
         var message = await GetPayloadMessageAsync(threadId, messageId, cancellationToken, waitForTransientNetwork: true);
-        var attachment = message.Attachments.FirstOrDefault();
+        if (string.IsNullOrEmpty(attachmentId) && message.Attachments.Count > 1)
+            throw new InvalidDataException("A miniatura exige attachmentId nessa mensagem compartilhada.");
+        var attachment = string.IsNullOrEmpty(attachmentId) ? message.Attachments.FirstOrDefault() :
+            message.Attachments.SingleOrDefault(attachment => attachment.Id == attachmentId)
+                ?? throw new InvalidDataException("A miniatura referenciada não está presente na mensagem.");
         if (attachment == null)
         {
             return null;
         }
 
-        return encryption == null
-            ? await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken)
-            : await DownloadEncryptedAttachmentBytesAsync(attachment, encryption, onProgress, cancellationToken);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return encryption == null
+                    ? await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken)
+                    : await DownloadEncryptedAttachmentBytesAsync(attachment, encryption, onProgress, cancellationToken);
+            }
+            catch (HttpRequestException error) when (attempt == 0 && error.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound)
+            {
+                var fresh = await _discord.ResolvePayloadMessageAsync(threadId, messageId, cancellationToken, refresh: true);
+                attachment = fresh.Attachments.SingleOrDefault(item => item.Id == attachment.Id)
+                    ?? throw new InvalidDataException("O attachment referenciado foi removido.");
+            }
+        }
     }
 
     public async Task<FileInfo?> DownloadMessageAttachmentAsync(
@@ -684,12 +705,12 @@ public sealed class ForumDownloader
             .FirstOrDefault();
     }
 
-    private static async Task<byte[]> DownloadAttachmentToBytesAsync(
+    private async Task<byte[]> DownloadAttachmentToBytesAsync(
         DiscordAttachmentDto attachment,
         Action<DownloadProgress>? onProgress,
         CancellationToken cancellationToken)
     {
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = _downloadClientFactory();
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -726,6 +747,7 @@ public sealed class ForumDownloader
                 encryptedBytes = await DownloadAttachmentToBytesAsync(attachment, onProgress, cancellationToken);
                 return _encryption.DecryptBytes(encryptedBytes, encryption);
             }
+            catch (HttpRequestException error) when (error.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound) { throw; }
             catch (Exception ex) when (ex is not OperationCanceledException && attempt < MaxEncryptedPayloadDownloadAttempts)
             {
                 last = ex;
@@ -851,10 +873,18 @@ public sealed class ForumDownloader
                     chunkReferences: entry.ChunkReferences)
                 : await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
         }
-        return new DiscordVideoChunkProvider(_discord, entry.ThreadId,
+        var readLease = _storageReads == null ? null : await _storageReads.Manager.BeginReadAsync("preview:" + Guid.NewGuid().ToString("N"), entry.FileId,
+            SharedStorageManager.Payloads(MetadataService.CreateFileMetadata(entry)).Take(1).ToList(), cancellationToken);
+        try
+        {
+        var provider = new DiscordVideoChunkProvider(_discord, entry.ThreadId,
             parts.Select(p => new VideoAttachment(p.Index, p.MessageId, p.Name, p.Url, p.Size, p.AttachmentId)).ToArray(),
             _encryption, EncryptionContext(entry, lowQuality ? EncryptedPayloadRoles.Video480p : EncryptedPayloadRoles.Original),
             lowQuality ? entry.VideoPreviewSizeBytes : entry.SizeBytes, _downloadClientFactory());
+        provider.ReadLease = readLease;
+        return provider;
+        }
+        catch { if (readLease != null) await readLease.DisposeAsync(); throw; }
     }
     private async Task<List<Part>> CollectPartsAsync(string threadId, CancellationToken cancellationToken, string? preferredBatchId = null)
     {
@@ -999,7 +1029,7 @@ public sealed class ForumDownloader
         {
             var ordered = ChunkReference.Validate(chunkReferences, messageIds);
             var messageKeys = ordered.Select(reference => reference.MessageId).Distinct(StringComparer.Ordinal).ToArray();
-            var fetched = await _discord.GetMessagesByIdsAsync(threadId, messageKeys, cancellationToken);
+            var fetched = await _discord.ResolvePayloadMessagesAsync(threadId, messageKeys, cancellationToken);
             foreach (var message in fetched.Values) DecodeReference(message);
             var parts = new List<Part>(ordered.Count);
             foreach (var reference in ordered)

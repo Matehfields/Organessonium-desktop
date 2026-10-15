@@ -10,11 +10,12 @@ using System.IO;
 
 namespace Organessonium.Services;
 
-public sealed class DiscordApiClient : IDisposable
+public sealed partial class DiscordApiClient : IDisposable
 {
     public const int MaxActiveThreadsCode = 160006;
 
     private readonly HttpClient _http;
+    private readonly string _storageAccountKey;
     private readonly DiscordRequestLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _routeLocks = new(StringComparer.Ordinal);
 
@@ -26,6 +27,7 @@ public DiscordApiClient(string botToken)
     public DiscordApiClient(string botToken, HttpClient http)
     {
         _http = http;
+        _storageAccountKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(botToken)));
         _rateLimiter = DiscordRequestLimiter.ForToken(botToken);
         _http.Timeout = Timeout.InfiniteTimeSpan;
         _http.BaseAddress = new Uri("https://discord.com/api/v10/");
@@ -345,12 +347,14 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
             return request;
         }, cancellationToken, onRateLimitWait);
+        InvalidatePayloadMessage(channelId, messageId);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
     public async Task DeleteMessageAsync(string channelId, string messageId, CancellationToken cancellationToken = default)
     {
         using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}/messages/{messageId}"), cancellationToken);
+        InvalidatePayloadMessage(channelId, messageId);
     }
 
     public async Task<string> CreateForumPostWithFileAsync(
@@ -477,7 +481,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string title,
         string content,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool replayUnknownResult = true)
     {
         DiscordLimits.ValidateMessage(content);
         for (var attempt = 0; attempt < 3; attempt++)
@@ -494,7 +499,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{forumId}/threads");
                     request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
                     return request;
-                }, cancellationToken, onRateLimitWait);
+                }, cancellationToken, onRateLimitWait, replayUnknownResult: replayUnknownResult);
                 var channel = await ReadJsonAsync<DiscordChannelDto>(response, cancellationToken);
                 var messageId = channel.Message?.Id ?? "";
                 if (string.IsNullOrWhiteSpace(messageId))
@@ -644,6 +649,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        if (HasThreadWriter(threadId)) return;
         await SetThreadArchivedAsync(threadId, archived: true, cancellationToken, onRateLimitWait);
     }
 
@@ -664,7 +670,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         var active = await GetActiveThreadsAsync(channelId, cancellationToken, onRateLimitWait);
         var archived = 0;
         foreach (var thread in active
-                     .Where(thread => !string.IsNullOrWhiteSpace(thread.Id))
+                     .Where(thread => !string.IsNullOrWhiteSpace(thread.Id) && !HasThreadWriter(thread.Id))
                      .OrderBy(thread => Snowflake(thread.Id))
                      .Take(Math.Max(1, maxToArchive)))
         {
@@ -796,6 +802,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             request.Content = BuildMessageFileContent(content, file.Name, file.OpenRead);
             return request;
         }, cancellationToken);
+        InvalidatePayloadMessage(channelId, messageId);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 
@@ -848,6 +855,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
     public async Task DeleteChannelAsync(string channelId, CancellationToken cancellationToken = default)
     {
+        if (IsSharedThread(channelId)) throw new InvalidOperationException("Uma thread compartilhada não pode ser excluída como payload de um arquivo.");
         using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}"), cancellationToken);
     }
 
@@ -883,6 +891,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
     public void Dispose()
     {
+        _payloadLifetime.Cancel();
         _http.Dispose();
         foreach (var gate in _routeLocks.Values)
         {
@@ -983,7 +992,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool serializeRoute = true,
         Action<bool>? onTransferActivity = null,
-        bool waitForTransientNetwork = false)
+        bool waitForTransientNetwork = false,
+        bool replayUnknownResult = true)
     {
         var shouldWaitForTransientNetwork = waitForTransientNetwork || onRateLimitWait != null;
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
@@ -1015,7 +1025,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     diagnosticRequest?.HttpStatus((int)response.StatusCode);
                     reservation.Observe(response);
                 }
-                catch (HttpRequestException) when (shouldWaitForTransientNetwork || attempt < 11)
+                catch (HttpRequestException) when (replayUnknownResult && (shouldWaitForTransientNetwork || attempt < 11))
                 {
                     bodySlot?.Dispose();
                     await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
@@ -1044,7 +1054,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     var statusCode = response.StatusCode;
                     var body = await response.Content.ReadAsStringAsync(cancellationToken);
                     response.Dispose();
-                    if (IsTransientStatus(statusCode) && (shouldWaitForTransientNetwork || attempt < 11))
+                    if (replayUnknownResult && IsTransientStatus(statusCode) && (shouldWaitForTransientNetwork || attempt < 11))
                     {
                         await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
                         continue;
@@ -1259,6 +1269,10 @@ public sealed class DiscordChannelDto
 
 public sealed class DiscordThreadMetadataDto
 {
+    [JsonPropertyName("archived")]
+    public bool Archived { get; set; }
+    [JsonPropertyName("locked")]
+    public bool Locked { get; set; }
     [JsonPropertyName("archive_timestamp")]
     public string ArchiveTimestamp { get; set; } = "";
 }

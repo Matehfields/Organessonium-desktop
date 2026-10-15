@@ -164,6 +164,9 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         if (confirmed?.RevisionId != revision.RevisionId || confirmed.Hash != revision.Hash)
             throw new InvalidDataException("A revisão enviada não foi confirmada no servidor.");
         revision.MessageId = message.Id;
+        if (revision.Payload != null)
+            await _registry.SharedStorage.PublishReferenceAsync("sync:" + folder.SyncFolderId + ":" + revision.RevisionId,
+                revision.FileId, SharedStorageManager.Payloads(revision.Payload), mapping.ThreadId, message.Id, token);
         await _journalGate.WaitAsync(token);
         try
         {
@@ -231,8 +234,35 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             transfer.SyncFolderId = folder.SyncFolderId;
             transfer.SyncHash = local.Hash;
             transfer.Encryption = _encryption.CreateFileEncryption(_settings.EncryptionMode);
+            if (local.Size <= DiscordLimits.DedicatedThreadThresholdBytes) transfer.SharedAllocationPending = true;
+            else transfer.Storage = new StorageLayout { Mode = "dedicated" };
             await _transfers.SaveAsync(transfer, token);
         }
+        if (transfer.SharedAllocationPending)
+        {
+            var allocation = await _registry.SharedStorage.ReserveAsync(fileId, transfer.TransferId, token);
+            transfer.Storage = allocation.Layout; transfer.ThreadId = allocation.ThreadId;
+            transfer.PayloadLayoutVersion = TransferPayloadLayouts.SharedStorage; transfer.SharedAllocationPending = false;
+            await _transfers.SaveAsync(transfer, token);
+        }
+        SharedUploadContext? shared = null;
+        if (transfer.Storage?.Shared == true)
+        {
+            var allocation = new SharedStorageReservation(fileId, transfer.TransferId, transfer.ThreadId, transfer.Storage);
+            await _registry.SharedStorage.VerifyReservationAsync(allocation, token);
+            shared = new SharedUploadContext(_registry.SharedStorage, allocation);
+            var recovered = await _registry.SharedStorage.RecoverChunksAsync(allocation, EncryptedPayloadRoles.Original, count, token);
+            foreach (var reference in recovered.Where(reference => transfer.UploadedChunks.All(chunk => chunk.Index != reference.Index)))
+            {
+                var message = await _api.ResolvePayloadMessageAsync(transfer.ThreadId, reference.MessageId, token);
+                var attachment = message.Attachments.Single(attachment => attachment.Id == reference.AttachmentId);
+                var batch = string.IsNullOrEmpty(transfer.BatchId) ? transfer.TransferId[..10] : transfer.BatchId;
+                await _transfers.MarkUploadChunksAsync(transfer, new ForumUploadedBatch(transfer.ThreadId, batch,
+                    [new ForumUploadedChunk(transfer.ThreadId, batch, reference.Index, reference.MessageId,
+                        attachment.Size, attachment.Size - EncryptionService.EnvelopeOverheadBytes, reference.AttachmentId)]), token);
+            }
+        }
+        await using var writeLease = shared == null ? null : await _api.AcquireThreadWriteAsync(transfer.ThreadId, token);
         var chunkBytes = transfer.ChunkSizeBytes > 0 ? checked((int)transfer.ChunkSizeBytes) : EncryptionService.MaximumPlaintextPayloadBytes;
         count = ArchiveSplitter.GetPartCount(local.Size, chunkBytes);
         if (count != transfer.TotalChunks || chunkBytes > EncryptionService.MaximumPlaintextPayloadBytes)
@@ -244,7 +274,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         {
             var result = await uploader.UploadResumableGeneratedAsync(transfer.FileName, count,
                 index => memory.PreparePartAsync(_encryption, snapshot, local.Size, chunkBytes, encryption.WithChunkIndex(index), token,
-                    deferBuffers: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment),
+                    deferBuffers: transfer.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment, isolateSendCancellation: shared != null),
                 transfer.ThreadId, transfer.BatchId, transfer.UploadedChunks.ToDictionary(c => c.Index, c => c.MessageId),
                 completed => progress(new(transfer.TransferId, local.RelativePath, "upload", completed * 90d / count, "uploading")),
                 async chunk =>
@@ -255,14 +285,14 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                 }, token, _ => { progress(new(transfer.TransferId, local.RelativePath, "upload", 0, "waiting")); return Task.CompletedTask; },
                 maxParallelParts: _settings.EffectiveUploadThreads, adaptiveUploadGate: _uploadGate, encryptedPayload: encryption,
                 cleanupPart: file => { if (file.Exists) file.Delete(); },
-                useAttachmentReferences: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
-                uploadedChunkReferences: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment
+                useAttachmentReferences: transfer.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment,
+                uploadedChunkReferences: transfer.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment
                     ? transfer.UploadedChunks.Select(chunk => new ChunkReference
                         { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? "" }).ToArray() : null,
-                onBatchUploaded: batch => _transfers.MarkUploadChunksAsync(transfer, batch, token),
+                onBatchUploaded: batch => _transfers.MarkUploadChunksAsync(transfer, batch, shared == null ? token : CancellationToken.None),
                 batchPreparationGate: memory.BatchPreparationGate,
-                streamPreparedParts: transfer.PayloadLayoutVersion == TransferPayloadLayouts.MultiAttachment,
-                maxPreparedPartBytes: checked(chunkBytes + EncryptionService.EnvelopeOverheadBytes));
+                streamPreparedParts: transfer.PayloadLayoutVersion != TransferPayloadLayouts.SingleAttachment,
+                maxPreparedPartBytes: checked(chunkBytes + EncryptionService.EnvelopeOverheadBytes), sharedUpload: shared);
             if (result.ChunkCount != count || (result.ChunkReferences == null && result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace)))
                 throw new InvalidDataException("O upload não confirmou todos os chunks.");
             var payload = new FileMetadata
@@ -270,10 +300,11 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                 FileId = fileId, ThreadId = result.ThreadId, Name = transfer.FileName, SizeBytes = local.Size,
                 MimeType = transfer.MimeType, UploadedAt = DateTime.UtcNow.ToString("O"), BatchId = result.BatchId,
                 Chunks = result.HasAttachmentReferences ? null : result.ChunkMessageIds.ToList(),
-                ChunkRefs = result.ChunkReferences?.ToList(), Encryption = transfer.Encryption?.Clone()
+                ChunkRefs = result.ChunkReferences?.ToList(), Encryption = transfer.Encryption?.Clone(),
+                Storage = transfer.Storage, VersionId = transfer.TransferId, VersionUploadedAt = DateTime.UtcNow.ToString("O")
             };
             if (_settings.PreviewEnabled)
-                payload.Preview = await UploadThumbnailAsync(snapshot, payload, staging, token);
+                payload.Preview = await UploadThumbnailAsync(snapshot, payload, staging, token, shared);
             await uploader.ArchiveThreadAsync(result.ThreadId, token);
             return payload;
         }
@@ -302,7 +333,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         await _transfers.SaveAsync(transfer, token);
         try
         {
-            var downloader = new ForumDownloader(_api, _settings, _encryption, _downloadClients);
+            var downloader = new ForumDownloader(_api, _settings, _encryption, _downloadClients, new StorageReadContext(_registry.SharedStorage));
             var file = await downloader.DownloadAndAssembleAsync(entry, cache, transfer, _transfers, _ => { }, token,
                 p => progress(new(transfer.TransferId, revision.RelativePath, "download", p.TotalBytes > 0 ? 100d * p.DownloadedBytes / p.TotalBytes : 0, "downloading")));
             if (file.Length != revision.SizeBytes || await HashAsync(file.FullName, token) != revision.Hash)
@@ -339,7 +370,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         var referenced = (await ReadAsync(folder, token)).Revisions.Select(r => r.Payload?.ThreadId).ToHashSet();
         foreach (var obsolete in pending.Where(t => t.SyncHash != hash))
         {
-            if (!string.IsNullOrWhiteSpace(obsolete.ThreadId) && !referenced.Contains(obsolete.ThreadId))
+            if (obsolete.Storage?.Shared == true) await _registry.SharedStorage.CancelReservationAsync(obsolete, token);
+            else if (!string.IsNullOrWhiteSpace(obsolete.ThreadId) && !referenced.Contains(obsolete.ThreadId))
                 await _api.DeleteChannelAsync(obsolete.ThreadId, token);
             await _transfers.CancelAsync(obsolete, _settings.KeepTransferHistory, false, token);
         }
@@ -359,14 +391,15 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         {
             token.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(revision.MessageId)) continue;
-            // Remove the obsolete journal first. A failed payload cleanup leaves an orphan, not data loss.
+            var cleanup = revision.Payload == null ? null : await _registry.SharedStorage.BeginPayloadCleanupAsync(
+                "sync:" + folder.SyncFolderId + ":" + revision.RevisionId, revision.FileId,
+                SharedStorageManager.Payloads(revision.Payload), token, mapping.ThreadId, revision.MessageId);
+            // The durable intent precedes removing the obsolete journal.
             await _api.DeleteMessageAsync(mapping.ThreadId, revision.MessageId, token);
             await _journalGate.WaitAsync(token);
             try { _journals[folder.SyncFolderId].Revisions.Remove(revision.RevisionId); }
             finally { _journalGate.Release(); }
-            var thread = revision.Payload?.ThreadId;
-            if (!string.IsNullOrWhiteSpace(thread) && !retainedThreads.Contains(thread))
-                await _api.DeleteChannelAsync(thread, token);
+            if (cleanup != null) await _registry.SharedStorage.CompleteCleanupAsync(cleanup, token);
         }
         var applied = _journals[folder.SyncFolderId].Applied;
         foreach (var marker in applied.Where(p => !protectedIds.Contains(p.Key)).ToList())
@@ -393,7 +426,8 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         return result;
     }
 
-    private async Task<PreviewMetadata?> UploadThumbnailAsync(FileInfo source, FileMetadata payload, DirectoryInfo directory, CancellationToken token)
+    private async Task<PreviewMetadata?> UploadThumbnailAsync(FileInfo source, FileMetadata payload, DirectoryInfo directory, CancellationToken token,
+        SharedUploadContext? shared = null)
     {
         if (!payload.MimeType.StartsWith("image/") && !payload.MimeType.StartsWith("video/")) return null;
         var safeFile = SafeKey(payload.FileId);
@@ -420,6 +454,11 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             using var budget = await RamUploadBudget.ReserveAsync(1, token);
             using var encrypted = await memory.PreparePartAsync(_encryption, thumbnail, thumbnail.Length,
                 EncryptionService.MaximumPlaintextPayloadBytes, context, token);
+            if (shared != null)
+            {
+                var reference = await shared.Manager.Batcher.SendAsync(shared.Reservation, context, encrypted, null, token, _uploadGate);
+                return new PreviewMetadata { ThumbnailRef = new AttachmentReference { MessageId = reference.MessageId, AttachmentId = reference.AttachmentId } };
+            }
             await _api.UnarchiveThreadAsync(payload.ThreadId, token);
             var message = await _api.SendFileMessageAsync(payload.ThreadId, _metadata.EncodePayloadReference(EncryptedPayloadProtocol.Message(context, 1)), encrypted, token);
             return new PreviewMetadata { ThumbnailMessageId = message.Id };

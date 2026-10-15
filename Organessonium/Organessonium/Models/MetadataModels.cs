@@ -37,6 +37,9 @@ public sealed class TrashMetadata
 
 public sealed class FileMetadata : MetadataEntry
 {
+    [JsonPropertyName("storage")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StorageLayout? Storage { get; set; }
     [JsonPropertyName("versionId")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? VersionId { get; set; }
@@ -203,6 +206,9 @@ public sealed record FolderIndexMapping(
 
 public sealed class PreviewMetadata
 {
+    [JsonPropertyName("thumbnailRef")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AttachmentReference? ThumbnailRef { get; set; }
     [JsonPropertyName("thumbnailMessageId")]
     public string? ThumbnailMessageId { get; set; }
 

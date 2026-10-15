@@ -303,7 +303,9 @@ public sealed class MetadataService
                         if (!document.RootElement.TryGetProperty("schemaVersion", out _)) throw new MetadataCodecException(MetadataError.MissingField);
                         throw new MetadataCodecException(MetadataError.UnsupportedVersion);
                     }
-                    if (type.GetString() is not ("syncRevision" or "syncApplied" or "folderSerial" or "folderSerialData" or "payloadReference"))
+                    if (type.GetString() is not ("syncRevision" or "syncApplied" or "folderSerial" or "folderSerialData" or "payloadReference" or
+                        "storageThread" or "storageControl" or "storageReference" or "storageCleanup" or "storageCleanupApplied" or
+                        "storageBatchPlan" or "storageBatchReceipt" or "storageMutation"))
                         throw new MetadataCodecException(MetadataError.UnsupportedVersion);
                 }
                 return null;
@@ -408,6 +410,8 @@ public sealed class MetadataService
         {
             case FileMetadata file:
                 entry = AppEntry.File(file.Name, file.ThreadId, file.UploadedAt, file.SizeBytes, "/");
+                entry.Storage = file.Storage;
+                entry.ThumbnailRef = file.Preview?.ThumbnailRef;
                 entry.FileId = file.FileId;
                 entry.ParentFolderId = NormalizeParentId(file.ParentFolderId);
                 entry.MimeType = file.MimeType;
@@ -416,7 +420,7 @@ public sealed class MetadataService
                 entry.ChunkMessageIds = entry.ChunkReferences == null
                     ? (file.Chunks ?? []).Where(id => !string.IsNullOrWhiteSpace(id)).ToList() : [];
                 entry.ChunkCount = entry.LogicalChunkCount;
-                entry.PreviewMessageId = file.Preview?.ThumbnailMessageId ?? "";
+                entry.PreviewMessageId = file.Preview?.ThumbnailRef?.MessageId ?? file.Preview?.ThumbnailMessageId ?? "";
                 entry.VideoPreviewChunkMessageIds = file.Preview?.Video480p?.Chunks?
                     .Where(id => !string.IsNullOrWhiteSpace(id))
                     .ToList() ?? [];
@@ -462,6 +466,7 @@ public sealed class MetadataService
         return new FileMetadata
         {
             SchemaVersion = SchemaVersion,
+            Storage = entry.Storage,
             FileId = string.IsNullOrWhiteSpace(entry.FileId) ? Guid.NewGuid().ToString("N") : entry.FileId,
             ThreadId = entry.ThreadId,
             Name = entry.Name,
@@ -507,14 +512,15 @@ public sealed class MetadataService
             };
         }
 
-        if (thumbnailMessageId == null && video480p == null)
+        if (thumbnailMessageId == null && entry.ThumbnailRef == null && video480p == null)
         {
             return null;
         }
 
         return new PreviewMetadata
         {
-            ThumbnailMessageId = thumbnailMessageId,
+            ThumbnailRef = entry.ThumbnailRef,
+            ThumbnailMessageId = entry.ThumbnailRef == null ? thumbnailMessageId : null,
             Video480p = video480p
         };
     }
@@ -576,7 +582,7 @@ public sealed class MetadataService
         };
     }
 
-    private static void Validate(MetadataEntry metadata)
+    internal static void Validate(MetadataEntry metadata)
     {
         if (metadata.SchemaVersion != SchemaVersion)
         {
@@ -586,6 +592,13 @@ public sealed class MetadataService
         switch (metadata)
         {
             case FileMetadata file:
+                file.Storage?.Validate();
+                file.Preview?.ThumbnailRef?.Validate();
+                if (file.Storage?.Shared == true && file.Preview?.Video480p != null && file.Preview.Video480p.ChunkRefs == null)
+                    throw new InvalidDataException("A prévia compartilhada deve usar chunkRefs completos.");
+                if (file.Storage?.Shared == true && (file.ChunkRefs == null || file.Encryption == null ||
+                    (!string.IsNullOrEmpty(file.Preview?.ThumbnailMessageId) && file.Preview.ThumbnailRef == null)))
+                    throw new InvalidDataException("O arquivo compartilhado exige referências exatas e criptografia.");
                 if (file.Versions != null)
                 {
                     var ids = new HashSet<string>(StringComparer.Ordinal);
@@ -625,8 +638,8 @@ public sealed class MetadataService
                 }
                 if (file.Preview != null)
                 {
-                    var hasThumbnail = !string.IsNullOrWhiteSpace(file.Preview.ThumbnailMessageId);
-                    if (!hasThumbnail)
+                    var hasThumbnail = file.Preview.ThumbnailRef != null || !string.IsNullOrWhiteSpace(file.Preview.ThumbnailMessageId);
+                    if (file.Preview.ThumbnailRef != null || !hasThumbnail)
                     {
                         file.Preview.ThumbnailMessageId = null;
                     }

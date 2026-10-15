@@ -45,6 +45,8 @@ public sealed partial class AppRegistry
 
             // OSER does not include payload chunks or trash recovery data. Never move a serial-only entry.
             var (detailed, sourceChannelId) = await ReadTrashEntryAsync(entry, cancellationToken);
+            await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(detailed, cancellationToken);
+            if (detailed.Storage?.Shared == true) (detailed, sourceChannelId) = await ReadTrashEntryAsync(entry, cancellationToken);
             var destinationFolderId = TrashFolderId;
             var destinationPath = TrashPath;
             if (restore)
@@ -136,6 +138,7 @@ public sealed partial class AppRegistry
             additional.RemoveAll(candidate => SameEntryIdentity(candidate, detailed));
             if (restore && detailed.Favorite) additional.Add(detailed);
             await RebuildFavoritesSerialAsync(additional, cancellationToken);
+            if (detailed.Type == "file") await SharedStorage.PublishFileReferenceAsync(detailed, destination.ThreadId, cancellationToken);
             return detailed;
         }
         finally { _entryMutationGate.Release(); }

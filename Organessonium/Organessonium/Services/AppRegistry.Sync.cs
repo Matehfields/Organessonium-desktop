@@ -175,7 +175,8 @@ public sealed partial class AppRegistry
             else await AddEntryAsync(entry, token);
         }
         else if (existing.Sync?.RevisionId != revision.RevisionId)
-            await UpdateEntryAsync(entry, token);
+            await UpdateEntryAsync(entry, token, expectedPayload: existing.Type == "file"
+                ? MetadataService.CreateFileMetadata(await LoadFileDetailsAsync(existing, token, forceRefresh: true)) : null);
         return parentId;
     }
 

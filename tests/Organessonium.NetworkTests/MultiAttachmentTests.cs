@@ -130,6 +130,7 @@ internal static partial class Program
             }
             download = (await new TransferStateRepository(repository.RootDirectory).LoadActiveByIdAsync(download.TransferId))!;
             var listsBefore = server.MessageLists;
+            var getsBefore = server.MessageGets;
             var downloader = new ForumDownloader(api, new AppSettings { DownloadThreads = 3 }, crypto, () => new HttpClient(server, false));
             var downloadProgress = new List<DownloadProgress>();
             var encryptedDiskFiles = 0;
@@ -142,7 +143,8 @@ internal static partial class Program
                 downloadProgress.Where(item => !item.Assembling).All(item => item.Percent <= 80) &&
                 downloadProgress.Any(item => item.Assembling && item.Percent == 80) && downloadProgress.Any(item => item.Assembling && item.Percent == 99),
                 "download gravou ciphertext no disco ou não reservou 20% para montar o arquivo");
-            RequireSync((await File.ReadAllBytesAsync(assembled.FullName)).SequenceEqual(original) && server.MessageLists - listsBefore == 1 &&
+            RequireSync((await File.ReadAllBytesAsync(assembled.FullName)).SequenceEqual(original) && server.MessageLists == listsBefore &&
+                server.MessageGets - getsBefore == loaded.ChunkReferences!.Select(reference => reference.MessageId).Distinct().Count() &&
                 confirmedIds.Take(2).All(id => !server.CdnReads.ContainsKey(id)),
                 "download não deduplicou mensagens, perdeu ChunkCount global ou baixou chunks já confirmados");
             loaded.ChunkReferences = loaded.ChunkReferences!.Select(reference => reference.Index == 12
@@ -400,6 +402,7 @@ internal static partial class Program
         public int MaximumAcceptedAttachments = 10;
         public long LastBodyLength;
         public int MessageLists;
+        public int MessageGets;
         public ConcurrentDictionary<string, DiscordMessageDto> Messages { get; } = new();
         public ConcurrentDictionary<string, byte[]> Bytes { get; } = new();
         public ConcurrentDictionary<string, int> CdnReads { get; } = new();
@@ -430,6 +433,7 @@ internal static partial class Program
                     Interlocked.Increment(ref MessageLists);
                     return Reply(Messages.Values.Where(message => message.Content != "metadata-fixture").ToArray());
                 }
+                Interlocked.Increment(ref MessageGets);
                 var message = Messages[segments[^1]];
                 if (!RenewWithDuplicateNames) return Reply(message);
                 return Reply(new DiscordMessageDto { Id = message.Id, Content = message.Content,

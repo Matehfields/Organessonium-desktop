@@ -279,7 +279,7 @@ public sealed partial class ForumUploader
         }
     }
 
-    private static IReadOnlyList<ForumUploadedChunk> MapAttachments(string threadId, string batchId,
+    internal static IReadOnlyList<ForumUploadedChunk> MapAttachments(string threadId, string batchId,
         DiscordMessageDto message, IReadOnlyList<int> indices, IReadOnlyList<PreparedUploadPart> files)
     {
         if (string.IsNullOrWhiteSpace(message.Id) || message.Attachments == null || message.Attachments.Count != files.Count ||
@@ -299,7 +299,7 @@ public sealed partial class ForumUploader
         return chunks;
     }
 
-    private static bool IsAttachmentLimitRejection(DiscordApiException exception)
+    internal static bool IsAttachmentLimitRejection(DiscordApiException exception)
     {
         if (exception.StatusCode == HttpStatusCode.RequestEntityTooLarge || exception.DiscordCode == 40005) return true;
         if (exception.StatusCode != HttpStatusCode.BadRequest || exception.DiscordCode != 50035) return false;

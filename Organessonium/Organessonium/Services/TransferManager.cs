@@ -63,7 +63,9 @@ public sealed class TransferManager
         {
             TransferType = TransferTypes.Download,
             DownloadMetadata = MetadataService.CreateFileMetadata(entry),
-            PayloadLayoutVersion = entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment,
+            Storage = entry.Storage,
+            PayloadLayoutVersion = entry.Storage?.Shared == true ? TransferPayloadLayouts.SharedStorage :
+                entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment,
             Status = TransferStatuses.Downloading,
             FileId = entry.FileId,
             FileName = entry.Name,
@@ -116,7 +118,7 @@ public sealed class TransferManager
     public async Task MarkUploadChunksAsync(TransferState state, ForumUploadedBatch batch,
         CancellationToken cancellationToken = default)
     {
-        if (state.PayloadLayoutVersion != TransferPayloadLayouts.MultiAttachment || batch.Chunks.Count is < 1 ||
+        if (state.PayloadLayoutVersion is not (TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage) || batch.Chunks.Count is < 1 ||
             batch.Chunks.Count > DiscordLimits.AttachmentsPerMessage || string.IsNullOrWhiteSpace(batch.ThreadId) ||
             string.IsNullOrWhiteSpace(batch.BatchId) || batch.Chunks.Any(chunk => chunk.ThreadId != batch.ThreadId ||
                 chunk.BatchId != batch.BatchId || chunk.SizeBytes < 0 || chunk.MessageId != batch.Chunks[0].MessageId))

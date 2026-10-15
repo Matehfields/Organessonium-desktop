@@ -1,0 +1,174 @@
+using System.IO;
+using System.Net;
+using System.Text.Json;
+using Organessonium.Models;
+
+namespace Organessonium.Services;
+
+internal sealed partial class SharedStorageManager
+{
+    internal async Task<StorageCleanupRecord> BeginCleanupAsync(AppEntry entry, CancellationToken token)
+    {
+        var request = new StorageCleanupRecord
+        {
+            FileId = entry.FileId,
+            Scope = "file:" + entry.FileId,
+            Payloads = Payloads(MetadataService.CreateFileMetadata(entry)),
+            MetadataMessageId = entry.MetadataMessageId,
+            MetadataThreadId = await LocateMetadataAsync(entry, token)
+        };
+        await WriteRecordAsync(request, null, token);
+        return request;
+    }
+
+    internal async Task<bool> CompleteCleanupAsync(StorageCleanupRecord request, CancellationToken token)
+    {
+        await ReleaseReferenceAsync(request.Scope, request.FileId, token);
+        await _gate.WaitAsync(token);
+        try
+        {
+            await RefreshJournalAsync(token);
+            return await CleanAsync(request, token);
+        }
+        finally { _gate.Release(); }
+    }
+
+    internal async Task ReconcileAsync(CancellationToken token = default)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            await RefreshJournalAsync(token);
+            await RecoverOwnedMutationsAsync(token);
+            await RecoverOwnedReadsAsync(token);
+            foreach (var request in _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray())
+                await CleanAsync(request, token);
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task<bool> CleanAsync(StorageCleanupRecord request, CancellationToken token)
+    {
+        if (_appliedCleanups.Contains(request.OperationId)) return true;
+        if (_mutations.Values.Any(mutation => mutation.Pending && mutation.FileId == request.FileId)) return false;
+        // Deletion is authorized only by a durable release, never by a missing local cache entry.
+        if (!_references.TryGetValue(request.Scope, out var subject) || subject.State != "released")
+        {
+            if (!request.Scope.StartsWith("upload:", StringComparison.Ordinal))
+            {
+                if (string.IsNullOrWhiteSpace(request.MetadataThreadId) || string.IsNullOrWhiteSpace(request.MetadataMessageId)) return false;
+                try { await _api.GetMessageAsync(request.MetadataThreadId, request.MetadataMessageId, token); return false; }
+                catch (DiscordApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { }
+            }
+            await ReleaseReferenceAsync(request.Scope, request.FileId, token);
+            _references[request.Scope] = new StorageReferenceRecord { Scope = request.Scope, FileId = request.FileId, State = "released" };
+        }
+        foreach (var payload in request.Payloads.Where(payload => payload.Storage?.Shared == true && payload.VersionId.Length > 0))
+        {
+            var recovered = await RecoverPayloadReferencesAsync(payload.FileId, payload.VersionId, payload.ThreadId, token);
+            payload.Attachments = payload.Attachments.Concat(recovered.Select(item => new AttachmentReference
+            { MessageId = item.Reference.MessageId, AttachmentId = item.Reference.AttachmentId })).Distinct().ToList();
+        }
+        var live = (await ReadRemoteReferencesAsync(token)).Concat(_references.Values
+            .Where(reference => reference.State == "live" && (reference.Scope.StartsWith("upload:", StringComparison.Ordinal) ||
+                reference.Scope.StartsWith("download:", StringComparison.Ordinal) || reference.Scope.StartsWith("preview:", StringComparison.Ordinal)))
+            .SelectMany(reference => reference.Payloads)).ToArray();
+        var protectedAttachments = live.SelectMany(payload => payload.Attachments.Select(attachment =>
+            (payload.ThreadId, attachment.MessageId, attachment.AttachmentId))).ToHashSet();
+        foreach (var active in await new TransferStateRepository(_store.TransfersDirectory).LoadRecoverableAsync(token))
+            if (active.TransferType == TransferTypes.Download && active.DownloadMetadata != null)
+            {
+                live = live.Concat(Payloads(active.DownloadMetadata)).ToArray();
+                foreach (var payload in Payloads(active.DownloadMetadata))
+                    foreach (var reference in payload.Attachments) protectedAttachments.Add((payload.ThreadId, reference.MessageId, reference.AttachmentId));
+            }
+        foreach (var threadGroup in request.Payloads.GroupBy(payload => payload.ThreadId, StringComparer.Ordinal))
+        {
+            var shared = _catalog.Values.FirstOrDefault(row => row.ThreadId == threadGroup.Key);
+            if (shared != null)
+            {
+                _api.RegisterSharedThread(shared.ThreadId);
+                if (shared.OwnerId != OwnerId) return false; // Another device records intent, not a destructive PATCH.
+                shared = await ReloadCatalogAsync(shared, token);
+                var completedVersions = _references.Values.Where(reference => reference.State == "live")
+                    .SelectMany(reference => reference.Payloads).Where(payload => payload.FileId == request.FileId)
+                    .Select(payload => payload.VersionId).ToHashSet(StringComparer.Ordinal);
+                var member = shared.Members.FirstOrDefault(member => member.FileId == request.FileId);
+                if (member != null && member.PendingVersions.Any(version => !completedVersions.Contains(version) &&
+                    !request.Payloads.Any(payload => payload.VersionId == version))) return false;
+                if (threadGroup.Any(payload => payload.Storage?.Shared != true)) return false;
+                if (threadGroup.All(payload => payload.Attachments.Count == 0) && _plans.Values.Any(plan =>
+                    plan.Parts.Any(part => part.FileId == request.FileId && threadGroup.Any(payload => payload.VersionId == part.VersionId)))) return false;
+                await using var lease = await _api.AcquireThreadWriteAsync(shared.ThreadId, token);
+                foreach (var messages in threadGroup.SelectMany(payload => payload.Attachments).Distinct().GroupBy(reference => reference.MessageId))
+                {
+                    if (messages.Key == shared.ControlMessageId) throw new InvalidDataException("A mensagem de controle não pode ser removida.");
+                    DiscordMessageDto message;
+                    try { message = await _api.GetMessageAsync(shared.ThreadId, messages.Key, token); }
+                    catch (DiscordApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { continue; }
+                    var remove = messages.Where(reference => !protectedAttachments.Contains((shared.ThreadId, reference.MessageId, reference.AttachmentId)))
+                        .Select(reference => reference.AttachmentId).ToHashSet(StringComparer.Ordinal);
+                    var keep = message.Attachments.Where(attachment => !remove.Contains(attachment.Id)).Select(attachment => attachment.Id).ToArray();
+                    if (messages.Any(reference => protectedAttachments.Contains((shared.ThreadId, reference.MessageId, reference.AttachmentId)))) return false;
+                    if (keep.Length == message.Attachments.Count) continue;
+                    if (keep.Length == 0)
+                    {
+                        // The same fresh/validated PATCH path is used before deleting a now empty message.
+                        await _api.PreserveMessageAttachmentsAsync(shared.ThreadId, message.Id, [], token,
+                            message.Attachments.Select(attachment => attachment.Id).ToArray());
+                        await _api.DeleteMessageAsync(shared.ThreadId, message.Id, token);
+                    }
+                    else await _api.PreserveMessageAttachmentsAsync(shared.ThreadId, message.Id, keep, token,
+                        message.Attachments.Select(attachment => attachment.Id).ToArray());
+                }
+                if (!live.Any(payload => payload.ThreadId == shared.ThreadId && payload.FileId == request.FileId))
+                {
+                    shared.Members.RemoveAll(member => member.FileId == request.FileId);
+                    await SaveCatalogAsync(shared, token);
+                }
+            }
+            else
+            {
+                // Explicitly shared metadata without a readable catalogue is not a legacy dedicated thread.
+                if (threadGroup.Any(payload => payload.Storage?.Shared == true) || _api.IsSharedThread(threadGroup.Key)) return false;
+                if (live.Any(payload => payload.ThreadId == threadGroup.Key)) return false;
+                try { await _api.DeleteChannelAsync(threadGroup.Key, token); }
+                catch (DiscordApiException error) when (error.StatusCode == HttpStatusCode.NotFound) { }
+            }
+        }
+        await WriteRecordAsync(new { schemaVersion = 1, entryType = "storageCleanupApplied", operationId = request.OperationId }, null, token);
+        _appliedCleanups.Add(request.OperationId);
+        return true;
+    }
+
+    internal async Task CancelReservationAsync(TransferState transfer, CancellationToken token)
+    {
+        if (transfer.Storage?.Shared != true) return;
+        await _gate.WaitAsync(token);
+        try
+        {
+            await RefreshJournalAsync(token);
+            if (!_catalog.TryGetValue(transfer.Storage.StorageId!, out var row) || row.OwnerId != OwnerId) return;
+            row = await ReloadCatalogAsync(row, token);
+            var member = row.Members.FirstOrDefault(member => member.FileId == transfer.FileId);
+            member?.PendingVersions.Remove(transfer.TransferId);
+            await SaveCatalogAsync(row, token);
+        }
+        finally { _gate.Release(); }
+        var payload = new StoragePayloadVersion
+        {
+            FileId = transfer.FileId,
+            VersionId = transfer.TransferId,
+            ThreadId = transfer.ThreadId,
+            Storage = transfer.Storage,
+            Attachments = transfer.UploadedChunks.Select(chunk => new AttachmentReference
+            { MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId ?? throw new InvalidDataException("Checkpoint sem attachmentId.") }).ToList()
+        };
+        if (transfer.ThumbnailRef != null) payload.Attachments.Add(transfer.ThumbnailRef);
+        payload.Attachments.AddRange((transfer.VideoPreview480pChunkRefs ?? []).Select(reference => new AttachmentReference
+        { MessageId = reference.MessageId, AttachmentId = reference.AttachmentId }));
+        var request = new StorageCleanupRecord { FileId = transfer.FileId, Scope = "upload:" + transfer.TransferId, Payloads = [payload] };
+        await WriteRecordAsync(request, null, token);
+        await CompleteCleanupAsync(request, token);
+    }
+}

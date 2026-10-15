@@ -227,7 +227,8 @@ public sealed partial class ForumUploader
         Action<int, long>? onPartTransferProgress = null,
         int maxPreparedPartBytes = DiscordLimits.AttachmentBytes,
         bool streamPreparedParts = false,
-        string? legacyPreviewKind = null)
+        string? legacyPreviewKind = null,
+        SharedUploadContext? sharedUpload = null)
     {
         if (totalParts <= 0)
         {
@@ -235,6 +236,14 @@ public sealed partial class ForumUploader
         }
 
         ArgumentNullException.ThrowIfNull(preparePart);
+        if (sharedUpload != null)
+        {
+            if (!useAttachmentReferences || encryptedPayload == null || legacyPreviewKind != null)
+                throw new InvalidDataException("O transporte compartilhado exige o contexto criptográfico e chunkRefs.");
+            return await UploadSharedGeneratedAsync(totalParts, preparePart, existingBatchId, uploadedChunkReferences ?? [],
+                uploadedParts, onBatchUploaded, cancellationToken, onRateLimitWait, encryptedPayload,
+                onPartTransferProgress, adaptiveUploadGate, onTransferActivity, sharedUpload);
+        }
         if (legacyPreviewKind != null && (encryptedPayload != null || useAttachmentReferences || string.IsNullOrWhiteSpace(existingThreadId)))
             throw new ArgumentException("Uma prévia plaintext legada exige transporte unitário no thread existente.", nameof(legacyPreviewKind));
         if (maxPreparedPartBytes < EncryptionService.EnvelopeOverheadBytes || maxPreparedPartBytes > DiscordLimits.AttachmentBytes)
@@ -676,7 +685,9 @@ public sealed class PreparedUploadPart : IDisposable
         _replay = replay;
     }
 
-    public string FileName { get; }
+    public string FileName { get; private set; }
+
+    internal void SetTransportName(string name) => FileName = name;
 
     public long Length { get; }
 
