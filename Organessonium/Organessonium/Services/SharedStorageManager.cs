@@ -296,7 +296,9 @@ internal sealed partial class SharedStorageManager
         var leases = new List<IAsyncDisposable>();
         try
         {
-            foreach (var thread in threads.Distinct(StringComparer.Ordinal)) leases.Add(await _api.AcquireThreadWriteAsync(thread, token));
+            var targets = threads.Distinct(StringComparer.Ordinal).ToList();
+            if (targets.Count > 0) targets.Add(await GetJournalThreadAsync(token));
+            foreach (var thread in targets.Distinct(StringComparer.Ordinal)) leases.Add(await _api.AcquireThreadWriteAsync(thread, token));
             return new WriteLeaseGroup(leases);
         }
         catch { foreach (var lease in leases) await lease.DisposeAsync(); throw; }

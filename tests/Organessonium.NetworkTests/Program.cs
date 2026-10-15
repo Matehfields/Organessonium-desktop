@@ -24,6 +24,7 @@ internal static partial class Program
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
         ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
         ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),
+        ("mediaUploadTypes", MediaUploadTypesAsync),
         ("sharedStorageDelayedProducers", SharedStorageDelayedProducersAsync),
         ("sharedStorageReferencesDownloadsAndThumbnails", SharedStorageReferencesDownloadsAndThumbnailsAsync),
         ("sharedStorageSelectiveCleanupAndRecovery", SharedStorageSelectiveCleanupAndRecoveryAsync),

@@ -55,7 +55,8 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                     {
                         if (!HasPendingProduction(threadId)) break;
                         // A future producer may need RAM or file admission retained by this partial batch.
-                        if (Stopwatch.GetElapsedTime(firstWait).TotalMilliseconds >= DiscordLimits.SharedProducerStallMilliseconds) break;
+                        if (Stopwatch.GetElapsedTime(firstWait).TotalMilliseconds >= DiscordLimits.SharedProducerStallMilliseconds &&
+                            !WaitingOnlyForPublication(threadId)) break;
                         deadline = Stopwatch.GetTimestamp();
                         remaining = DiscordLimits.SharedBatchWaitMilliseconds;
                     }
@@ -66,6 +67,8 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                     { if (api.PayloadLifetime.IsCancellationRequested || !HasPendingProduction(threadId)) break; }
                 }
                 if (batch.Count == 0) { RamUploadBudget.PendingMessages.Release(); continue; }
+                Diagnostics.DevelopmentDiagnostics.Current?.Record("upload.batch", "work", new
+                { attachmentCount = batch.Count, waitMilliseconds = Stopwatch.GetElapsedTime(firstWait).TotalMilliseconds, pendingProduction = HasPendingProduction(threadId) });
                 _ = CompleteAsync(threadId, batch);
             }
         }

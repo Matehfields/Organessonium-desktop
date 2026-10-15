@@ -7,10 +7,12 @@ internal sealed partial class SharedPayloadBatcher
     private readonly object _productionSync = new();
     private readonly Dictionary<(string Thread, string Version, string Role), ProductionExpectation> _production = new();
 
-    internal ProductionExpectation ExpectProduction(SharedStorageReservation reservation, string role, CancellationToken token)
+    internal ProductionExpectation ExpectProduction(SharedStorageReservation reservation, string role, CancellationToken token,
+        Func<bool>? waitingForPublication = null)
     {
         var key = (reservation.ThreadId, reservation.VersionId, role);
-        var expectation = new ProductionExpectation(this, key);
+        var expectation = new ProductionExpectation(this, key)
+        { Preparing = waitingForPublication == null, WaitingForPublication = waitingForPublication };
         lock (_productionSync) _production.Add(key, expectation);
         expectation.Registration = token.Register(expectation.Dispose);
         if (expectation.Finished) expectation.Registration.Dispose();
@@ -20,6 +22,15 @@ internal sealed partial class SharedPayloadBatcher
     private bool HasPendingProduction(string threadId)
     {
         lock (_productionSync) return _production.Keys.Any(key => key.Thread == threadId);
+    }
+
+    private bool WaitingOnlyForPublication(string threadId)
+    {
+        lock (_productionSync)
+        {
+            var pending = _production.Where(pair => pair.Key.Thread == threadId).Select(pair => pair.Value).ToArray();
+            return pending.Length > 0 && pending.All(item => !item.Preparing && item.WaitingForPublication?.Invoke() == true);
+        }
     }
 
     private void ProductionReady(SharedStorageReservation reservation, string role)
@@ -34,6 +45,12 @@ internal sealed partial class SharedPayloadBatcher
         private int _finished;
         internal bool Finished => Volatile.Read(ref _finished) != 0;
         internal CancellationTokenRegistration Registration;
+        internal bool Preparing;
+        internal Func<bool>? WaitingForPublication;
+        internal void Activate()
+        {
+            lock (owner._productionSync) if (!Finished) Preparing = true;
+        }
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _finished, 1) != 0) return;

@@ -39,8 +39,12 @@ internal static partial class Program
                     fileId:'file-'+i,threadId:'thread-'+i,metadataMessageId:'meta-'+i,type:'file',sizeBytes:4096,path:'/',parentFolderId:'root'}));
                 window.__items.push({name:'Fotos',folderId:'photos',type:'folder',path:'/',parentFolderId:'root'});
                 window.__items.push({name:'Dentro.jpg',fileId:'inside',threadId:'inside',metadataMessageId:'inside-meta',type:'file',sizeBytes:1024,path:'/Fotos',parentFolderId:'photos'});
+                window.__items[0].name='Foto-00.HEIC';window.__items[1].name='Video-01.MOV';window.__items[2].name='Foto-02.AVIF';
                 window._thumbs={'thread-0':'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9r8AAAAASUVORK5CYII='};
                 window._onAppsLoaded(window.__items);
+                window._onLibraryStatistics({fileCount:25,folderCount:1,totalBytes:99328});
+                window.__summary=[document.getElementById('storage-used')?.textContent,serverItemCount.textContent,storageDisp.textContent];
+                window._opsUploadBatch('media-types',['Foto.HEIC','Video.MOV','Foto.AVIF'],[1,1,1]);
                 """);
             // Wait for initial image decoding and the first viewport observer notification.
             await Task.Delay(200);
@@ -55,18 +59,26 @@ internal static partial class Program
                 window.__observer.observe(document.getElementById('files-grid'),{childList:true,subtree:true});
                 for(let i=0;i<20;i++){
                     window.__items.push({name:'Novo-'+i+'.bin',fileId:'new-'+i,threadId:'new-'+i,metadataMessageId:'new-meta-'+i,type:'file',sizeBytes:1,path:'/',parentFolderId:'root'});
-                    window._onLocalAppsChanged(JSON.parse(JSON.stringify(window.__items)));
-                    window._onAppsLoaded(JSON.parse(JSON.stringify(window.__items)));
+                    window._onAppsBatch(JSON.parse(JSON.stringify(window.__items)));
                 }
+                window._onAppsBatch(window.__items.slice(0,26)); // A late completion snapshot must not remove newer cards.
                 """);
             await Task.Delay(150);
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
+            Console.WriteLine("Upload summary continuity: " + await view.ExecuteScriptAsync("JSON.stringify({files:document.querySelectorAll('#files-grid .file-card:not(.folder-card)').length,items:serverItemCount.textContent,bytes:storageDisp.textContent,previous:window.__summary})"));
+            await Check("serverItemCount.textContent===window.__summary[1]&&storageDisp.textContent===window.__summary[2]&&document.querySelectorAll('#files-grid .file-card:not(.folder-card)').length===44",
+                "uma conclusão atrasada removeu cards ou zerou o armazenamento/contagem durante o upload");
+            await Check("['HEIC','HEIF','AVIF','JXL','TIFF','JFIF','ICO'].every(ext=>fileType('photo.'+ext)==='image')&&['MOV','MTS','M2TS','WMV','OGV','3G2','MPEG'].every(ext=>fileType('video.'+ext)==='video')&&document.querySelector('#op-file-media-types-0 .op-file-icon').textContent==='image'&&document.querySelector('#op-file-media-types-1 .op-file-icon').textContent==='movie'",
+                "a interface não classificou as imagens/vídeos ou manteve ícones genéricos nas transferências");
             Console.WriteLine("Upload card continuity: " + await view.ExecuteScriptAsync("JSON.stringify({removals:window.__removals,card:window.__card===document.querySelector('[data-key=\"meta-0\"]'),folder:window.__folder===document.querySelector('.folders-grid .folder-card'),selected:window.__card.classList.contains('selected'),image:window.__image===window.__card.querySelector('img'),decoded:!!window.__image?.naturalWidth,errors:window.__errors})"));
             await Check("window.__removals===0&&window.__card===document.querySelector('[data-key=\"meta-0\"]')&&window.__folder===document.querySelector('.folders-grid .folder-card')&&window.__card.classList.contains('selected')&&window.__image===window.__card.querySelector('img')&&window.__image.complete&&window.__image.naturalWidth>0",
                 "atualizar o lote removeu/recriou o card, miniatura, pasta ou seleção");
             await view.ExecuteScriptAsync("setView('list');window.__row=document.querySelector('[data-key=\"meta-0\"]');window._onLocalAppsChanged(JSON.parse(JSON.stringify(window.__items)));");
             await Check("window.__row===document.querySelector('[data-key=\"meta-0\"]')&&window.__row.classList.contains('selected')&&document.querySelectorAll('.file-row').length===45&&document.getElementById('files-grid').children.length===0",
                 "a lista perdeu linhas/seleção ou deixou cards duplicados na área oculta");
+            await Check("serverItemCount.textContent===window.__summary[1]&&storageDisp.textContent===window.__summary[2]", "uma alteração local zerou o resumo lateral");
+            await view.ExecuteScriptAsync("window._onLibraryStatistics({fileCount:45,folderCount:1,totalBytes:99348});");
+            await Check("serverItemCount.textContent==='46'&&storageDisp.textContent===fmtSize(99348)", "o resumo não aceitou o agregado atualizado após concluir o lote");
             await view.ExecuteScriptAsync("window.__items=window.__items.filter(a=>a.metadataMessageId!=='new-meta-0');window.__items.find(a=>a.metadataMessageId==='meta-1').name='Renomeada.jpg';window._onAppsLoaded(window.__items);setView('grid');");
             await Check("!document.querySelector('[data-key=\"new-meta-0\"]')&&document.querySelector('[data-key=\"meta-1\"] .card-name').textContent==='Renomeada.jpg'",
                 "reconciliação deixou um arquivo removido ou ignorou rename");

@@ -794,15 +794,13 @@ public sealed class SerialIndexService
     private static bool IsImage(FolderSerialEntry entry)
     {
         return entry.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ||
-               new[] { "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif" }
-                   .Contains(Path.GetExtension(entry.Name).TrimStart('.'), StringComparer.OrdinalIgnoreCase);
+               MediaFileTypes.IsImage(entry.Name);
     }
 
     private static bool IsVideo(FolderSerialEntry entry)
     {
         return entry.MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ||
-               new[] { "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp" }
-                   .Contains(Path.GetExtension(entry.Name).TrimStart('.'), StringComparer.OrdinalIgnoreCase);
+               MediaFileTypes.IsVideo(entry.Name);
     }
 }
 

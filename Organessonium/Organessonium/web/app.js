@@ -960,9 +960,6 @@ window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
     folderFileCounts.clear();
     requestedFolderStatistics.clear();
-    libraryFileCount = null;
-    libraryFolderCount = null;
-    libraryTotalBytes = null;
     allApps = apps;
     syncOpenMarkdownApps();
     render();
@@ -2346,7 +2343,7 @@ window._opsUploadBatch = (id, names, sizes) => {
     item.dataset.opStatus = 'active';
     item.dataset.itemCount = String(safeNames.length);
     const rows = safeNames.map((name, index) => `<div class="op-file-row" id="op-file-${id}-${index}" data-file-status="queued" data-byte-size="${Math.max(1, Number(sizes?.[index]) || 1)}">
-        <span class="op-file-icon">${icon('description',16)}</span>
+        <span class="op-file-icon">${icon(fileIcon(fileType(name)),16)}</span>
         <div class="op-file-copy">
             <div class="op-file-name" title="${esc(name)}">${esc(name)}</div>
             <div class="op-file-detail" id="op-file-detail-${id}-${index}">${esc(t('queuedUpload'))}</div>
@@ -6989,8 +6986,8 @@ function renderArchiveBreadcrumbs(el, pathParts, archiveName, onNavigate) {
 function fileType(name) {
     if(!name) return 'generic';
     const e=name.split('.').pop().toLowerCase();
-    if(['jpg','jpeg','png','gif','bmp','webp','tiff','tif','svg'].includes(e)) return 'image';
-    if(['mp4','m4v','mov','webm','mkv','avi','3gp','wmv','flv'].includes(e))  return 'video';
+    if(['jpg','jpeg','jpe','jfif','png','gif','bmp','dib','webp','wbmp','tiff','tif','svg','heic','heif','avif','jxl','ico','cur','tga'].includes(e)) return 'image';
+    if(['mp4','m4v','mov','qt','webm','mkv','avi','3gp','3g2','wmv','flv','mpg','mpeg','mpe','m2v','vob','mts','m2ts','ogv'].includes(e))  return 'video';
     if(['mp3','flac','wav','ogg','aac','m4a'].includes(e))                     return 'audio';
     if(e==='pdf')                                                              return 'pdf';
     if(['md','markdown'].includes(e))                                          return 'markdown';

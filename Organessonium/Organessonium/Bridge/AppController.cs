@@ -1011,7 +1011,7 @@ public sealed partial class AppController : IAsyncDisposable
         folderIds.Add(string.IsNullOrWhiteSpace(folderId) ? AppRegistry.RootFolderId : folderId);
     }
 
-    private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries, bool refreshStatistics = true)
+    private async Task PublishLocalRegistryAsync(AppRegistry registry, List<AppEntry> entries, bool refreshStatistics = true, bool incremental = false, AppEntry? changedEntry = null)
     {
         foreach (var entry in entries)
         {
@@ -1019,7 +1019,8 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         _loadedApps = entries;
-        await _bridge.CallAsync("_onLocalAppsChanged", entries);
+        IReadOnlyList<AppEntry> publishedEntries = changedEntry == null ? entries : [changedEntry];
+        await _bridge.CallAsync(incremental ? "_onAppsBatch" : "_onLocalAppsChanged", publishedEntries);
         if (refreshStatistics) _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
     }
 
@@ -2100,7 +2101,7 @@ public sealed partial class AppController : IAsyncDisposable
             if (folderCount > 0)
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
-                await PublishLocalRegistryAsync(registry, CurrentLocalEntries());
+                await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
                 await _bridge.CallAsync("_onStatus", "OK Pasta criada sem arquivos para enviar.", false);
             }
             else
@@ -2145,7 +2146,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
-                await PublishLocalRegistryAsync(registry, CurrentLocalEntries());
+                await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
             }
             finally
             {
@@ -2337,6 +2338,7 @@ public sealed partial class AppController : IAsyncDisposable
         var failed = 0;
         var cancelled = 0;
         var active = 0;
+        var publishing = 0;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
         using var originalFiles = new SemaphoreSlim(Math.Max(1, fileParallelism), Math.Max(1, fileParallelism));
@@ -2362,7 +2364,8 @@ public sealed partial class AppController : IAsyncDisposable
 
         var producers = tasks.Select((task, index) => task.PreparedTransfer is { Storage.Shared: true } planned
             ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
-                planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token) : null).ToArray();
+                planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
+                waitingForPublication: () => Volatile.Read(ref publishing) > 0) : null).ToArray();
         Task RunWorkersAsync() => Parallel.ForEachAsync(Enumerable.Range(0, tasks.Count),
             new ParallelOptions { MaxDegreeOfParallelism = DiscordLimits.MaxPendingUploadFiles, CancellationToken = cancellationToken },
             async (index, workerToken) =>
@@ -2373,12 +2376,14 @@ public sealed partial class AppController : IAsyncDisposable
             var originalHeld = 0;
             var pendingHeld = false;
             var activeCounted = false;
+            var publishingCounted = 0;
             void ReleaseOriginal()
             {
                 if (Interlocked.Exchange(ref originalHeld, 0) == 1) admission.Release();
             }
             try
             {
+                producers[index]?.Activate();
                 await admission.WaitAsync(fileToken);
                 originalHeld = 1;
                 await pendingFiles.WaitAsync(fileToken);
@@ -2424,7 +2429,11 @@ public sealed partial class AppController : IAsyncDisposable
                     deferSerialSynchronization: true,
                     replacement: task.Replacement,
                     onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null,
-                    onOriginalUploaded: ReleaseOriginal), fileToken);
+                    onOriginalUploaded: ReleaseOriginal,
+                    onPublishingMetadata: () =>
+                    {
+                        if (Interlocked.Exchange(ref publishingCounted, 1) == 0) Interlocked.Increment(ref publishing);
+                    }), fileToken);
                 uploadedEntries[index] = uploaded;
                 Task publication;
                 lock (allEntries)
@@ -2432,7 +2441,7 @@ public sealed partial class AppController : IAsyncDisposable
                     ReplaceLocalEntry(allEntries, uploaded);
                     var visibleEntries = CurrentLocalEntries();
                     ReplaceLocalEntry(visibleEntries, uploaded);
-                    publication = PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
+                    publication = PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false, incremental: true, changedEntry: uploaded);
                 }
                 await publication;
                 var completed = Interlocked.Increment(ref done);
@@ -2476,6 +2485,7 @@ public sealed partial class AppController : IAsyncDisposable
                 producers[index]?.Dispose();
                 if (pendingHeld) pendingFiles.Release();
                 if (activeCounted) Interlocked.Decrement(ref active);
+                if (Interlocked.Exchange(ref publishingCounted, 0) != 0) Interlocked.Decrement(ref publishing);
             }
         });
 
@@ -2564,7 +2574,8 @@ public sealed partial class AppController : IAsyncDisposable
         FileReplacement? replacement = null,
         Action<long>? onPreviewSize = null,
         bool scheduledTransfer = false,
-        Action? onOriginalUploaded = null)
+        Action? onOriginalUploaded = null,
+        Action? onPublishingMetadata = null)
     {
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2669,7 +2680,7 @@ public sealed partial class AppController : IAsyncDisposable
                 var reservation = new SharedStorageReservation(transferState.FileId, transferState.TransferId, transferState.ThreadId, transferState.Storage);
                 if (!scheduledTransfer) await registry.SharedStorage.VerifyReservationAsync(reservation, cancellationToken);
                 sharedUpload = new SharedUploadContext(registry.SharedStorage, reservation);
-                payloadLease = await RequireApi().AcquireThreadWriteAsync(transferState.ThreadId, cancellationToken);
+                payloadLease = await registry.SharedStorage.HoldWritesAsync([transferState.ThreadId], cancellationToken);
             }
             transferState.FileName = name;
             transferState.SourcePath = originalFile.FullName;
@@ -2906,6 +2917,7 @@ public sealed partial class AppController : IAsyncDisposable
                         0),
                 adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded, sharedUpload);
 
+            onPublishingMetadata?.Invoke();
             await ReportUploadItemProgressAsync(
                 opId,
                 fileIndex,
@@ -5080,7 +5092,7 @@ public sealed partial class AppController : IAsyncDisposable
         ReplaceLocalEntry(all, folder);
         var visibleEntries = CurrentLocalEntries();
         ReplaceLocalEntry(visibleEntries, folder);
-        await PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
+        await PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false, incremental: true, changedEntry: folder);
         TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
         TrackFolderSerial(serialFolderIds, folder.FolderId);
         return folder;
@@ -5182,8 +5194,8 @@ public sealed partial class AppController : IAsyncDisposable
     private static string? PreviewType(string name)
     {
         var ext = Path.GetExtension(name).TrimStart('.').ToLowerInvariant();
-        if (new[] { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "svg" }.Contains(ext)) return "image";
-        if (new[] { "mp4", "mkv", "avi", "mov", "webm", "m4v", "3gp" }.Contains(ext)) return "video";
+        if (MediaFileTypes.IsImage(name)) return "image";
+        if (MediaFileTypes.IsVideo(name)) return "video";
         if (new[] { "mp3", "flac", "wav", "ogg", "aac", "m4a" }.Contains(ext)) return "audio";
         if (ext == "pdf") return "pdf";
         if (ext is "md" or "markdown") return "markdown";
@@ -5195,6 +5207,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string GuessMime(string name)
     {
+        if (MediaFileTypes.IsImage(name)) return MediaFileTypes.MimeType(name)!;
         return Path.GetExtension(name).TrimStart('.').ToLowerInvariant() switch
         {
             "png" => "image/png",
@@ -5256,6 +5269,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string MediaMime(string name)
     {
+        if (MediaFileTypes.IsVideo(name)) return MediaFileTypes.MimeType(name)!;
         return Path.GetExtension(name).TrimStart('.').ToLowerInvariant() switch
         {
             "mp4" or "m4v" => "video/mp4",

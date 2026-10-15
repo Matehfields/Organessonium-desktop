@@ -8,14 +8,6 @@ public static class ThumbnailCache
 {
     private static readonly ConcurrentDictionary<string, string> Memory = new();
     private static DirectoryInfo? CacheDirectory;
-    private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "jpg", "jpeg", "png", "gif", "bmp", "webp", "wbmp", "tiff", "tif"
-    };
-    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "mp4", "m4v", "mov", "webm", "mkv", "avi", "3gp"
-    };
 
     public static void Configure(DirectoryInfo previewDirectory)
     {
@@ -24,14 +16,12 @@ public static class ThumbnailCache
 
     public static bool IsImage(string fileName)
     {
-        var ext = Path.GetExtension(fileName).TrimStart('.');
-        return ext.Length > 0 && ImageExtensions.Contains(ext);
+        return MediaFileTypes.IsImage(fileName);
     }
 
     public static bool IsVideo(string fileName)
     {
-        var ext = Path.GetExtension(fileName).TrimStart('.');
-        return ext.Length > 0 && VideoExtensions.Contains(ext);
+        return MediaFileTypes.IsVideo(fileName);
     }
 
     public static bool Has(string threadId)

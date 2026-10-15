@@ -202,6 +202,7 @@ public sealed class AppEntry
 
     private static string GuessMimeType(string name)
     {
+        if (Services.MediaFileTypes.MimeType(name) is { } mediaMime) return mediaMime;
         return System.IO.Path.GetExtension(name).TrimStart('.').ToLowerInvariant() switch
         {
             "jpg" or "jpeg" => "image/jpeg",

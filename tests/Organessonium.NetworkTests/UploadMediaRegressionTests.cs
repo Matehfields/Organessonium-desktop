@@ -22,7 +22,7 @@ internal static partial class Program
         {
             var residentCache = new byte[288 * 1024 * 1024];
             Array.Fill(residentCache, (byte)7);
-            foreach (var extension in new[] { "png", "jpg", "webp", "mkv", "hevc.mkv" })
+            foreach (var extension in new[] { "png", "jpg", "webp", "avif", "mov", "mkv", "hevc.mkv" })
             {
                 var source = new FileInfo(Path.Combine(directory.FullName, "source." + extension));
                 var info = new ProcessStartInfo(ffmpeg!) { UseShellExecute = false, CreateNoWindow = true,
@@ -30,7 +30,8 @@ internal static partial class Program
                 var arguments = new List<string> { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=12" };
                 if (extension == "hevc.mkv") arguments.AddRange(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100",
                     "-t", "2", "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1", "-c:a", "aac"]);
-                else if (extension == "mkv") arguments.AddRange(["-t", "2", "-c:v", "libx264", "-preset", "ultrafast"]);
+                else if (extension is "mkv" or "mov") arguments.AddRange(["-t", "2", "-c:v", "libx264", "-preset", "ultrafast"]);
+                else if (extension == "avif") arguments.AddRange(["-frames:v", "1", "-c:v", "libaom-av1", "-cpu-used", "8", "-threads", "1", "-still-picture", "1"]);
                 else arguments.AddRange(["-frames:v", "1"]);
                 arguments.Add(source.FullName);
                 foreach (var argument in arguments) info.ArgumentList.Add(argument);
@@ -42,7 +43,7 @@ internal static partial class Program
                     RequireSync(encoder.ExitCode == 0, "não foi possível criar a fixture " + extension);
                 }
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
-                using var thumbnail = ThumbnailCache.IsVideo(source.Name)
+                using var thumbnail = ThumbnailCache.IsVideo(source.Name) || extension == "avif"
                     ? await FfmpegMediaService.ThumbnailAsync(source, timeout.Token, ffmpeg)
                     : await VideoPreviewWorker.GenerateAsync(source, false, false, null, timeout.Token, executable);
                 using var image = new MemoryStream(thumbnail.Bytes);
@@ -72,7 +73,7 @@ internal static partial class Program
                 }
             }
             GC.KeepAlive(residentCache);
-            RequireSync(directory.EnumerateFiles().Count() == 5, "o gerador criou arquivos intermediários");
+            RequireSync(directory.EnumerateFiles().Count() == 7, "o gerador criou arquivos intermediários");
             RequireSync(AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes, "o gerador excedeu 1 GB");
             return TestOutcome.Pass();
         }

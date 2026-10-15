@@ -40,18 +40,25 @@ internal static partial class Program
             await File.WriteAllBytesAsync(path, new byte[1024]); paths.Add(path);
         }
         var upload = (Task)typeof(AppController).GetMethod("UploadPathsAsync", flags)!.Invoke(controller, [paths.ToArray()])!;
+        string journalThread = "";
         try
         {
             await transport.MetadataStarted.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            journalThread = h.Store.LoadFolderIndexMappings()["storage-v2"].ThreadId;
+            transport.Archives.Clear();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             while (h.Server.FileThreads().SelectMany(h.Server.Messages).Sum(message => message.Attachments.Count) < 30)
                 await Task.Delay(25, timeout.Token);
+            await Task.Delay(DiscordLimits.SharedProducerStallMilliseconds + 500, timeout.Token);
             RequireSync(h.Server.FileThreads().SelectMany(h.Server.Messages).Where(message => message.Attachments.Count > 0)
                 .All(message => message.Attachments.Count == 10), "a fila cheia fragmentou o próximo lote antes de liberar publicações");
             RequireSync(!upload.IsCompleted, "o upload foi concluído antes de confirmar os metadados");
         }
         finally { transport.AllowMetadata.TrySetResult(); }
         await upload.WaitAsync(TimeSpan.FromSeconds(40));
+        var journalChanges = transport.Archives.Where(change => change.Thread == journalThread).ToArray();
+        RequireSync(journalChanges.Length == 1 && journalChanges[0].Archived,
+            "o journal alternou arquivamento por registro durante o upload em lote");
         var messages = h.Server.FileThreads().SelectMany(h.Server.Messages).Where(message => message.Attachments.Count > 0).ToArray();
         RequireSync(messages.Count(message => message.Attachments.Count == 10) == 4 && messages.Single(message => message.Attachments.Count != 10).Attachments.Count == 7,
             "publicação lenta ou arquivo multipart impediu lotes cheios, exceto o final");
