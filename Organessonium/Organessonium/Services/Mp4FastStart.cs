@@ -221,7 +221,10 @@ public sealed class PreparedVideoUpload(FileInfo file, bool applied, Func<Stream
     }
     public void Dispose()
     {
+        if (_disposed) return;
         _disposed = true;
         if (metadata != null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(metadata);
+        metadata = null;
+        open = null;
     }
 }

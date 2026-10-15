@@ -45,10 +45,14 @@ internal static partial class Program
             var upload = (Task)typeof(AppController).GetMethod("UploadPathsAsync", flags)!.Invoke(controller, new object[] { paths })!;
             await blocked.Started.Task.WaitAsync(TimeSpan.FromSeconds(15));
             var operations = (IDictionary)typeof(AppController).GetField("_uploadFileOperations", flags)!.GetValue(controller)!;
-            var key = operations.Keys.Cast<string>().Single(value => value.EndsWith(":0", StringComparison.Ordinal));
-            var id = key[..^2];
-            foreach (var index in new[] { 0, 1 })
-                await controller.HandleJsonMessageAsync(JsonSerializer.Serialize(new { method = "cancelUploadFile", args = new object[] { id, index } }));
+            try
+            {
+                var key = operations.Keys.Cast<string>().Single(value => value.EndsWith(":0", StringComparison.Ordinal));
+                var id = key[..^2];
+                foreach (var index in new[] { 0, 1 })
+                    await controller.HandleJsonMessageAsync(JsonSerializer.Serialize(new { method = "cancelUploadFile", args = new object[] { id, index } }));
+            }
+            finally { blocked.AllowPayload.TrySetResult(); }
             await upload.WaitAsync(TimeSpan.FromSeconds(25));
             var visible = (IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!;
             RequireSync(server.PayloadPosts == 1 && visible.Any(entry => entry.Name == "file-2.bin" && entry.Path == "/Fotos") &&
@@ -60,18 +64,20 @@ internal static partial class Program
         finally { SqliteConnection.ClearAllPools(); root.Delete(true); }
     });
 
-    private sealed class BlockFirstPayload(HttpMessageHandler inner) : HttpMessageHandler
+    private sealed class BlockFirstPayload(SyncDiscordFixture inner) : HttpMessageHandler
     {
         private readonly HttpMessageInvoker _forward = new(inner, false);
         private int _held;
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource AllowPayload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
-            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath.EndsWith("/channels/files/threads", StringComparison.Ordinal) &&
+            if (request.Method == HttpMethod.Post && request.Content is MultipartFormDataContent &&
+                inner.FileThreads().Any(thread => request.RequestUri!.AbsolutePath.EndsWith("/channels/" + thread + "/messages", StringComparison.Ordinal)) &&
                 Interlocked.Exchange(ref _held, 1) == 0)
             {
                 Started.TrySetResult();
-                await Task.Delay(Timeout.Infinite, token);
+                await AllowPayload.Task.WaitAsync(token);
             }
             return await _forward.SendAsync(request, token);
         }

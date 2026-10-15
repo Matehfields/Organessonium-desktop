@@ -6,7 +6,7 @@ using Organessonium.Models;
 
 namespace Organessonium.Services;
 
-internal sealed class SharedPayloadBatcher(SharedStorageManager storage, DiscordApiClient api, MetadataService metadata)
+internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage, DiscordApiClient api, MetadataService metadata)
 {
     private readonly ConcurrentDictionary<string, Lazy<Channel<Work>>> _queues = new(StringComparer.Ordinal);
     private static readonly SemaphoreSlim NetworkBodies = new(16, 16);
@@ -27,6 +27,7 @@ internal sealed class SharedPayloadBatcher(SharedStorageManager storage, Discord
         })).Value;
         using var admission = CancellationTokenSource.CreateLinkedTokenSource(token, api.PayloadLifetime);
         await queue.Writer.WriteAsync(work, admission.Token).ConfigureAwait(false);
+        ProductionReady(reservation, context.Role);
         // Cancellation after admission cannot abort a multipart containing another file.
         return await work.Completion.Task.ConfigureAwait(false);
     }
@@ -40,6 +41,7 @@ internal sealed class SharedPayloadBatcher(SharedStorageManager storage, Discord
                 await RamUploadBudget.PendingMessages.WaitAsync(api.PayloadLifetime).ConfigureAwait(false);
                 var batch = new List<Work>(DiscordLimits.MaxAttachmentsPerSharedMessage);
                 var deadline = Stopwatch.GetTimestamp();
+                var firstWait = deadline;
                 while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage)
                 {
                     while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage && reader.TryRead(out var work))
@@ -48,11 +50,20 @@ internal sealed class SharedPayloadBatcher(SharedStorageManager storage, Discord
                         else batch.Add(work);
                     }
                     var remaining = DiscordLimits.SharedBatchWaitMilliseconds - Stopwatch.GetElapsedTime(deadline).TotalMilliseconds;
-                    if (batch.Count == DiscordLimits.MaxAttachmentsPerSharedMessage || remaining <= 0) break;
+                    if (batch.Count == DiscordLimits.MaxAttachmentsPerSharedMessage) break;
+                    if (remaining <= 0)
+                    {
+                        if (!HasPendingProduction(threadId)) break;
+                        // A future producer may need RAM or file admission retained by this partial batch.
+                        if (Stopwatch.GetElapsedTime(firstWait).TotalMilliseconds >= DiscordLimits.SharedProducerStallMilliseconds) break;
+                        deadline = Stopwatch.GetTimestamp();
+                        remaining = DiscordLimits.SharedBatchWaitMilliseconds;
+                    }
                     using var wait = CancellationTokenSource.CreateLinkedTokenSource(api.PayloadLifetime);
                     wait.CancelAfter((int)Math.Ceiling(remaining));
                     try { if (!await reader.WaitToReadAsync(wait.Token).ConfigureAwait(false)) break; }
-                    catch (OperationCanceledException) { break; }
+                    catch (OperationCanceledException)
+                    { if (api.PayloadLifetime.IsCancellationRequested || !HasPendingProduction(threadId)) break; }
                 }
                 if (batch.Count == 0) { RamUploadBudget.PendingMessages.Release(); continue; }
                 _ = CompleteAsync(threadId, batch);

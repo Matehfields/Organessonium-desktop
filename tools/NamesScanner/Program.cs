@@ -30,7 +30,8 @@ public static class Program
             catch (Exception error) { Console.WriteLine("Migration stopped safely: " + error.GetType().Name); return 1; }
         }
         var auditBatches = args.Contains("--audit-storage-batches", StringComparer.OrdinalIgnoreCase);
-        if (auditBatches || args.Contains("--audit-metadata-layout", StringComparer.OrdinalIgnoreCase))
+        var auditJournal = args.Contains("--audit-storage-journal", StringComparer.OrdinalIgnoreCase);
+        if (auditBatches || auditJournal || args.Contains("--audit-metadata-layout", StringComparer.OrdinalIgnoreCase))
         {
             try
             {
@@ -38,7 +39,7 @@ public static class Program
                 var metadata = new MetadataService(MetadataCodec.ForStore(store), api.DownloadAttachmentBytesAsync);
                 var counts = new SortedDictionary<string, int>(StringComparer.Ordinal);
                 var messages = (await api.GetMessagesAsync(settings.NamesChannelId, null)).ToList();
-                if (auditBatches)
+                if (auditBatches || auditJournal)
                 {
                     var mappings = await metadata.ReadFolderIndexMappingsInParallelAsync(messages, 4);
                     foreach (var mapping in mappings.Where(mapping => mapping.FolderId == "storage-v2"))

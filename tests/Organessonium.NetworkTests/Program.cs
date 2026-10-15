@@ -23,6 +23,8 @@ internal static partial class Program
         ("appearanceHiddenBrowser", AppearanceHiddenBrowserAsync),
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
         ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
+        ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),
+        ("sharedStorageDelayedProducers", SharedStorageDelayedProducersAsync),
         ("sharedStorageReferencesDownloadsAndThumbnails", SharedStorageReferencesDownloadsAndThumbnailsAsync),
         ("sharedStorageSelectiveCleanupAndRecovery", SharedStorageSelectiveCleanupAndRecoveryAsync),
         ("sharedStorageVersionsTrashAndLegacy", SharedStorageVersionsTrashAndLegacyAsync),

@@ -2337,12 +2337,11 @@ public sealed partial class AppController : IAsyncDisposable
         var failed = 0;
         var cancelled = 0;
         var active = 0;
-        var nextIndex = -1;
         var stoppedByApi = 0;
         var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
-        // Single-part shared files are descriptors of one multipart, not ten dedicated uploads.
-        if (tasks.All(task => task.PreparedTransfer?.Storage?.Shared == true && task.PreparedTransfer.TotalChunks == 1))
-            fileParallelism = Math.Min(tasks.Count, Math.Max(fileParallelism, DiscordLimits.MaxAttachmentsPerSharedMessage));
+        using var originalFiles = new SemaphoreSlim(Math.Max(1, fileParallelism), Math.Max(1, fileParallelism));
+        using var smallOriginals = new SemaphoreSlim(DiscordLimits.MaxActiveSharedOriginalFiles, DiscordLimits.MaxActiveSharedOriginalFiles);
+        using var pendingFiles = new SemaphoreSlim(DiscordLimits.MaxPendingUploadFiles, DiscordLimits.MaxPendingUploadFiles);
         await using var poolWrites = await registry.SharedStorage.HoldWritesAsync(tasks.Where(task => task.PreparedTransfer?.Storage?.Shared == true)
             .Select(task => task.PreparedTransfer!.ThreadId), cancellationToken);
         var uploadWorkers = settings.EffectiveUploadThreads;
@@ -2352,7 +2351,7 @@ public sealed partial class AppController : IAsyncDisposable
         using var memoryCoordinator = new UploadMemoryCoordinator(uploadWorkers, forceParallelism: settings.ForceUploadParallelism);
         AppLogger.Debug(
             "Upload.Concurrency",
-            $"Upload batch configured with {uploadWorkers} network workers, {fileParallelism} parallel files and {partsPerFile} parts per file.");
+            $"Upload batch configured with {uploadWorkers} network workers, {fileParallelism} regular files, {DiscordLimits.MaxActiveSharedOriginalFiles} shared descriptors and {partsPerFile} parts per regular file.");
         var transferActivity = new TransferActivityClock();
         var totalBytes = tasks.Sum(task => Math.Max(0, task.File.Length));
         long uploadedBytes = 0;
@@ -2361,126 +2360,136 @@ public sealed partial class AppController : IAsyncDisposable
         for (var index = 0; index < fileCancellations.Length; index++)
             _uploadFileOperations[opId + ":" + index] = fileCancellations[index];
 
-        var workers = Enumerable.Range(0, fileParallelism).Select(async _ =>
+        var producers = tasks.Select((task, index) => task.PreparedTransfer is { Storage.Shared: true } planned
+            ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
+                planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token) : null).ToArray();
+        Task RunWorkersAsync() => Parallel.ForEachAsync(Enumerable.Range(0, tasks.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = DiscordLimits.MaxPendingUploadFiles, CancellationToken = cancellationToken },
+            async (index, workerToken) =>
         {
-            while (Volatile.Read(ref stoppedByApi) == 0)
+            var task = tasks[index];
+            var fileToken = fileCancellations[index].Token;
+            var admission = task.PreparedTransfer is { Storage.Shared: true, TotalChunks: 1 } ? smallOriginals : originalFiles;
+            var originalHeld = 0;
+            var pendingHeld = false;
+            var activeCounted = false;
+            void ReleaseOriginal()
             {
-                var index = Interlocked.Increment(ref nextIndex);
-                if (index >= tasks.Count)
-                {
-                    return;
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                var task = tasks[index];
-                var fileToken = fileCancellations[index].Token;
-                if (fileToken.IsCancellationRequested)
-                {
-                    Interlocked.Increment(ref cancelled);
-                    await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
-                    continue;
-                }
+                if (Interlocked.Exchange(ref originalHeld, 0) == 1) admission.Release();
+            }
+            try
+            {
+                await admission.WaitAsync(fileToken);
+                originalHeld = 1;
+                await pendingFiles.WaitAsync(fileToken);
+                pendingHeld = true;
+                if (Volatile.Read(ref stoppedByApi) != 0) return;
+                fileToken.ThrowIfCancellationRequested();
                 var activeNow = Interlocked.Increment(ref active);
+                activeCounted = true;
                 await OpsUploadFileProgressAsync(opId, index, "active", 0, "Preparando...");
                 await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + Volatile.Read(ref failed), tasks.Count), $"{activeNow} upload(s) ativo(s)");
-                try
-                {
-                    var uploaded = await Task.Run(() => UploadSingleAsync(
-                        opId,
-                        index,
-                        tasks.Count,
-                        task.File,
-                        task.Path,
-                        entrySnapshot,
-                        uploader,
-                        registry,
-                        settings,
-                        new UiThrottle(),
-                        fileToken,
-                        existingTransferState: task.PreparedTransfer,
-                        adaptiveUploadGate: uploadGate,
-                        memoryCoordinator: memoryCoordinator,
-                        maxParallelPartsPerFile: partsPerFile,
-                        useBatchUi: true,
-                        onBytesUploaded: async (bytes, wireBytes) =>
-                        {
-                            var currentBytes = Interlocked.Add(ref uploadedBytes, Math.Max(0, bytes));
-                            var currentWireBytes = Interlocked.Add(ref transmittedBytes, Math.Max(0, wireBytes));
-                            await OpsTransferMetricsAsync(
-                                opId,
-                                "upload",
-                                Volatile.Read(ref done),
-                                tasks.Count,
-                                currentBytes,
-                                totalBytes,
-                                transferActivity.ElapsedSeconds,
-                                currentWireBytes);
-                        },
-                        transferActivity: transferActivity,
-                        deferSerialSynchronization: true,
-                        replacement: task.Replacement,
-                        onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null), fileToken);
-                    uploadedEntries[index] = uploaded;
-                    Task publication;
-                    lock (allEntries)
+                var uploaded = await Task.Run(() => UploadSingleAsync(
+                    opId,
+                    index,
+                    tasks.Count,
+                    task.File,
+                    task.Path,
+                    entrySnapshot,
+                    uploader,
+                    registry,
+                    settings,
+                    new UiThrottle(),
+                    fileToken,
+                    existingTransferState: task.PreparedTransfer,
+                    adaptiveUploadGate: uploadGate,
+                    memoryCoordinator: memoryCoordinator,
+                    maxParallelPartsPerFile: partsPerFile,
+                    useBatchUi: true,
+                    onBytesUploaded: async (bytes, wireBytes) =>
                     {
-                        ReplaceLocalEntry(allEntries, uploaded);
-                        var visibleEntries = CurrentLocalEntries();
-                        ReplaceLocalEntry(visibleEntries, uploaded);
-                        publication = PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
-                    }
-                    await publication;
-                    var completed = Interlocked.Increment(ref done);
-                    await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
-                    await OpsTransferMetricsAsync(
-                        opId,
-                        "upload",
-                        completed,
-                        tasks.Count,
-                        Interlocked.Read(ref uploadedBytes),
-                        totalBytes,
-                        transferActivity.ElapsedSeconds,
-                        Interlocked.Read(ref transmittedBytes));
-                    await OpsProgressAsync(opId, Percent(completed + Volatile.Read(ref failed), tasks.Count), $"{completed}/{tasks.Count} concluídos");
-                }
-                catch (OperationCanceledException)
+                        var currentBytes = Interlocked.Add(ref uploadedBytes, Math.Max(0, bytes));
+                        var currentWireBytes = Interlocked.Add(ref transmittedBytes, Math.Max(0, wireBytes));
+                        await OpsTransferMetricsAsync(
+                            opId,
+                            "upload",
+                            Volatile.Read(ref done),
+                            tasks.Count,
+                            currentBytes,
+                            totalBytes,
+                            transferActivity.ElapsedSeconds,
+                            currentWireBytes);
+                    },
+                    transferActivity: transferActivity,
+                    deferSerialSynchronization: true,
+                    replacement: task.Replacement,
+                    onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null,
+                    onOriginalUploaded: ReleaseOriginal), fileToken);
+                uploadedEntries[index] = uploaded;
+                Task publication;
+                lock (allEntries)
                 {
-                    await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
-                    Interlocked.Increment(ref cancelled);
-                    if (cancellationToken.IsCancellationRequested) throw;
+                    ReplaceLocalEntry(allEntries, uploaded);
+                    var visibleEntries = CurrentLocalEntries();
+                    ReplaceLocalEntry(visibleEntries, uploaded);
+                    publication = PublishLocalRegistryAsync(registry, visibleEntries, refreshStatistics: false);
                 }
-                catch (Exception ex)
+                await publication;
+                var completed = Interlocked.Increment(ref done);
+                await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
+                await OpsTransferMetricsAsync(
+                    opId,
+                    "upload",
+                    completed,
+                    tasks.Count,
+                    Interlocked.Read(ref uploadedBytes),
+                    totalBytes,
+                    transferActivity.ElapsedSeconds,
+                    Interlocked.Read(ref transmittedBytes));
+                await OpsProgressAsync(opId, Percent(completed + Volatile.Read(ref failed), tasks.Count), $"{completed}/{tasks.Count} concluídos");
+            }
+            catch (OperationCanceledException)
+            {
+                await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
+                Interlocked.Increment(ref cancelled);
+                if (cancellationToken.IsCancellationRequested) throw;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[Upload] " + ex.Message);
+                AppLogger.Error("UploadSingle", ex, task.File.FullName);
+                var blockedByApi = IsBlockingUploadApiError(ex);
+                if (blockedByApi)
                 {
-                    Debug.WriteLine("[Upload] " + ex.Message);
-                    AppLogger.Error("UploadSingle", ex, task.File.FullName);
-                    var blockedByApi = IsBlockingUploadApiError(ex);
-                    if (blockedByApi)
-                    {
-                        Volatile.Write(ref stoppedByApi, 1);
-                    }
+                    Volatile.Write(ref stoppedByApi, 1);
+                    foreach (var producer in producers) producer?.Dispose();
+                }
 
-                    var failedNow = Interlocked.Increment(ref failed);
-                    var message = FriendlyUploadError(ex);
-                    await OpsUploadFileProgressAsync(opId, index, blockedByApi ? "waiting" : "error", -1, message);
-                    await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + failedNow, tasks.Count), $"{failedNow} upload(s) falharam");
-                }
-                finally
-                {
-                    Interlocked.Decrement(ref active);
-                }
+                var failedNow = Interlocked.Increment(ref failed);
+                var message = FriendlyUploadError(ex);
+                await OpsUploadFileProgressAsync(opId, index, blockedByApi ? "waiting" : "error", -1, message);
+                await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + failedNow, tasks.Count), $"{failedNow} upload(s) falharam");
+            }
+            finally
+            {
+                ReleaseOriginal();
+                producers[index]?.Dispose();
+                if (pendingHeld) pendingFiles.Release();
+                if (activeCounted) Interlocked.Decrement(ref active);
             }
         });
 
         try
         {
             await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
-            await Task.WhenAll(workers);
+            await RunWorkersAsync();
             await registry.SharedStorage.ReconcileReservationsAsync(cancellationToken);
         }
         finally
         {
             for (var index = 0; index < fileCancellations.Length; index++)
             {
+                producers[index]?.Dispose();
                 _uploadFileOperations.TryRemove(opId + ":" + index, out _);
                 fileCancellations[index].Dispose();
             }
@@ -2554,7 +2563,8 @@ public sealed partial class AppController : IAsyncDisposable
         bool deferSerialSynchronization = false,
         FileReplacement? replacement = null,
         Action<long>? onPreviewSize = null,
-        bool scheduledTransfer = false)
+        bool scheduledTransfer = false,
+        Action? onOriginalUploaded = null)
     {
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2868,6 +2878,9 @@ public sealed partial class AppController : IAsyncDisposable
                     onPartTransferProgress: (index, wire) => { byteProgress.Report(index, wire); ReportUploadedParts(Volatile.Read(ref confirmedParts)); });
             }
             threadId = upload.ThreadId;
+            // All original bodies/ACKs/checkpoints have completed. Do not retain their admission or MP4 index during finalization.
+            preparedVideo.Dispose();
+            onOriginalUploaded?.Invoke();
 
             var previewIds = await TryUploadGeneratedPreviewAsync(
                 opId,
@@ -3039,6 +3052,8 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if (previewMessageId.Length == 0)
             {
+                using var producing = sharedUpload?.Manager.Batcher.ExpectProduction(sharedUpload.Reservation,
+                    EncryptedPayloadRoles.Preview, cancellationToken);
                 await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
                     progressTracker?.ThumbnailGeneration(0) ?? 0, "Gerando miniatura",
                     throttle, true, useBatchUi, progressTracker: progressTracker);
@@ -3052,7 +3067,8 @@ public sealed partial class AppController : IAsyncDisposable
                 using var part = previewEncryption != null
                     ? await memory.PreparePartAsync(_encryption, source, thumbnail.Length,
                         EncryptionService.MaximumPlaintextPayloadBytes, previewEncryption.WithChunkCount(1),
-                        cancellationToken, openSource: thumbnail.OpenRead)
+                        cancellationToken, deferBuffers: sharedUpload != null, openSource: thumbnail.OpenRead,
+                        isolateSendCancellation: sharedUpload != null)
                     : await UploadMemoryCoordinator.PreparePlainPartAsync(source, thumbnail.Length,
                         DiscordLimits.AttachmentBytes, 0, cancellationToken, thumbnail.OpenRead);
                 part.TransferProgress = wire =>
