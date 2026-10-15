@@ -22,6 +22,7 @@ internal static partial class Program
         ("fileActionsHiddenBrowser", FileActionsHiddenBrowserAsync),
         ("appearanceHiddenBrowser", AppearanceHiddenBrowserAsync),
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
+        ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
         ("sharedStorageReferencesDownloadsAndThumbnails", SharedStorageReferencesDownloadsAndThumbnailsAsync),
         ("sharedStorageSelectiveCleanupAndRecovery", SharedStorageSelectiveCleanupAndRecoveryAsync),
         ("sharedStorageVersionsTrashAndLegacy", SharedStorageVersionsTrashAndLegacyAsync),

@@ -11,7 +11,7 @@ Documentos complementares preservados: [criptografia dos metadados](<implementat
 | Envelope de metadata | `format: organessonium-metadata`, `version: 1` |
 | Objeto file/folder | `schemaVersion: 2` |
 | Layout de armazenamento | `storage.version: 2`, `storage.mode: shared` ou `dedicated` |
-| Registros operacionais em names | `schemaVersion: 1`, `entryType: storage…` |
+| Registros operacionais no índice técnico de folders | `schemaVersion: 1`, `entryType: storage…` |
 | Blob criptografado | ORGAESGC V1 |
 | Serial de pasta | OSER v3, sem campos novos |
 | Checkpoint unitário antigo | `payloadLayoutVersion: 1`; também quando ausente no JSON antigo |
@@ -25,11 +25,27 @@ Documentos complementares preservados: [criptografia dos metadados](<implementat
 ## 2. Organização no servidor
 
 - `files`: posts de blobs. Layout compartilhado inicia com controle cifrado sem attachment. Layout dedicado conserva o primeiro chunk na mensagem inicial.
-- `folders`: índices por pasta com cabeçalho e metadados cifrados dos filhos. Renomear, mover ou enviar à lixeira muda o índice, não os blobs.
-- `names`: mappings de índices, registros legados existentes, catálogo V2, planos/recibos, referências, intents de limpeza e claims de alteração.
+- `folders`: índices por pasta com cabeçalho e metadados cifrados dos filhos. O índice técnico `storage-v2` contém catálogo V2, planos/recibos, referências, intents de limpeza e claims de alteração. Renomear, mover ou enviar à lixeira muda o índice do arquivo, não os blobs.
+- `names`: novas publicações somente de mappings `folderIndex`. Não publicar metadados de arquivos nem registros operacionais V2 nesse canal.
 - `serial`: OSER encapsulado no formato criptografado existente. É uma visão de navegação, não fonte completa de chunks, thumbnails ou versões.
 
-Todos os registros V2 de `names`, controles e captions de payload são cifrados pelo codec existente. Se o envelope couber nos 2.000 caracteres, é inline. Caso contrário, `metadata.json` contém somente o envelope cifrado, em UTF-8, com content técnico `metadata`. A escrita operacional usa RAM, sem arquivo temporário de plaintext. Nomes privados, fileIds, membros, associações de attachments, caminhos e versões nunca vão no título do post.
+Todos os registros V2 do índice técnico, controles e captions de payload são cifrados pelo codec existente. Se o envelope couber nos 2.000 caracteres, é inline. Caso contrário, `metadata.json` contém somente o envelope cifrado, em UTF-8, com content técnico `metadata`. A escrita operacional usa RAM, sem arquivo temporário de plaintext. Nomes privados, fileIds, membros, associações de attachments, caminhos e versões nunca vão no título do post.
+
+Resolver o mapping cifrado `folderIndex` com `folderId: storage-v2` em `names`; seu `threadId` é o destino de todos os registros operacionais. Se não existir, estabelecer o índice root, criar um índice interno no fórum `folders` com cabeçalho `folderIndexHeader`, e publicar somente o mapping em `names`. Não criar metadata de pasta/card na raiz nem incluir registros técnicos no serial de navegação. Escritas respeitam archive/locked/permissões usando leases.
+
+Compatibilidade temporária: ler também registros `storage…` antigos em `names`, mesclados por snowflake com o journal atual. O canal de origem do catálogo é operacional e não entra no JSON. Ao modificar um catálogo antigo, publicar sua atualização no índice técnico antes de usar o novo ID. Registros antigos não são apagados, regravados em names ou migrados em massa automaticamente. Sua remoção exige uma operação coordenada e verificada, especialmente se outros clientes ainda utilizarem a versão inicial de V2. O fallback de leitura está registrado em `migration.md`.
+
+### Migração explícita do journal que foi publicado em names
+
+`AppRegistry.MigrateNamesStorageJournalAsync` move somente os tipos operacionais V2 conhecidos, schema 1. A operação deve ser executada com o desktop fechado e outros clientes escritores pausados. Não é acionada na inicialização nem ao ler arquivos. O comando de manutenção é `dotnet run --project tools/NamesScanner -c Release -- --migrate-storage-journal`; `--audit-metadata-layout` é somente leitura e mostra contagens por tipo, sem metadata completo ou secrets.
+
+Cada cópia preserva integralmente o JSON e adiciona `legacyNamesMessageId`, string com a snowflake da origem, dentro do conteúdo cifrado. Primeiro copiar/confirmar **todos** os destinos; conferir novamente o snapshot completo de origens; então, para cada remoção, reler origem e destino e comparar o JSON antes do DELETE somente daquela mensagem de names. Não remover mappings, controles/payloads ou registros de tipo/versão desconhecidos. Falha mantém origens ainda não removidas; destinos já confirmados permanecem válidos. Retomada localiza cópias por `legacyNamesMessageId` e não cria outra cópia quando o conteúdo já confere. Nenhum arquivo temporário de plaintext é criado.
+
+Na leitura, ordenar eventos pelo valor numérico de `legacyNamesMessageId`, quando presente, ou pelo ID atual da mensagem quando ausente. Comparar inteiros exatos, usando `BigInt.parse` em Dart quando necessário, nunca double. Desempatar pelo ID atual. Usar essa ordem lógica também na prioridade de claims. O frontier de paginação continua físico. Se uma cópia recém-descoberta introduzir evento lógico anterior ao frontier, reconstituir o estado pelo journal completo, em vez de aplicar eventos antigos sobre estado recente. Isso impede um catálogo antigo copiado depois de substituir um catálogo mais novo já existente. O atributo é opcional de compatibilidade; não muda o schema criptográfico. Flutter deve reproduzir essas regras para contas migradas.
+
+Depois de remover os registros de names, a versão mínima do escritor precisa reconhecer o mapping storage-v2 e a ordem lógica dos registros migrados. Voltar ao writer V2 inicial exige migração reversa verificada; retornar somente o código ao commit anterior não restaura as mensagens remotas removidas.
+
+Metadados `file`/`folder` legados e tipos não operacionais não são movidos por esse comando: precisam de planejamento por pasta e atualização dos IDs/seriais, não de cópia para o índice técnico. A auditoria da conta deve identificar esses casos antes de declarar a migração completa.
 
 O título compartilhado é `storage-<storageId>`, opaco. Attachments compartilhados recebem `<UUID N>.bin` e `application/octet-stream`. O Discord ainda vê IDs físicos, quantidades, tamanhos cifrados, horários, títulos técnicos, o header ORGAESGC e movimentação de rede. A criptografia não esconde essa análise de tráfego.
 
@@ -81,7 +97,7 @@ O primeiro content do post, também cifrado, não contém arquivos:
 }
 ```
 
-Criação: persistir intent local por storageId, criar post uma vez, salvar thread/control recebidos, publicar catálogo em names, depois remover intent local. Um resultado HTTP de criação desconhecido **não é reenviado cegamente**. Na retomada, procurar o título opaco em threads ativas/arquivadas e conferir o controle cifrado antes de publicar o catálogo. HTTP 429 e rejeição explícita por limite de threads podem ser tratados conforme a API existente. Uma instalação nova sem aquela identidade/checkpoint não adota automaticamente um pool órfão de outro escritor.
+Criação: persistir intent local por storageId, criar post uma vez, salvar thread/control recebidos, publicar catálogo no índice técnico de folders, depois remover intent local. Um resultado HTTP de criação desconhecido **não é reenviado cegamente**. Na retomada, procurar o título opaco em threads ativas/arquivadas e conferir o controle cifrado antes de publicar o catálogo. HTTP 429 e rejeição explícita por limite de threads podem ser tratados conforme a API existente. Uma instalação nova sem aquela identidade/checkpoint não adota automaticamente um pool órfão de outro escritor.
 
 ## 5. Reserva, confirmação e reconciliação
 
@@ -122,7 +138,7 @@ Uma rejeição específica de tamanho/quantidade pode dividir aquele batch, reut
 
 ## 7. Plano e recibo duráveis de mensagem
 
-Antes do POST do corpo, gravar em names o plano cifrado:
+Antes do POST do corpo, gravar no índice técnico de folders o plano cifrado:
 
 ```json
 {
@@ -283,7 +299,7 @@ O desktop atual não tem um exportador de compartilhamento JSON ativo ligado ao 
 
 ## 12. Referências e alterações concorrentes
 
-Referência cifrada em names:
+Referência cifrada no índice técnico de folders:
 
 ```json
 {
@@ -433,7 +449,7 @@ Não fazer migração de conta ao ler. Uma nova versão pode usar V2 sem alterar
 
 O mobile precisa implementar:
 
-1. Decodificar os envelopes V1 existentes; enumerar names/mappings e reconhecer tipos `storageThread`, `storageControl`, `storageReference`, `storageMutation`, `storageCleanup`, `storageCleanupApplied`, `storageBatchPlan` e `storageBatchReceipt` pelo schema declarado.
+1. Decodificar os envelopes V1 existentes; resolver em names o mapping `folderId: storage-v2`, ler/escrever o journal na thread indicada no fórum folders e reconhecer tipos `storageThread`, `storageControl`, `storageReference`, `storageMutation`, `storageCleanup`, `storageCleanupApplied`, `storageBatchPlan` e `storageBatchReceipt` pelo schema declarado. Names recebe somente mappings novos; aceitar os registros operacionais antigos ali apenas para leitura.
 2. Criar/persistir ownerId aleatório por instalação, diferente do desktop. Não importar o owner desktop para disputar vagas; SQLite/secure storage local não é autoridade remota.
 3. Aplicar o teto de 1 GiB original e 256 fileIds distintos. Reservar/validar catálogo remoto antes do body, sem usar revision como CAS.
 4. Persistir fileId/versionId/encryption/reserva/checkpoint; criar controle sem attachment e tratar ACK desconhecido por descoberta/validação do post existente.

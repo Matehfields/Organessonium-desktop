@@ -41,7 +41,7 @@ public sealed partial class AppRegistry
         _store = store;
         _settings = settings;
         _metadata = new MetadataService(MetadataCodec.ForStore(store), discord.DownloadAttachmentBytesAsync);
-        SharedStorage = new SharedStorageManager(discord, store, settings);
+        SharedStorage = new SharedStorageManager(discord, store, settings, journalIndex: GetStorageJournalIndexAsync);
         _serials = new SerialIndexService(discord, store, settings);
         _mappings = new ConcurrentDictionary<string, FolderIndexMapping>(
             store.LoadFolderIndexMappings(),

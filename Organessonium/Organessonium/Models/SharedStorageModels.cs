@@ -25,6 +25,7 @@ internal sealed class StorageThreadRecord
     [JsonPropertyName("members")]
     public List<StorageMember> Members { get; set; } = [];
     [JsonIgnore] public string CatalogMessageId { get; set; } = "";
+    [JsonIgnore] public string CatalogChannelId { get; set; } = "";
 }
 
 internal sealed class StorageMember

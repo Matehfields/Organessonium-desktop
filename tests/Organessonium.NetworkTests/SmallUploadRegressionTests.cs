@@ -81,9 +81,11 @@ internal static partial class Program
                 extra.ChunkCount = 1; extra.ChunkMessageIds = ["extra-message"];
                 await registry.AddEntryAsync(extra, synchronizeSerials: false);
                 await first.DisposeAsync();
-                RequireSync(transport.Archives.Count == 1, "o primeiro escopo fechou o lote ainda ativo");
+                RequireSync(transport.Archives.Count(change => change.Thread == transport.IndexThreadId) == 1,
+                    "o primeiro escopo fechou o lote ainda ativo");
             }
-            RequireSync(transport.Archives.Count == 2 && transport.Archives.Last().Archived,
+            var overlappingChanges = transport.Archives.Where(change => change.Thread == transport.IndexThreadId).ToArray();
+            RequireSync(overlappingChanges.Length == 2 && overlappingChanges.Last().Archived,
                 "o índice não foi fechado ao sair do último escopo");
             return TestOutcome.Pass();
         }

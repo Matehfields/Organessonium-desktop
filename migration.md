@@ -797,6 +797,26 @@ Impacto: exclusão dos objetos antigos passa a exigir migração explícita. Rem
 
 Procedimento: migrar locators/referências autorizados, remover somente a exclusão legada por thread e lookup antigo em names quando desnecessários, mantendo GC/leases/fences/validação V2.
 
+### STORAGE-V2-NAMES-001
+
+Status: ativo.
+
+Descrição: a implementação inicial de shared storage V2 publicou catálogo, planos, recibos, referências e claims no canal names. Novas gravações usam somente o índice técnico storage-v2 no fórum folders; metadados de arquivos permanecem nas threads das respectivas pastas.
+
+Motivo: preservar reservas, checkpoints, retomadas e proteção contra exclusão de dados produzidos pela primeira implementação, sem apagar mensagens existentes automaticamente.
+
+Código relacionado: `AppRegistry.SharedStorage.cs`, `SharedStorageManager.Journal.cs`, `SharedStorageManager.RefreshJournalAsync`, `ReloadCatalogAsync`, `SaveCatalogAsync` e `RecoverPayloadReferencesAsync`. Teste: `sharedStorageJournalRouting`.
+
+Comportamento atual: mesclar leitura dos registros antigos em names com o journal atual por snowflake. Conservar o canal de origem do catálogo somente em memória; uma alteração efetiva publica o catálogo no índice técnico, sem atualizar ou apagar a mensagem antiga em names. Names recebe somente mappings novos. Não criar card para o índice técnico.
+
+Pode ser removido quando: todos os clientes escritores estiverem atualizados e os registros operacionais antigos tiverem sido transferidos e verificados em uma migração autorizada.
+
+Impacto da remoção: catálogos e planos antigos em names deixam de ser encontrados, prejudicando retomada, capacidade e limpeza.
+
+Procedimento: coordenar os escritores, copiar/validar registros mantendo sua ordem e referências, confirmar recuperação e somente depois remover mensagens antigas e o fallback. Nunca apagar mappings, metadados legados ou payloads por prefixo sem validação.
+
+Migração explícita disponível: `AppRegistry.MigrateNamesStorageJournalAsync`, acionada por `tools/NamesScanner --migrate-storage-journal`. Copia e verifica todos os registros antes das remoções, compara origem/destino novamente e retoma por marcador cifrado `legacyNamesMessageId`. `SharedStorageManager.Journal.cs` preserva a ordem lógica original, incluindo claims; eventos migrados descobertos após inicialização provocam replay completo. Manter esse marcador/leitor até não haver mais journal migrado ou até uma compactação autorizada preservar a mesma semântica. O comando não move `file`/`folder` legados nem remove mappings/payloads. O teste `sharedStorageJournalRouting` simula falha na cópia, falha na remoção, retomada sem duplicação, proteção de catálogo mais novo e download posterior.
+
 ## Verificações antes de uma versão definitiva
 
 1. Inventariar objetos/remessas/checkpoints da conta sem imprimir dados privados em logs.

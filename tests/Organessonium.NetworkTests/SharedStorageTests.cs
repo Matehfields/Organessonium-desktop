@@ -91,7 +91,7 @@ internal static partial class Program
         {
             var result = new List<StorageThreadRecord>();
             var metadata = new MetadataService(MetadataCodec.ForStore(Store), Api.DownloadAttachmentBytesAsync);
-            foreach (var message in Server.Messages("names"))
+            foreach (var message in Server.Messages((await Registry.GetStorageJournalIndexAsync(default)).ThreadId))
             {
                 using var json = await metadata.ReadJsonAsync(message);
                 if (json?.RootElement.TryGetProperty("entryType", out var type) == true && type.GetString() == "storageThread")

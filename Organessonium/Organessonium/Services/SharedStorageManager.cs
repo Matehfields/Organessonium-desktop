@@ -24,15 +24,21 @@ internal sealed partial class SharedStorageManager
     private readonly Dictionary<string, StorageCleanupRecord> _cleanups = new(StringComparer.Ordinal);
     private readonly HashSet<string> _appliedCleanups = new(StringComparer.Ordinal);
     private readonly Dictionary<string, StorageBatchPlan> _plans = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _legacyCatalogIds = new(StringComparer.Ordinal);
+    private readonly Func<CancellationToken, Task<FolderIndexMapping>> _journalIndex;
+    private readonly SemaphoreSlim _journalIndexGate = new(1, 1);
+    private string? _journalThreadId;
     private ulong _frontier;
     private bool _initialized;
     internal string OwnerId { get; }
     internal SharedPayloadBatcher Batcher { get; }
 
-    internal SharedStorageManager(DiscordApiClient api, SettingsStore store, AppSettings settings, string? ownerId = null)
+    internal SharedStorageManager(DiscordApiClient api, SettingsStore store, AppSettings settings, string? ownerId = null,
+        Func<CancellationToken, Task<FolderIndexMapping>>? journalIndex = null)
     {
         _api = api; _store = store; _settings = settings.Clone();
         _metadata = new MetadataService(MetadataCodec.ForStore(store), api.DownloadAttachmentBytesAsync);
+        _journalIndex = journalIndex ?? (token => new AppRegistry(api, store, settings).GetStorageJournalIndexAsync(token));
         OwnerId = ownerId ?? ResolveOwner(store);
         _gate = OwnerGates.GetOrAdd(OwnerId + ":" + settings.NamesChannelId + ":" + settings.AppsForumId, _ => new SemaphoreSlim(1, 1));
         Batcher = new SharedPayloadBatcher(this, api, _metadata);
@@ -144,13 +150,14 @@ internal sealed partial class SharedStorageManager
 
     private async Task<StorageThreadRecord> ReloadCatalogAsync(StorageThreadRecord row, CancellationToken token)
     {
-        using var document = await _metadata.ReadJsonAsync(await _api.GetMessageAsync(_settings.NamesChannelId, row.CatalogMessageId, token), token)
+        var channel = string.IsNullOrEmpty(row.CatalogChannelId) ? await GetJournalThreadAsync(token) : row.CatalogChannelId;
+        using var document = await _metadata.ReadJsonAsync(await _api.GetMessageAsync(channel, row.CatalogMessageId, token), token)
             ?? throw new IOException("O catálogo remoto está incompleto.");
         var current = document.RootElement.Deserialize<StorageThreadRecord>(JsonOptions.Web) ?? throw new InvalidDataException("Catálogo inválido.");
         ValidateCatalog(current);
         if (current.StorageId != row.StorageId || current.OwnerId != OwnerId || current.ThreadId != row.ThreadId)
             throw new IOException("A identidade do catálogo mudou; nenhuma reserva foi sobrescrita.");
-        current.CatalogMessageId = row.CatalogMessageId; _catalog[current.StorageId] = current;
+        current.CatalogMessageId = row.CatalogMessageId; current.CatalogChannelId = channel; _catalog[current.StorageId] = current;
         return current;
     }
 
@@ -158,8 +165,9 @@ internal sealed partial class SharedStorageManager
     {
         ValidateCatalog(row);
         row.Revision++;
-        var updated = await WriteRecordAsync(row, row.CatalogMessageId, token);
-        row.CatalogMessageId = updated.Id; _catalog[row.StorageId] = row;
+        var updated = await WriteRecordAsync(row,
+            row.CatalogChannelId == _settings.NamesChannelId ? null : row.CatalogMessageId, token);
+        row.CatalogMessageId = updated.Id; row.CatalogChannelId = await GetJournalThreadAsync(token); _catalog[row.StorageId] = row;
     }
 
     private static void ValidateCatalog(StorageThreadRecord row)
@@ -173,16 +181,26 @@ internal sealed partial class SharedStorageManager
             throw new InvalidDataException("O catálogo compartilhado está inválido ou possui uma versão não suportada.");
     }
 
-    internal Task<DiscordMessageDto> WriteRecordAsync<T>(T record, string? messageId, CancellationToken token) =>
-        _api.WriteEncodedDocumentAsync(_settings.NamesChannelId,
+    internal async Task<DiscordMessageDto> WriteRecordAsync<T>(T record, string? messageId, CancellationToken token)
+    {
+        var channel = await GetJournalThreadAsync(token);
+        await using var lease = await _api.AcquireThreadWriteAsync(channel, token);
+        return await _api.WriteEncodedDocumentAsync(channel,
             _metadata.EncodeJson(JsonSerializer.Serialize(record, JsonOptions.Web)), messageId, token);
+    }
 
     private async Task RefreshJournalAsync(CancellationToken token)
     {
-        var messages = await _api.GetMessagesAsync(_settings.NamesChannelId, _initialized ? 100 : null, token);
-        if (_initialized && messages.Count == 100 && messages.All(message => Snowflake(message.Id) > _frontier))
-            messages = await _api.GetMessagesAsync(_settings.NamesChannelId, null, token);
-        foreach (var message in messages.Where(message => !_initialized || Snowflake(message.Id) > _frontier).OrderBy(message => Snowflake(message.Id)))
+        var messages = await ReadJournalMessagesAsync(_initialized ? 100 : null, token);
+        if (_initialized && messages.Any(message => Snowflake(message.Id) > _frontier && JournalOrder(message) <= _frontier))
+        {
+            // A newly copied event can have an older logical order. Replay the complete journal, not a stale tail.
+            messages = await ReadJournalMessagesAsync(null, token);
+            _catalog.Clear(); _references.Clear(); _cleanups.Clear(); _appliedCleanups.Clear(); _plans.Clear();
+            _mutations.Clear(); _deletionFences.Clear(); _initialized = false; _frontier = 0;
+        }
+        foreach (var message in messages.Where(message => !_initialized || Snowflake(message.Id) > _frontier)
+                     .OrderBy(JournalOrder).ThenBy(message => Snowflake(message.Id)))
         {
             using var document = await _metadata.ReadJsonAsync(message, token);
             if (document == null || !document.RootElement.TryGetProperty("entryType", out var type)) continue;
@@ -195,7 +213,9 @@ internal sealed partial class SharedStorageManager
             {
                 case "storageThread":
                     var row = root.Deserialize<StorageThreadRecord>(JsonOptions.Web)!; ValidateCatalog(row);
-                    row.CatalogMessageId = message.Id; _catalog[row.StorageId] = row; _api.RegisterSharedThread(row.ThreadId); break;
+                    row.CatalogMessageId = message.Id;
+                    row.CatalogChannelId = _legacyCatalogIds.Contains(message.Id) ? _settings.NamesChannelId : await GetJournalThreadAsync(token);
+                    _catalog[row.StorageId] = row; _api.RegisterSharedThread(row.ThreadId); break;
                 case "storageReference":
                     var reference = root.Deserialize<StorageReferenceRecord>(JsonOptions.Web)!;
                     if (reference.State is not ("live" or "released") || string.IsNullOrEmpty(reference.Scope)) throw new InvalidDataException("Referência remota inválida.");
@@ -217,7 +237,7 @@ internal sealed partial class SharedStorageManager
                     var operation = root.GetProperty("operationId").GetString()!;
                     if (state == "completed") _mutations.Remove(operation);
                     else _mutations[operation] = (root.GetProperty("fileId").GetString()!, root.GetProperty("ownerId").GetString()!, true,
-                        _mutations.TryGetValue(operation, out var priorClaim) ? Math.Min(priorClaim.ClaimId, Snowflake(message.Id)) : Snowflake(message.Id));
+                        _mutations.TryGetValue(operation, out var priorClaim) ? Math.Min(priorClaim.ClaimId, JournalOrder(message)) : JournalOrder(message));
                     break;
                 default: throw new InvalidDataException("Registro de armazenamento ainda não suportado.");
             }

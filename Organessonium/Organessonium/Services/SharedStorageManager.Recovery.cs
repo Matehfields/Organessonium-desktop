@@ -79,7 +79,7 @@ internal sealed partial class SharedStorageManager
     {
         // Plans are durable remotely; the bounded in-memory cache is never the recovery authority.
         var plans = new Dictionary<string, StorageBatchPlan>(StringComparer.Ordinal);
-        foreach (var message in await _api.GetMessagesAsync(_settings.NamesChannelId, null, token))
+        foreach (var message in await ReadJournalMessagesAsync(null, token))
         {
             using var json = await _metadata.ReadJsonAsync(message, token);
             if (json?.RootElement.TryGetProperty("entryType", out var kind) != true || kind.GetString() != "storageBatchPlan") continue;
