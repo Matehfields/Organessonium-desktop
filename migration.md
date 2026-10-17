@@ -4,6 +4,26 @@ Inventário técnico compartilhado do desktop C# e do cliente Flutter durante de
 
 ## Compatibilidades atuais
 
+### CHECKSUM-LEGACY-001
+
+Status: ativo.
+
+Descrição: leitura de arquivos e checkpoints de desenvolvimento sem manifesto `checksums`.
+
+Introduzido por: validação SHA-256 por chunk e arquivo completo, protocolo checksums V1.
+
+Motivo: não invalidar conteúdos existentes nem misturar hashes de uma origem atual com chunks antigos já confirmados.
+
+Código relacionado: Models/PayloadChecksums, FileMetadata, AppEntry, TransferState; Services/FileChecksums, EncryptionService, ForumDownloader, DownloadAssembler, MetadataService, SettingsStore; Bridge/AppController.UploadSingleAsync; Sync/CloudSyncRepository.
+
+Comportamento atual: upload novo calcula e persiste o manifesto antes da transmissão; retomada nova usa o manifesto persistido. Checkpoint antigo com partes confirmadas e sem manifesto termina sem inventar hashes. Arquivos antigos continuam com autenticação GCM/tamanho quando aplicável; ausência do campo é o único fallback. Campo declarado nulo, incompleto ou de versão desconhecida é erro, não legado. Cache antigo recebe coluna nullable aditiva, sem fabricar hashes. Rename/move/read não geram migração. Uma nova versão recebe hashes sem alterar as versões anteriores.
+
+Pode ser removido quando: houver decisão explícita de migrar ou descartar todos os arquivos/checkpoints sem hashes.
+
+Impacto da remoção: arquivos e retomadas sem manifesto deixam de ser aceitos. Somente possuir AES-GCM não satisfaz a exigência futura de manifesto.
+
+Procedimento para remoção: exigir checksums em MetadataService e downloads; impedir retomadas antigas sem manifesto; remover apenas os testes de ausência desse campo; atualizar checksums.md e README. Não remover AES-GCM, parsers de transporte ou outras compatibilidades.
+
 ### DIAGNOSTICS-TEMP-001
 
 Status: ativo, infraestrutura temporária de desenvolvimento.

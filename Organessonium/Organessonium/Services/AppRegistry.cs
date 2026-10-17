@@ -1985,6 +1985,7 @@ public sealed partial class AppRegistry
         target.MimeType = source.MimeType;
         target.ChunkMessageIds = source.ChunkMessageIds.ToList();
         target.ChunkReferences = source.ChunkReferences?.ToList();
+        target.Checksums = source.Checksums;
         target.ChunkCount = source.ChunkCount;
         target.BatchId = source.BatchId;
         target.VideoPreviewChunkMessageIds = source.VideoPreviewChunkMessageIds.ToList();
@@ -2001,6 +2002,7 @@ public sealed partial class AppRegistry
 
     private static void CopyFilePayload(AppEntry source, AppEntry target)
     {
+        target.Checksums = source.Checksums;
         target.Storage = source.Storage;
         target.ThumbnailRef = source.ThumbnailRef;
         if (source.LogicalChunkCount == 0)

@@ -2668,6 +2668,15 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
 
+            if (transferState.Checksums == null && transferState.UploadedChunks.Count == 0)
+            {
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, progressTracker.Preparing(0),
+                    "Calculando checksums...", throttle, true, useBatchUi, progressTracker: progressTracker);
+                transferState.Checksums = await FileChecksums.CalculateAsync(preparedVideo.OpenRead, sourceLength,
+                    checked((int)chunkSizeBytes), cancellationToken);
+                await _transferManager.SaveAsync(transferState, cancellationToken);
+            }
+            transferState.Checksums?.Validate(sourceLength, totalChunks);
             if (transferState.SharedAllocationPending)
             {
                 await _transferManager.SaveAsync(transferState, cancellationToken);
@@ -2828,7 +2837,7 @@ public sealed partial class AppController : IAsyncDisposable
                     transferState.Encryption,
                     EncryptedPayloadRoles.Original,
                     0,
-                    totalChunks);
+                    totalChunks) { Checksums = transferState.Checksums };
 
                 async Task<PreparedUploadPart> PrepareOriginalPartAsync(int index)
                 {
@@ -2942,6 +2951,7 @@ public sealed partial class AppController : IAsyncDisposable
             entry.ChunkCount = upload.ChunkCount;
             entry.ChunkMessageIds = upload.ChunkMessageIds.ToList();
             entry.ChunkReferences = upload.ChunkReferences?.ToList();
+            entry.Checksums = transferState.Checksums;
             entry.MimeType = GuessFileMime(name);
             entry.PreviewMessageId = previewIds.PreviewMessageId;
             entry.VideoPreviewMessageId = previewIds.VideoPreviewMessageId;

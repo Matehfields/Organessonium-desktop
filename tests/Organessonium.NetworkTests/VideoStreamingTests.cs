@@ -308,8 +308,12 @@ internal static partial class Program
                 var crypto = CreateEncryptionService(out _);
                 const int chunkBytes = 31; // Includes ranges that cross the relocated moov and mdat boundaries.
                 var count = (result.Length + chunkBytes - 1) / chunkBytes;
+                var checksums = await FileChecksums.CalculateAsync(prepared.OpenRead, prepared.Length, chunkBytes, default);
+                RequireSync(checksums.Sha256 == Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(result)) &&
+                    checksums.Sha256 != Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(originalBytes)),
+                    "o checksum MP4 foi calculado sobre o arquivo físico em vez da representação transmitida");
                 var context = new EncryptedPayloadContext("virtual-mp4", crypto.CreateFileEncryption(EncryptionModes.Standard),
-                    EncryptedPayloadRoles.Original, 0, count);
+                    EncryptedPayloadRoles.Original, 0, count) { Checksums = checksums };
                 using var memory = new UploadMemoryCoordinator(4);
                 var chunks = await Task.WhenAll(Enumerable.Range(0, count).Select(async index =>
                 {

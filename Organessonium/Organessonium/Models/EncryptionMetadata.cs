@@ -98,6 +98,7 @@ public sealed record EncryptedPayloadContext(
     int ChunkIndex,
     int ChunkCount = 1)
 {
+    public PayloadChecksums? Checksums { get; init; }
     public EncryptedPayloadContext WithChunkIndex(int chunkIndex)
     {
         return this with { ChunkIndex = chunkIndex };

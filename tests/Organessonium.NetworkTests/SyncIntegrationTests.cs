@@ -242,7 +242,10 @@ internal static partial class Program
                 {
                     if (RejectNextMetadataUpdate && request.Method == HttpMethod.Patch)
                     { RejectNextMetadataUpdate = false; return new(HttpStatusCode.Forbidden); }
-                    var inspected = content.TrimStart().StartsWith('{') ? MetadataCodec.Standard().Decode(content) : content;
+                    var metadataAttachment = uploadedFiles.FirstOrDefault(file => file.Name == "metadata.json");
+                    var inspected = metadataAttachment.Bytes is { Length: > 0 }
+                        ? Encoding.UTF8.GetString(metadataAttachment.Bytes) : content;
+                    inspected = inspected.TrimStart().StartsWith('{') ? MetadataCodec.Standard().Decode(inspected) : inspected;
                     if (RejectNextFileProjection && inspected.Contains("\"entryType\":\"file\"", StringComparison.Ordinal))
                     { RejectNextFileProjection = false; return new(HttpStatusCode.Forbidden); }
                     PublishedContents.Add(content);

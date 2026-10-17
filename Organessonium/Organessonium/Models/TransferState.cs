@@ -41,6 +41,9 @@ public static class TransferPayloadLayouts
 
 public sealed class TransferState
 {
+    [JsonPropertyName("checksums")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PayloadChecksums? Checksums { get; set; }
     [JsonPropertyName("sharedAllocationPending")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool SharedAllocationPending { get; set; }
@@ -172,6 +175,7 @@ public sealed class TransferState
         if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage))
             throw new InvalidDataException("O layout desta transferência ainda não é suportado.");
         Storage?.Validate();
+        Checksums?.Validate(SizeBytes, TotalChunks);
         ThumbnailRef?.Validate();
         if (PayloadLayoutVersion == TransferPayloadLayouts.SharedStorage && Storage?.Shared != true)
             throw new InvalidDataException("O checkpoint compartilhado não contém a identidade do armazenamento.");

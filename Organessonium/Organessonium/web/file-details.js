@@ -137,6 +137,7 @@ function renderFileInformation(info, loading = false) {
         ['messageId', app.metadataMessageId || t('detailsUnknown')],
         [t('detailsChunks'), String(info.chunkCount)]
     ];
+    if (app.sha256) rows.push(['SHA-256', app.sha256]);
     $('file-details-content').innerHTML = '<dl class="file-information">' + rows.map(([key,value]) =>
         `<div><dt>${esc(key)}</dt><dd${loading ? ' class="file-details-pending"' : ''}>${esc(loading ? t('detailsPending') : value)}</dd></div>`).join('') + '</dl>';
 }

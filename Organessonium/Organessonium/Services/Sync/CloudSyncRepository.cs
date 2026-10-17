@@ -267,7 +267,14 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         count = ArchiveSplitter.GetPartCount(local.Size, chunkBytes);
         if (count != transfer.TotalChunks || chunkBytes > EncryptionService.MaximumPlaintextPayloadBytes)
             throw new InvalidDataException("O layout do checkpoint não corresponde ao conteúdo sincronizado.");
-        var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count);
+        if (transfer.Checksums == null && transfer.UploadedChunks.Count == 0)
+        {
+            transfer.Checksums = await FileChecksums.CalculateAsync(() => PreparedVideoUpload.OpenFile(snapshot), local.Size, chunkBytes, token);
+            await _transfers.SaveAsync(transfer, token);
+        }
+        transfer.Checksums?.Validate(local.Size, count);
+        var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count)
+            { Checksums = transfer.Checksums };
         var uploader = new ForumUploader(_api, _settings.AppsForumId, MetadataCodec.ForStore(_store));
         using var memory = new UploadMemoryCoordinator(_settings.EffectiveUploadThreads);
         try
@@ -301,6 +308,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                 MimeType = transfer.MimeType, UploadedAt = DateTime.UtcNow.ToString("O"), BatchId = result.BatchId,
                 Chunks = result.HasAttachmentReferences ? null : result.ChunkMessageIds.ToList(),
                 ChunkRefs = result.ChunkReferences?.ToList(), Encryption = transfer.Encryption?.Clone(),
+                Checksums = transfer.Checksums,
                 Storage = transfer.Storage, VersionId = transfer.TransferId, VersionUploadedAt = DateTime.UtcNow.ToString("O")
             };
             if (_settings.PreviewEnabled)

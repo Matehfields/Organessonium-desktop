@@ -139,6 +139,7 @@ public sealed partial class ForumDownloader
     private async Task<FileInfo> DownloadEntryCoreAsync(AppEntry entry, DirectoryInfo destDir,
         Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
+        entry.Checksums?.Validate(entry.SizeBytes, entry.LogicalChunkCount);
         if (entry.ChunkReferences != null) ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
         try
         {
@@ -162,7 +163,7 @@ public sealed partial class ForumDownloader
                 onDetailedProgress,
                 EncryptionContext(entry, EncryptedPayloadRoles.Original),
                 entry.SizeBytes,
-                entry.ChunkReferences);
+                entry.ChunkReferences, entry.Checksums);
         }
         catch (Exception ex) when (CanRecoverByBatch(entry, ex))
         {
@@ -204,6 +205,7 @@ public sealed partial class ForumDownloader
     {
         return ex is not OperationCanceledException &&
                entry.Encryption == null &&
+               entry.Checksums == null &&
                entry.ChunkReferences == null &&
                !string.IsNullOrWhiteSpace(entry.BatchId);
     }
@@ -222,6 +224,7 @@ public sealed partial class ForumDownloader
         AppEntry entry, DirectoryInfo destDir, TransferState state, TransferManager transferManager,
         Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
+        entry.Checksums?.Validate(entry.SizeBytes, entry.LogicalChunkCount);
         if (entry.LogicalChunkCount == 0)
         {
             return await DownloadAndAssembleAsync(entry, destDir, onProgress, cancellationToken, onDetailedProgress);
@@ -303,7 +306,8 @@ public sealed partial class ForumDownloader
             source.Refresh();
             if (!source.Exists ||
                 (entry.Encryption == null && part.Size > 0 && source.Length != part.Size) ||
-                (entry.Encryption != null && chunk.SizeBytes > 0 && source.Length != chunk.SizeBytes))
+                (entry.Encryption != null && chunk.SizeBytes > 0 && source.Length != chunk.SizeBytes) ||
+                (entry.Checksums != null && !await FileChecksums.MatchesAsync(source, entry.Checksums.Chunks[part.Index], cancellationToken)))
             {
                 chunk.Downloaded = false;
                 chunk.TempChunkPath = null;
@@ -370,7 +374,7 @@ public sealed partial class ForumDownloader
                     }
                 },
                 initialDownloadedBytes: existingBytes,
-                encryption: EncryptionContext(entry, EncryptedPayloadRoles.Original));
+                encryption: EncryptionContext(entry, EncryptedPayloadRoles.Original), checksums: entry.Checksums);
         }
         finally
         {
@@ -397,7 +401,7 @@ public sealed partial class ForumDownloader
         destDir.Create();
         var outputFile = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name));
         await DownloadAssembler.AssembleAsync(parts.OrderBy(part => part.Index).Select(part => available[part.Index]),
-            outputFile, onProgress, onDetailedProgress, cancellationToken);
+            outputFile, onProgress, onDetailedProgress, cancellationToken, entry.Checksums);
 
         try { tempDir.Delete(true); } catch { }
         outputFile.Refresh();
@@ -1099,7 +1103,8 @@ public sealed partial class ForumDownloader
         Action<DownloadProgress>? onDetailedProgress = null,
         EncryptedPayloadContext? encryption = null,
         long expectedPlaintextLength = -1,
-        IReadOnlyList<ChunkReference>? chunkReferences = null)
+        IReadOnlyList<ChunkReference>? chunkReferences = null,
+        PayloadChecksums? checksums = null)
     {
         var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken, chunkReferences: chunkReferences);
         encryption = encryption?.WithChunkCount(parts.Count);
@@ -1115,11 +1120,11 @@ public sealed partial class ForumDownloader
         tempDir.Create();
         try
         {
-            var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress, encryption: encryption);
+            var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress, encryption: encryption, checksums: checksums);
 
             destDir.Create();
             var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? downloaded.Values.First().Name : outputName));
-            await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
+            await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken, checksums);
 
             try { tempDir.Delete(true); } catch { }
             output.Refresh();
@@ -1206,7 +1211,8 @@ public sealed partial class ForumDownloader
         Action<DownloadProgress>? onDetailedProgress = null,
         Func<Part, FileInfo, Task>? onPartCompleted = null,
         long initialDownloadedBytes = 0,
-        EncryptedPayloadContext? encryption = null)
+        EncryptedPayloadContext? encryption = null,
+        PayloadChecksums? checksums = null)
     {
         if (parts.Count == 0)
         {
@@ -1264,6 +1270,7 @@ public sealed partial class ForumDownloader
                     using var reservation = encryption == null ? null : await RamUploadBudget.ReserveExternalBytesAsync(
                         checked(part.Size * 2 + DownloadBufferSize), checked(part.Size * 2 + DownloadBufferSize), cancellationToken);
                     using var encryptedMemory = encryption == null ? null : new MemoryStream(checked((int)part.Size));
+                    using var plainHash = encryption == null && checksums != null ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
                     target.Directory?.Create();
                     await using var diskOutput = encryptedMemory == null
                         ? new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true) : null;
@@ -1292,6 +1299,7 @@ public sealed partial class ForumDownloader
                             if (part.Size > 0 && countedBytes + read > part.Size)
                                 throw new IOException("O chunk recebido excedeu o tamanho informado pelo servidor.");
                             await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                            plainHash?.AppendData(buffer, 0, read);
                             countedBytes += read;
                             var currentBytes = Interlocked.Add(ref downloadedBytes, read);
                             ReportParallelProgress(currentBytes, part);
@@ -1314,9 +1322,15 @@ public sealed partial class ForumDownloader
                     {
                         var plaintext = _encryption.DecryptBytes(encryptedMemory!.GetBuffer().AsSpan(0, checked((int)countedBytes)),
                             encryption.WithChunkIndex(part.Index));
-                        try { await File.WriteAllBytesAsync(target.FullName, plaintext, cancellationToken); }
+                        try
+                        {
+                            if (encryption.Checksums == null) checksums?.VerifyChunk(part.Index, plaintext);
+                            await File.WriteAllBytesAsync(target.FullName, plaintext, cancellationToken);
+                        }
                         finally { CryptographicOperations.ZeroMemory(plaintext); }
                     }
+                    else if (plainHash != null && Convert.ToHexStringLower(plainHash.GetHashAndReset()) != checksums!.Chunks[part.Index])
+                        throw new PayloadChecksumException("O checksum de uma parte baixada não confere.");
 
                     return;
                 }
@@ -1362,6 +1376,7 @@ public sealed partial class ForumDownloader
                 }
             }
 
+            if (last is PayloadChecksumException checksumFailure) throw checksumFailure;
             if (encryption != null)
             {
                 throw new EncryptedPayloadIntegrityException(encryption.Encryption.Mode, last);
@@ -1484,7 +1499,7 @@ public sealed partial class ForumDownloader
             : new EncryptedPayloadContext(entry.FileId, entry.Encryption, role, 0,
                 Math.Max(1, role == EncryptedPayloadRoles.Video480p
                     ? entry.VideoPreviewChunkReferences?.Count ?? entry.VideoPreviewChunkMessageIds.Count
-                    : entry.LogicalChunkCount));
+                    : entry.LogicalChunkCount)) { Checksums = role == EncryptedPayloadRoles.Original ? entry.Checksums : null };
     }
 
     private static void EnsureExpectedPlaintextLength(FileInfo file, long expectedLength)

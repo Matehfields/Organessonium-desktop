@@ -268,6 +268,7 @@ public sealed class EncryptionService
     internal int EncryptBytesInto(ReadOnlySpan<byte> plaintext, Span<byte> destination, EncryptedPayloadContext context,
         EncryptedUploadReplayState? replay = null)
     {
+        context.Checksums?.VerifyChunk(context.ChunkIndex, plaintext);
         var outputLength = checked(EnvelopeHeaderBytes + plaintext.Length + AuthenticationTagBytes);
         if (destination.Length < outputLength)
         {
@@ -378,12 +379,18 @@ public sealed class EncryptionService
                     payload.Slice(EnvelopeHeaderBytes + ciphertextLength, AuthenticationTagBytes),
                     plaintext,
                     payload[..EnvelopeHeaderBytes]);
+                context.Checksums?.VerifyChunk(context.ChunkIndex, plaintext);
                 return plaintext;
             }
             catch (CryptographicException ex)
             {
                 CryptographicOperations.ZeroMemory(plaintext);
                 throw new EncryptedPayloadAuthenticationException("O payload criptografado não pôde ser autenticado.", ex);
+            }
+            catch (PayloadChecksumException)
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+                throw;
             }
             finally
             {

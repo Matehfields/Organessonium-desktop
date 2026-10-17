@@ -37,6 +37,9 @@ public sealed class TrashMetadata
 
 public sealed class FileMetadata : MetadataEntry
 {
+    [JsonPropertyName("checksums")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PayloadChecksums? Checksums { get; set; }
     [JsonPropertyName("storage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public StorageLayout? Storage { get; set; }

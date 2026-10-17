@@ -86,6 +86,9 @@ internal static partial class Program
             await Check("document.querySelectorAll('.cards-grid .file-card').length===1&&document.querySelector('.card-name').textContent==='Dentro.jpg'&&document.getElementById('empty-state').classList.contains('hidden')",
                 "a pasta navegada ficou vazia após atualização");
             await Check("window.__errors.length===0", "erro JavaScript durante atualização da biblioteca");
+            await view.ExecuteScriptAsync("window.__items[0].sha256='" + new string('a', 64) + "';openFileDetails(window.__items[0],false);window._onFileInformation(fileDetailsRequest,{entry:window.__items[0],chunkCount:1,storageBytes:4096});");
+            await Check("document.querySelector('#file-details-content').textContent.includes('SHA-256')&&document.querySelector('#file-details-content').textContent.includes('" + new string('a', 64) + "')",
+                "o checksum não apareceu nas informações do arquivo");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

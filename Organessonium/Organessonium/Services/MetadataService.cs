@@ -410,6 +410,7 @@ public sealed class MetadataService
         {
             case FileMetadata file:
                 entry = AppEntry.File(file.Name, file.ThreadId, file.UploadedAt, file.SizeBytes, "/");
+                entry.Checksums = file.Checksums;
                 entry.Storage = file.Storage;
                 entry.ThumbnailRef = file.Preview?.ThumbnailRef;
                 entry.FileId = file.FileId;
@@ -481,6 +482,7 @@ public sealed class MetadataService
             ParentFolderId = NormalizeParentId(entry.ParentFolderId),
             Chunks = entry.ChunkReferences == null ? entry.ChunkMessageIds.Where(id => !string.IsNullOrWhiteSpace(id)).ToList() : null,
             ChunkRefs = entry.ChunkReferences?.ToList(),
+            Checksums = entry.Checksums,
             Preview = CreatePreviewMetadata(entry),
             Encryption = entry.Encryption?.Clone(),
             Trash = entry.Trash,
@@ -592,6 +594,7 @@ public sealed class MetadataService
         switch (metadata)
         {
             case FileMetadata file:
+                file.Checksums?.Validate(file.SizeBytes, file.ChunkRefs?.Count ?? file.Chunks?.Count ?? 0);
                 file.Storage?.Validate();
                 file.Preview?.ThumbnailRef?.Validate();
                 if (file.Storage?.Shared == true && file.Preview?.Video480p != null && file.Preview.Video480p.ChunkRefs == null)

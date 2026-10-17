@@ -14,6 +14,8 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("fileChecksumsTransferAndResume", FileChecksumsTransferAndResumeAsync),
+        ("fileChecksumsRejectCorruption", FileChecksumsRejectCorruptionAsync),
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),
         ("diagnosticLoggingAndBounds", DiagnosticLoggingAndBoundsAsync),
         ("diagnosticHiddenBrowserAndStall", DiagnosticHiddenBrowserAndStallAsync),

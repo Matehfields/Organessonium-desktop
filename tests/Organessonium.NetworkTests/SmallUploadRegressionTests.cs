@@ -64,6 +64,10 @@ internal static partial class Program
                 "o lote perdeu arquivos da pasta recarregada, publicou incompleto ou alterou os originais");
             var cached = await registry.LoadCachedFolderAsync("photos", "/Fotos");
             RequireSync(cached.Count(entry => entry.Type == "file") == 13, "cache/serial perdeu entradas após o lote");
+            var checksum = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(new byte[4096]));
+            RequireSync(cached.Where(entry => entry.Name.StartsWith("small-", StringComparison.Ordinal)).All(entry =>
+                entry.Checksums?.Sha256 == checksum && entry.Checksums.Chunks.SequenceEqual(new[] { checksum })),
+                "o upload da biblioteca ou o cache/serial perdeu os checksums do arquivo e do chunk");
             var emptyFolder = directory.CreateSubdirectory("Sem arquivos");
             await ((Task)typeof(AppController).GetMethod("UploadPathsAsync", flags)!.Invoke(controller,
                 new object[] { new[] { emptyFolder.FullName } })!).WaitAsync(TimeSpan.FromSeconds(15));

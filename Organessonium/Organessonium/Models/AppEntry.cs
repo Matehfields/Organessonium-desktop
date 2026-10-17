@@ -4,6 +4,12 @@ namespace Organessonium.Models;
 
 public sealed class AppEntry
 {
+    [JsonIgnore]
+    public PayloadChecksums? Checksums { get; set; }
+
+    [JsonPropertyName("sha256")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Sha256 => Checksums?.Sha256;
     [JsonPropertyName("storage")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public StorageLayout? Storage { get; set; }
@@ -168,6 +174,7 @@ public sealed class AppEntry
         MimeType ??= "";
         ChunkMessageIds ??= [];
         VideoPreviewChunkMessageIds ??= [];
+        if (LogicalChunkCount > 0) Checksums?.Validate(SizeBytes, LogicalChunkCount);
         if (ChunkReferences != null)
         {
             ChunkReferences = ChunkReference.Validate(ChunkReferences, ChunkMessageIds);

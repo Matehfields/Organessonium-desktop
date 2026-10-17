@@ -42,6 +42,16 @@ public sealed record ChunkReference
 
     internal static void ValidateJsonPresence(JsonElement metadata)
     {
+        if (metadata.TryGetProperty("checksums", out var checksums) &&
+            (checksums.ValueKind != JsonValueKind.Object ||
+             !checksums.TryGetProperty("version", out _) || !checksums.TryGetProperty("algorithm", out _) ||
+             !checksums.TryGetProperty("sha256", out _) || !checksums.TryGetProperty("chunkSizeBytes", out _) ||
+             !checksums.TryGetProperty("chunks", out _)))
+            throw new InvalidDataException("O objeto checksums deve declarar todos os campos do protocolo.");
+        if (metadata.TryGetProperty("versions", out var versions) && versions.ValueKind == JsonValueKind.Array)
+            foreach (var version in versions.EnumerateArray())
+                if (version.ValueKind == JsonValueKind.Object && version.TryGetProperty("payload", out var payload))
+                    ValidateJsonPresence(payload);
         if (metadata.TryGetProperty("storage", out var storage) && (storage.ValueKind != JsonValueKind.Object ||
             !storage.TryGetProperty("version", out var storageVersion) || !storageVersion.TryGetInt32(out _) ||
             !storage.TryGetProperty("mode", out var mode) || mode.ValueKind != JsonValueKind.String))
