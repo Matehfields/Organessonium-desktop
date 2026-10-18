@@ -8,7 +8,10 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
-    private static Task<TestOutcome> ThumbnailViewportAndCrashRecoveryHiddenAsync() => OnHiddenDispatcherAsync(async () =>
+    private static Task<TestOutcome> ThumbnailViewportAndCrashRecoveryHiddenAsync() => ThumbnailViewportHiddenAsync(600);
+    private static Task<TestOutcome> ThumbnailLargeFolderScrollHiddenAsync() => ThumbnailViewportHiddenAsync(3000);
+
+    private static Task<TestOutcome> ThumbnailViewportHiddenAsync(int fileCount) => OnHiddenDispatcherAsync(async () =>
     {
         var directory = Directory.CreateTempSubdirectory("organessonium-thumbnail-viewport-");
         var host = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
@@ -30,21 +33,25 @@ internal static partial class Program
                 await input.CopyToAsync(output);
             }
             var view = browser.CoreWebView2;
+            var processFailure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.ProcessFailed += (_, args) => processFailure.TrySetResult(args.ProcessFailedKind.ToString());
             view.SetVirtualHostNameToFolderMapping("organessonium.local", resources.FullName, CoreWebView2HostResourceAccessKind.Allow);
             var loaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             view.NavigationCompleted += (_, _) => loaded.TrySetResult();
             view.Navigate("https://organessonium.local/index.html");
             await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await view.ExecuteScriptAsync("window.__fileCount=" + fileCount);
             await view.ExecuteScriptAsync("""
                 window.__organessoniumSettings={previewEnabled:true,language:'pt-BR',animationsEnabled:false};window.onBridgeReady();
                 window.__errors=[];window.addEventListener('error',e=>window.__errors.push(e.message));
                 window.__delivered=new Set();window.__images={};
                 window.__image=id=>{if(window.__images[id])return window.__images[id];const c=document.createElement('canvas');c.width=c.height=200;const g=c.getContext('2d');g.fillStyle='#58a';g.fillRect(0,0,200,200);g.fillStyle='white';g.fillText(id,8,80);return window.__images[id]=c.toDataURL('image/png')};
                 window.bridge.loadVisibleThumbnails=json=>JSON.parse(json).forEach(id=>{window.__delivered.add(id);window._thumbs=window._thumbs||{};window._thumbs[id]=window.__image(id);window._onThumb(id)});
-                window.__entries=Array.from({length:600},(_,i)=>({name:'photo-'+String(i).padStart(4,'0')+'.png',fileId:'photo-'+i,threadId:'thread-'+i,metadataMessageId:'metadata-'+i,type:'file',sizeBytes:2048,path:'/',parentFolderId:'root'}));
+                window.__entries=Array.from({length:window.__fileCount},(_,i)=>({name:'photo-'+String(i).padStart(4,'0')+'.png',fileId:'photo-'+i,threadId:'thread-'+i,metadataMessageId:'metadata-'+i,type:'file',sizeBytes:2048,path:'/',parentFolderId:'root'}));
                 window._onAppsLoaded(window.__entries);
-                """);
-            await Task.Delay(350);
+                """).WaitAsync(TimeSpan.FromSeconds(15));
+            for (var attempt = 0; attempt < 80 && await view.ExecuteScriptAsync("document.querySelectorAll('[data-thumb] img').length>0").WaitAsync(TimeSpan.FromSeconds(5)) != "true"; attempt++)
+                await Task.Delay(100);
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
             await Check("document.querySelectorAll('[data-thumb] img').length>0", "as miniaturas iniciais não apareceram");
             await view.ExecuteScriptAsync("window.__firstCard=document.querySelector('.cards-grid .file-card');window.__firstImage=window.__firstCard.querySelector('img');window._onThumb(window.__firstCard.querySelector('[data-thumb]').dataset.thumb);render()");
@@ -58,11 +65,21 @@ internal static partial class Program
                 await Check("document.querySelectorAll('[data-thumb] img').length<=64&&Object.keys(window._thumbs||{}).length<=128",
                     "a rolagem reteve imagens fora da tela ou ultrapassou o cache limitado");
             }
-            await Check("window.__delivered.size>300&&!window.__firstCard.querySelector('img')&&document.querySelectorAll('.cards-grid .file-card').length===600",
+            await Check("window.__delivered.size>300&&!window.__firstCard.querySelector('img')&&document.querySelectorAll('.cards-grid .file-card').length===window.__fileCount",
                 "o teste não percorreu a biblioteca, reteve a primeira imagem ou removeu cards");
+            RequireSync(!processFailure.Task.IsCompleted, "o runtime falhou durante a rolagem");
             await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=0");
             await Task.Delay(300);
             await Check("!!window.__firstCard.querySelector('img')", "voltar ao começo não recarregou a miniatura descartada");
+            AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
+            var scrollPeak = AppMemoryBudget.PeakCommittedBytes;
+            Console.WriteLine("METRIC scroll cards=" + fileCount + " peakBytes=" + scrollPeak);
+            RequireSync(scrollPeak < AppMemoryBudget.LimitBytes, "a rolagem atingiu o limite de 1 GB");
+            if (fileCount == 3000)
+            {
+                RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
+                return TestOutcome.Pass();
+            }
             for (var step = 0; step < 4; step++)
             {
                 await view.ExecuteScriptAsync("setView('list')"); await Task.Delay(50);

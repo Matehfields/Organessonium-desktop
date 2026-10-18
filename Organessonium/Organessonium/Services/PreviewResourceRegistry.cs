@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
@@ -13,6 +14,7 @@ public sealed class PreviewResourceRegistry : IDisposable
     public const int VideoResponseBytes = 512 * 1024;
     public const string Host = "media.organessonium.local";
     public const string UrlFilter = "https://" + Host + "/*";
+    private static readonly ArrayPool<byte> VideoResponseBuffers = ArrayPool<byte>.Create(VideoResponseBytes, 4);
     private readonly ConcurrentDictionary<string, Resource> _resources = new();
     internal long BufferedResponseBytes => _resources.Values.Sum(resource => resource.Streams.Keys.OfType<AvailableMemoryStream>().Sum(stream => stream.BufferedBytes));
 
@@ -52,18 +54,27 @@ public sealed class PreviewResourceRegistry : IDisposable
             {
                 await resource.Responses.WaitAsync(resource.Video.Cancellation).ConfigureAwait(false);
                 var transferred = false;
+                byte[]? bytes = null;
                 try
                 {
-                    var bytes = new byte[checked((int)count)];
-                    await resource.Video.ReadAsync(start, bytes, resource.Video.Cancellation).ConfigureAwait(false);
-                    content = new AvailableMemoryStream(bytes, stream =>
+                    bytes = VideoResponseBuffers.Rent(checked((int)count));
+                    await resource.Video.ReadAsync(start, bytes.AsMemory(0, checked((int)count)), resource.Video.Cancellation).ConfigureAwait(false);
+                    content = new AvailableMemoryStream(bytes, checked((int)count), (stream, buffer) =>
                     {
+                        VideoResponseBuffers.Return(buffer, clearArray: true);
                         resource.Streams.TryRemove(stream, out _);
                         resource.Responses.Release();
                     });
                     transferred = true;
                 }
-                finally { if (!transferred) resource.Responses.Release(); }
+                finally
+                {
+                    if (!transferred)
+                    {
+                        if (bytes != null) VideoResponseBuffers.Return(bytes, clearArray: true);
+                        resource.Responses.Release();
+                    }
+                }
             }
             else if (resource.File != null)
                 content = new VirtualFileStream(new DiskFile(resource.File), start, count);

@@ -46,7 +46,8 @@ internal static partial class Program
         var held = await Task.WhenAll(Enumerable.Range(0, 4).Select(i => registry.OpenAsync(url, "GET", $"bytes={i}-{i}")));
         var waiting = registry.OpenAsync(url, "GET", "bytes=5-5");
         await Task.Delay(30);
-        if (waiting.IsCompleted || registry.BufferedResponseBytes != 4) return TestOutcome.Fail("respostas paralelas ultrapassaram o limite de RAM");
+        if (waiting.IsCompleted || registry.BufferedResponseBytes < 4 || registry.BufferedResponseBytes > 4L * PreviewResourceRegistry.VideoResponseBytes)
+            return TestOutcome.Fail("respostas paralelas ultrapassaram o limite de RAM");
         registry.RemoveUrl(url);
         try { await waiting; return TestOutcome.Fail("fechar não cancelou resposta pendente"); }
         catch (OperationCanceledException) { }
@@ -58,6 +59,38 @@ internal static partial class Program
             suffix.Headers.Contains("bytes 22-24/25") && suffix.Content == null && invalid.Status == 416 && multi.Status == 416 &&
             outside.Status == 404 && closed.Status == 404
             ? TestOutcome.Pass() : TestOutcome.Fail("HTTP Range, fronteira, suffix, revogação ou isolamento do endereço virtual incorreto");
+    }
+
+    private static async Task<TestOutcome> VideoResponseBuffersBoundedAsync()
+    {
+        await using var video = new VideoStreamSession(new PatternChunks([4 * 1024 * 1024]), 0);
+        using var registry = new PreviewResourceRegistry();
+        var url = registry.RegisterVideo(video, "video/mp4");
+        var destination = new byte[64 * 1024];
+        await video.WarmUpAsync();
+        var warmup = await registry.OpenAsync(url, "GET", "bytes=0-");
+        warmup.Content!.Dispose();
+        var before = GC.GetTotalAllocatedBytes(true);
+        for (var index = 0; index < 512; index++)
+        {
+            var start = index % 7 * 128L * 1024;
+            var response = await registry.OpenAsync(url, "GET", $"bytes={start}-");
+            using var content = response.Content!;
+            var copied = 0;
+            int read;
+            while ((read = await content.ReadAsync(destination)) > 0)
+            {
+                if (destination[0] != (byte)((start + copied) % 256) || destination[read - 1] != (byte)((start + copied + read - 1) % 256))
+                    return TestOutcome.Fail("a reutilização do buffer alterou os bytes entregues ao player");
+                copied += read;
+            }
+            if (copied != PreviewResourceRegistry.VideoResponseBytes || registry.BufferedResponseBytes != 0)
+                return TestOutcome.Fail("a faixa expôs bytes excedentes ou reteve a resposta após EOF");
+        }
+        var allocated = GC.GetTotalAllocatedBytes(true) - before;
+        Console.WriteLine("METRIC video responseBytes=" + 512L * PreviewResourceRegistry.VideoResponseBytes + " allocatedBytes=" + allocated);
+        return allocated < 32L * 1024 * 1024
+            ? TestOutcome.Pass() : TestOutcome.Fail("256 MiB de reprodução ainda geram buffers descartáveis: " + allocated);
     }
 
     private static async Task<TestOutcome> VideoSeekAndDeduplicationAsync()

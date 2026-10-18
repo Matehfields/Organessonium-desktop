@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Web.WebView2.Core;
+using Organessonium.Models;
 using Organessonium.Services;
 
 namespace Organessonium.NetworkTests;
@@ -14,6 +15,7 @@ internal static partial class Program
         CoreWebView2Controller? controller = null;
         try
         {
+            AppMemoryBudget.Initialize();
             var store = new SettingsStore(directory.CreateSubdirectory("data"));
             var preferences = store.Load();
             RequireSync(preferences.AccentColorMode == "system", "a instalação sem preferência não usa a cor do Windows");
@@ -159,6 +161,17 @@ internal static partial class Program
             await view.ExecuteScriptAsync("settings.previewEnabled=true;openPreview(window.__entries[0]);openPreview(window.__entries[3]);window._onPreviewReady('image','obsolete.jpg','data:image/png;base64,invalid',fileRequestId(window.__entries[0]))");
             await Check("!document.querySelector('#preview-body img[alt=\"obsolete.jpg\"]')&&previewAppRef.fileId==='file-3'",
                 "a resposta de uma foto anterior substituiu a prévia atual");
+            await view.ExecuteScriptAsync("window.__dragRects=[];window.bridge.setTitleBarDragRegion=(...rects)=>window.__dragRects=rects;window._onNativeTitleBarMetrics({enabled:true,leftInset:0,rightInset:138,height:48});$('preview-zoom-controls').classList.remove('hidden')");
+            foreach (var height in new[] { 48, 40 })
+            {
+                await view.ExecuteScriptAsync("window._onNativeTitleBarMetrics({enabled:true,leftInset:0,rightInset:138,height:" + height + "})");
+                await Task.Delay(250);
+                await Check("(()=>{const close=$('preview-close').getBoundingClientRect(),bar=document.querySelector('.preview-topbar').getBoundingClientRect(),actions=document.querySelector('.preview-topbar-actions').getBoundingClientRect();return window.__dragRects.length===4&&window.__dragRects[0]>=close.right&&window.__dragRects[0]+window.__dragRects[2]<=actions.left&&bar.height===" + height + "&&Math.abs((close.top+close.bottom)/2-" + height + "/2)<1&&Math.abs((actions.top+actions.bottom)/2-" + height + "/2)<1&&actions.right<=innerWidth-138})()",
+                    "a região de arraste cobre controles ou os ícones não alinham com a barra nativa");
+            }
+            await view.ExecuteScriptAsync("$('preview-close').click()");
+            await Check("$('preview-overlay').classList.contains('hidden')", "o X ao lado do nome não fechou a prévia");
+            await view.ExecuteScriptAsync("window._onNativeTitleBarMetrics({enabled:false,height:48})");
             var movie = new FileInfo(Path.Combine(directory.FullName, "synthetic.mov"));
             var ffmpeg = Path.Combine(Path.GetDirectoryName(assembly.Location)!, "media", "ffmpeg.exe");
             var start = new System.Diagnostics.ProcessStartInfo(ffmpeg)
@@ -166,8 +179,8 @@ internal static partial class Program
                 UseShellExecute = false, CreateNoWindow = true, WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
                 RedirectStandardError = true
             };
-            foreach (var argument in new[] { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=128x72:r=10", "-t", "1",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", "-f", "mov", movie.FullName }) start.ArgumentList.Add(argument);
+            foreach (var argument in new[] { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30", "-t", "12",
+                "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-crf", "18", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", "-f", "mov", movie.FullName }) start.ArgumentList.Add(argument);
             using (var process = System.Diagnostics.Process.Start(start)!)
             {
                 var errors = process.StandardError.ReadToEndAsync();
@@ -177,12 +190,39 @@ internal static partial class Program
             using var media = new PreviewResourceRegistry();
             using var adapter = new Organessonium.Bridge.WebView2PreviewAdapter(view, media);
             adapter.Attach();
-            var mediaData = JsonSerializer.Serialize(new { src = media.Register(movie, "video/quicktime"), mime = "video/quicktime", quality = "full", qualities = new[] { "full" } });
+            var original = await File.ReadAllBytesAsync(movie.FullName);
+            var crypto = CreateEncryptionService(out _);
+            const int chunkBytes = 128 * 1024;
+            var chunkCount = (original.Length + chunkBytes - 1) / chunkBytes;
+            RequireSync(original.Length > 2 * PreviewResourceRegistry.VideoResponseBytes, "o MOV não exercita várias faixas de streaming");
+            var context = new EncryptedPayloadContext("hidden-video", crypto.CreateFileEncryption(EncryptionModes.Standard), EncryptedPayloadRoles.Original, 0, chunkCount);
+            var payloads = Enumerable.Range(0, chunkCount).Select(index => crypto.EncryptBytes(original.AsSpan(index * chunkBytes, Math.Min(chunkBytes, original.Length - index * chunkBytes)), context.WithChunkIndex(index))).ToArray();
+            using var handler = new VideoHttpHandler((request, _) => Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new System.Net.Http.ByteArrayContent(payloads[int.Parse(request.RequestUri!.Segments.Last())])
+            }));
+            using var discord = new DiscordApiClient("hidden-fixture", new System.Net.Http.HttpClient(handler, false));
+            var attachments = payloads.Select((payload, index) => new VideoAttachment(index, index.ToString(), "chunk.bin", "https://cdn.invalid/" + index, payload.Length)).ToArray();
+            await using var video = new VideoStreamSession(new DiscordVideoChunkProvider(discord, "hidden-thread", attachments, crypto, context, original.Length, new System.Net.Http.HttpClient(handler, false)));
+            video.SetPlaying(true);
+            var processFailures = new List<string>();
+            view.ProcessFailed += (_, args) => processFailures.Add(args.ProcessFailedKind.ToString());
+            var mediaData = JsonSerializer.Serialize(new { src = media.RegisterVideo(video, "video/quicktime"), mime = "video/quicktime", quality = "full", qualities = new[] { "full" } });
             await view.ExecuteScriptAsync("window._onPreviewReady('video','synthetic.mov'," + JsonSerializer.Serialize(mediaData) + ")");
             for (var attempt = 0; attempt < 50 && await view.ExecuteScriptAsync("document.querySelector('#preview-body video')?.readyState>=2") != "true"; attempt++)
                 await Task.Delay(100);
             await Check("(()=>{const video=document.querySelector('#preview-body video');return video.readyState>=2&&!video.error&&!video.querySelector('source').hasAttribute('type')})()",
                 "o MOV H.264 não foi carregado pelo player: " + await view.ExecuteScriptAsync("(()=>{const v=document.querySelector('#preview-body video');return {state:v?.readyState,error:v?.error?.code}})()"));
+            await view.ExecuteScriptAsync("(()=>{const v=document.querySelector('#preview-body video');v.muted=true;v.play().catch(()=>{})})()");
+            await Task.Delay(1200);
+            await Check("document.querySelector('#preview-body video').currentTime>.5&&!document.querySelector('#preview-body video').error", "o vídeo carregou mas não reproduziu");
+            await view.ExecuteScriptAsync("document.querySelector('#preview-body video').currentTime=9");
+            for (var attempt = 0; attempt < 60 && await view.ExecuteScriptAsync("document.querySelector('#preview-body video').currentTime>9.5") != "true"; attempt++)
+                await Task.Delay(100);
+            await Check("document.querySelector('#preview-body video').currentTime>9.5&&!document.querySelector('#preview-body video').error", "o seek interrompeu a reprodução por chunks");
+            RequireSync(processFailures.Count == 0, "o WebView falhou durante a reprodução: " + string.Join(",", processFailures));
+            AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
+            RequireSync(AppMemoryBudget.PeakCommittedBytes < AppMemoryBudget.LimitBytes, "a reprodução atingiu o limite de 1 GB");
             await view.ExecuteScriptAsync("closePreview()");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();

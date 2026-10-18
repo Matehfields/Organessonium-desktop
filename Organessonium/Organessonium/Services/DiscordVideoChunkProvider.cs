@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -16,6 +17,8 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
     private readonly EncryptionService _encryption;
     private readonly EncryptedPayloadContext? _context;
     private readonly HttpClient _http;
+    // Scoped to this video, without the per-thread retention of ArrayPool.Shared.
+    private readonly ArrayPool<byte> _encryptedBuffers = ArrayPool<byte>.Create(DiscordLimits.AttachmentBytes, 2);
     internal IAsyncDisposable? ReadLease { get; set; }
 
     public DiscordVideoChunkProvider(DiscordApiClient discord, string threadId,
@@ -71,19 +74,20 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                 response.EnsureSuccessStatusCode();
                 if (response.Content.Headers.ContentLength is long actual && actual != attachment.Size)
                     throw new InvalidDataException("O tamanho do anexo do vídeo é inválido.");
-                var payload = new byte[checked((int)attachment.Size)];
-                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                await input.ReadExactlyAsync(payload, cancellationToken).ConfigureAwait(false);
-                var extra = new byte[1];
-                if (await input.ReadAsync(extra, cancellationToken).ConfigureAwait(false) != 0)
-                    throw new InvalidDataException("O anexo do vídeo contém bytes excedentes.");
-                if (_context == null) return payload;
+                var payloadLength = checked((int)attachment.Size);
+                var payload = _context == null ? new byte[payloadLength] : _encryptedBuffers.Rent(payloadLength);
                 try
                 {
+                    await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    await input.ReadExactlyAsync(payload.AsMemory(0, payloadLength), cancellationToken).ConfigureAwait(false);
+                    var extra = new byte[1];
+                    if (await input.ReadAsync(extra, cancellationToken).ConfigureAwait(false) != 0)
+                        throw new InvalidDataException("O anexo do vídeo contém bytes excedentes.");
+                    if (_context == null) return payload;
                     // Authenticate GCM, role, salt, plaintext length and the real chunk ordinal first.
-                    return _encryption.DecryptBytes(payload, _context.WithChunkIndex(chunkIndex).WithChunkCount(_attachments.Length));
+                    return _encryption.DecryptBytes(payload.AsSpan(0, payloadLength), _context.WithChunkIndex(chunkIndex).WithChunkCount(_attachments.Length));
                 }
-                finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(payload); }
+                finally { if (_context != null) _encryptedBuffers.Return(payload, clearArray: true); }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)

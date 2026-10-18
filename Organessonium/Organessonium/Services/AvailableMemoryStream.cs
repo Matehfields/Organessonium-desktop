@@ -3,10 +3,11 @@ using System.IO;
 namespace Organessonium.Services;
 
 /// <summary>Available response bytes, released as soon as WebView2 finishes its COM read.</summary>
-internal sealed class AvailableMemoryStream(byte[] buffer, Action<Stream> released) : Stream
+internal sealed class AvailableMemoryStream(byte[] buffer, int length, Action<Stream, byte[]> released) : Stream
 {
+    private readonly object _sync = new();
     private byte[]? _buffer = buffer;
-    private readonly int _length = buffer.Length;
+    private readonly int _length = length;
     private int _position;
     public long BufferedBytes => _buffer?.LongLength ?? 0;
     public override bool CanRead => true;
@@ -17,13 +18,16 @@ internal sealed class AvailableMemoryStream(byte[] buffer, Action<Stream> releas
     public override int Read(byte[] destination, int offset, int count) => Read(destination.AsSpan(offset, count));
     public override int Read(Span<byte> destination)
     {
-        var count = Math.Min(destination.Length, _length - _position);
-        if (count == 0) return 0;
-        var source = _buffer ?? throw new ObjectDisposedException(nameof(AvailableMemoryStream));
-        source.AsSpan(_position, count).CopyTo(destination);
-        _position += count;
-        if (_position == _length) Release();
-        return count;
+        lock (_sync)
+        {
+            var count = Math.Min(destination.Length, _length - _position);
+            if (count == 0) return 0;
+            var source = _buffer ?? throw new ObjectDisposedException(nameof(AvailableMemoryStream));
+            source.AsSpan(_position, count).CopyTo(destination);
+            _position += count;
+            if (_position == _length) Release();
+            return count;
+        }
     }
     public override ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken = default)
     {
@@ -39,7 +43,10 @@ internal sealed class AvailableMemoryStream(byte[] buffer, Action<Stream> releas
     }
     private void Release()
     {
-        if (Interlocked.Exchange(ref _buffer, null) != null) released(this);
+        lock (_sync)
+        {
+            if (Interlocked.Exchange(ref _buffer, null) is { } bytes) released(this, bytes);
+        }
     }
     protected override void Dispose(bool disposing) { if (disposing) Release(); base.Dispose(disposing); }
     public override void Flush() { }

@@ -15,6 +15,7 @@ internal static partial class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("thumbnailViewportAndCrashRecoveryHidden", ThumbnailViewportAndCrashRecoveryHiddenAsync),
+        ("thumbnailLargeFolderScrollHidden", ThumbnailLargeFolderScrollHiddenAsync),
         ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),
         ("serialFreshnessAndMetadataCache", SerialFreshnessAndMetadataCacheAsync),
         ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),
@@ -56,6 +57,7 @@ internal static partial class Program
         ("encryptedPayloadRoundTripAndChunks", EncryptedPayloadRoundTripAndChunksAsync),
         ("videoVariableChunkMapping", VideoVariableChunkMappingAsync),
         ("videoVirtualResourceRanges", VideoVirtualResourceRangesAsync),
+        ("videoResponseBuffersBounded", VideoResponseBuffersBoundedAsync),
         ("videoSeekAndDeduplication", VideoSeekAndDeduplicationAsync),
         ("videoPrefetchAndRelease", VideoPrefetchAndReleaseAsync),
         ("videoCloseCancelsRequiredRead", VideoCloseCancelsRequiredReadAsync),

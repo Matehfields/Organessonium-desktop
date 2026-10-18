@@ -278,7 +278,7 @@ public partial class MainWindow : Window
         }
 
         var values = args.EnumerateArray().ToArray();
-        if (values.Length == 0 || values.Length % 4 != 0 ||
+        if (values.Length % 4 != 0 ||
             !values.All(value => value.TryGetDouble(out _)))
         {
             return;

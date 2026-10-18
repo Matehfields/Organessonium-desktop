@@ -747,20 +747,21 @@ function scheduleNativeTitleBarDragRegion(delay = 200) {
         nativeTitleBarDragTimer = 0;
         if (!window.bridge || typeof window.bridge.setTitleBarDragRegion !== 'function') return;
         const rectangles = [];
-        const addHeaderGap = (header, actions) => {
+        const addHeaderGap = (header, actions, leadingButton) => {
             const headerRect = header?.getBoundingClientRect();
             const actionsRect = actions?.getBoundingClientRect();
-            if (!headerRect || !actionsRect || headerRect.height <= 0 || actionsRect.left <= headerRect.left) return;
+            const left = leadingButton?.getBoundingClientRect().right ?? headerRect?.left;
+            if (!headerRect || !actionsRect || headerRect.height <= 0 || actionsRect.left <= left) return;
             rectangles.push(
-                Math.round(headerRect.left),
+                Math.ceil(left),
                 Math.round(headerRect.top),
-                Math.round(actionsRect.left - headerRect.left),
+                Math.max(0, Math.floor(actionsRect.left) - Math.ceil(left)),
                 Math.round(headerRect.height));
         };
 
         if (!previewOverlay.classList.contains('hidden')) {
-            addHeaderGap(document.querySelector('.preview-topbar'), document.querySelector('.preview-topbar-actions'));
-            if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
+            addHeaderGap(document.querySelector('.preview-topbar'), document.querySelector('.preview-topbar-actions'), $('preview-close'));
+            window.bridge.setTitleBarDragRegion(...rectangles);
             return;
         }
         if (!settingsPanel.classList.contains('hidden')) {
@@ -1171,10 +1172,8 @@ function resetThumbnailElement(el) {
 function requestVisibleThumbnails() {
     if (!settings.previewEnabled) return;
     if (!window.bridge || typeof window.bridge.loadVisibleThumbnails !== 'function') return;
-    const ids = Array.from(document.querySelectorAll('[data-thumb]'))
-        .map(element => element.dataset.thumb || '')
-        .filter((id, index, all) => id && all.indexOf(id) === index)
-        .filter(id => visibleThumbnailIds.has(id) && !(window._thumbs && window._thumbs[id]));
+    const ids = Array.from(visibleThumbnailIds)
+        .filter(id => id && !(window._thumbs && window._thumbs[id]));
     if (!ids.length) return;
     window.bridge.loadVisibleThumbnails(JSON.stringify(ids), activeLibraryView);
 }
