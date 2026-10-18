@@ -41,6 +41,20 @@ public static class TransferPayloadLayouts
 
 public sealed class TransferState
 {
+    public const int DirectDownloadVersion = 1;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int DownloadCheckpointVersion { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PartialFilePath { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FinalFilePath { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DownloadIdentity { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool DownloadReadyToFinalize { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DownloadSha256 { get; set; }
     [JsonPropertyName("checksums")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PayloadChecksums? Checksums { get; set; }
@@ -172,6 +186,8 @@ public sealed class TransferState
 
     public void Normalize()
     {
+        if (DownloadCheckpointVersion is < 0 or > DirectDownloadVersion)
+            throw new InvalidDataException("O formato deste checkpoint de download ainda não é suportado.");
         if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage))
             throw new InvalidDataException("O layout desta transferência ainda não é suportado.");
         Storage?.Validate();
@@ -212,6 +228,10 @@ public sealed class TransferState
 
 public sealed class TransferChunkState
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? Offset { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Sha256 { get; set; }
     [JsonPropertyName("index")]
     public int Index { get; set; }
 

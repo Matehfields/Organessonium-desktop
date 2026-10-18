@@ -14,6 +14,15 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
+        ("directDownloadLegacyLayouts", DirectDownloadLegacyLayoutsAsync),
+        ("directDownloadResumeCorruption", DirectDownloadResumeCorruptionAsync),
+        ("directDownloadInterruptedWrite", DirectDownloadInterruptedWriteAsync),
+        ("directDownloadLegacyMigration", DirectDownloadLegacyMigrationAsync),
+        ("directDownloadAuthenticationAndFinalization", DirectDownloadAuthenticationAndFinalizationAsync),
+        ("directDownloadCancellationAndIdentity", DirectDownloadCancellationAndIdentityAsync),
+        ("directDownloadLargeOffsets", DirectDownloadLargeOffsetsAsync),
+        ("directDownloadMemoryAdmission", DirectDownloadMemoryAdmissionAsync),
         ("thumbnailViewportAndCrashRecoveryHidden", ThumbnailViewportAndCrashRecoveryHiddenAsync),
         ("thumbnailLargeFolderScrollHidden", ThumbnailLargeFolderScrollHiddenAsync),
         ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),

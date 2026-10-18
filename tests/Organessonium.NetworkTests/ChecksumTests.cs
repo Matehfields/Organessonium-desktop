@@ -42,8 +42,8 @@ internal static partial class Program
         await h.Transfers.MarkDownloadChunkAsync(download, 0, corruptPart.FullName, chunkBytes);
         var stages = new List<string>();
         var output = await h.Downloader.DownloadAndAssembleAsync(cached, destination, download, h.Transfers, stages.Add);
-        RequireSync((await File.ReadAllBytesAsync(output.FullName)).SequenceEqual(bytes) && stages.Any(stage => stage.Contains("checksums")),
-            "a retomada reutilizou uma parte adulterada ou não validou a montagem");
+        RequireSync((await File.ReadAllBytesAsync(output.FullName)).SequenceEqual(bytes) && stages.Any(stage => stage.Contains("integridade")),
+            "a retomada reutilizou uma parte adulterada ou não validou o arquivo");
         using (var video = await h.Downloader.OpenVideoChunksAsync(remote, false))
             RequireSync((await video.DownloadAsync(1, default)).SequenceEqual(bytes.Skip(chunkBytes).Take(chunkBytes)),
                 "o streaming não preservou os chunks com checksum");
@@ -79,18 +79,21 @@ internal static partial class Program
         await File.WriteAllBytesAsync(source.FullName, "xbcdef"u8.ToArray());
         using (var memory = new UploadMemoryCoordinator(1))
             await MustReject(async () => { using var part = await memory.PreparePartAsync(h.Encryption, source, 6, 3, verified, default); });
-        var parts = new[] { new FileInfo(Path.Combine(h.Directory.FullName, "part-0")), new FileInfo(Path.Combine(h.Directory.FullName, "part-1")) };
-        await File.WriteAllBytesAsync(parts[0].FullName, "abc"u8.ToArray());
-        await File.WriteAllBytesAsync(parts[1].FullName, "def"u8.ToArray());
-        var target = new FileInfo(Path.Combine(h.Directory.FullName, "destination.bin"));
-        await File.WriteAllTextAsync(target.FullName, "preserve");
-        var wrongWhole = JsonSerializer.Deserialize<PayloadChecksums>(JsonSerializer.Serialize(checksums))!;
-        wrongWhole.Sha256 = new string('0', 64);
-        await MustReject(() => DownloadAssembler.AssembleAsync(parts, target, _ => { }, null, default, wrongWhole));
-        await File.WriteAllBytesAsync(parts[1].FullName, "xef"u8.ToArray());
-        await MustReject(() => DownloadAssembler.AssembleAsync(parts, target, _ => { }, null, default, checksums));
-        RequireSync(await File.ReadAllTextAsync(target.FullName) == "preserve" && !h.Directory.GetFiles("*.assembling").Any(),
-            "falha de checksum substituiu o destino ou deixou montagem inválida");
+        foreach (var wholeMismatch in new[] { true, false })
+        {
+            using var download = new DirectDownloadFixture(hashes: true);
+            var target = Path.Combine(download.Destination.FullName, download.Entry.Name);
+            await File.WriteAllTextAsync(target, "preserve");
+            if (wholeMismatch) download.Entry.Checksums!.Sha256 = new string('0', 64);
+            else
+            {
+                var context = new EncryptedPayloadContext(download.Entry.FileId, download.Entry.Encryption!, EncryptedPayloadRoles.Original, 0, download.Plain.Length);
+                download.Wire[0] = download.Crypto.EncryptBytes(new byte[download.Plain[0].Length], context);
+            }
+            await MustReject(() => download.Run());
+            RequireSync(await File.ReadAllTextAsync(target) == "preserve" && !download.Destination.GetFiles("*.assembling").Any(),
+                "a falha de checksum substituiu o destino ou criou montagem intermediária");
+        }
         var future = JsonSerializer.Deserialize<PayloadChecksums>(JsonSerializer.Serialize(checksums))!;
         future.Version = 2;
         try { future.Validate(6, 2); return TestOutcome.Fail("versão desconhecida aceita"); } catch (InvalidDataException) { }

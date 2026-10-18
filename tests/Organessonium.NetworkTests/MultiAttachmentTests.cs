@@ -139,14 +139,13 @@ internal static partial class Program
             var assembled = await downloader.DownloadAndAssembleAsync(loaded, destination, download, manager, _ => { },
                 onDetailedProgress: item => { lock (downloadProgress) downloadProgress.Add(item); });
             await Task.Delay(50);
-            RequireSync(encryptedDiskFiles == 0 && downloadProgress.Any(item => !item.Assembling && item.Percent == 80) &&
-                downloadProgress.Where(item => !item.Assembling).All(item => item.Percent <= 80) &&
-                downloadProgress.Any(item => item.Assembling && item.Percent == 80) && downloadProgress.Any(item => item.Assembling && item.Percent == 99),
-                "download gravou ciphertext no disco ou não reservou 20% para montar o arquivo");
+            RequireSync(encryptedDiskFiles == 0 && downloadProgress.Where(item => !item.Assembling).All(item => item.Percent <= 99) &&
+                downloadProgress.Any(item => item.Assembling && item.Message.Contains("integridade")) && downloadProgress.Last().Percent == 100,
+                "download gravou ciphertext no disco, manteve a montagem ou não concluiu em 100%");
             RequireSync((await File.ReadAllBytesAsync(assembled.FullName)).SequenceEqual(original) && server.MessageLists == listsBefore &&
                 server.MessageGets - getsBefore == loaded.ChunkReferences!.Select(reference => reference.MessageId).Distinct().Count() &&
-                confirmedIds.Take(2).All(id => !server.CdnReads.ContainsKey(id)),
-                "download não deduplicou mensagens, perdeu ChunkCount global ou baixou chunks já confirmados");
+                confirmedIds.Take(2).All(id => server.CdnReads.ContainsKey(id)),
+                "download não deduplicou mensagens, perdeu ChunkCount global ou reutilizou plaintext antigo sem hash");
             loaded.ChunkReferences = loaded.ChunkReferences!.Select(reference => reference.Index == 12
                 ? reference with { AttachmentId = "missing" } : reference).ToList();
             try { await downloader.DownloadAndAssembleAsync(loaded, destination, _ => { }); return TestOutcome.Fail("attachment ausente recebeu fallback silencioso"); }

@@ -329,9 +329,10 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
     {
         var payload = revision.Payload ?? throw new InvalidDataException("Revisão sem payload.");
         var entry = _metadata.ToAppEntry(new MetadataEnvelope("", payload)) ?? throw new InvalidDataException("Payload inválido.");
-        entry.Name = "content"; // Neither the metadata name nor a remote path controls the staging filename.
-        var cache = Directory.CreateDirectory(Path.Combine(_store.DataDirectory.FullName, "SyncDownloads",
-            SafeKey(folder.SyncFolderId + "/" + revision.FileId + "/" + revision.Hash)));
+        // Stable local-only name, excluded by SyncPaths; same volume as the final synchronized file.
+        entry.Name = ".organessonium-sync-download-" + SafeKey(folder.SyncFolderId + "/" + revision.FileId + "/" + revision.Hash) + ".content";
+        var cache = new DirectoryInfo(folder.LocalPath);
+        _ = SyncPaths.Resolve(cache.FullName, entry.Name);
         var transfer = (await _transfers.RecoverableAsync(token)).FirstOrDefault(t => t.TransferType == TransferTypes.Download &&
             t.SyncFolderId == folder.SyncFolderId && t.FileId == revision.FileId && t.SyncHash == revision.Hash && t.ThreadId == payload.ThreadId)
             ?? await _transfers.CreateDownloadAsync(entry, cache, token);
@@ -343,15 +344,14 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         {
             var downloader = new ForumDownloader(_api, _settings, _encryption, _downloadClients, new StorageReadContext(_registry.SharedStorage));
             var file = await downloader.DownloadAndAssembleAsync(entry, cache, transfer, _transfers, _ => { }, token,
-                p => progress(new(transfer.TransferId, revision.RelativePath, "download", p.TotalBytes > 0 ? 100d * p.DownloadedBytes / p.TotalBytes : 0, "downloading")));
+                p => progress(new(transfer.TransferId, revision.RelativePath, "download", p.Percent, "downloading")));
             if (file.Length != revision.SizeBytes || await HashAsync(file.FullName, token) != revision.Hash)
                 throw new InvalidDataException("O download não passou na validação de tamanho/SHA-256.");
             var candidate = new FileInfo(Path.Combine(staging.FullName, "content"));
-            await using (var input = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true))
-            await using (var output = new FileStream(candidate.FullName, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
-                await input.CopyToAsync(output, token);
+            if (!string.Equals(Path.GetPathRoot(file.FullName), Path.GetPathRoot(candidate.FullName), StringComparison.OrdinalIgnoreCase))
+                throw new IOException("A finalização da sincronização exige o mesmo volume do destino.");
+            File.Move(file.FullName, candidate.FullName, overwrite: false);
             await _transfers.CompleteAsync(transfer, _settings.KeepTransferHistory, token);
-            cache.Delete(true);
             progress(new(transfer.TransferId, revision.RelativePath, "download", 100, "completed"));
             return candidate;
         }

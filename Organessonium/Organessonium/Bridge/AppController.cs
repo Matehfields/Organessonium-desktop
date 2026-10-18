@@ -3285,6 +3285,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             TransferState? transferState = null;
             long totalDownloadBytes = 0;
+            long totalReceivedBytes = 0;
             try
             {
                 await OpsUpdateAsync(opId, "active", "Preparando download...");
@@ -3312,7 +3313,8 @@ public sealed partial class AppController : IAsyncDisposable
                             if (!progress.Assembling)
                             {
                                 Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
-                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                                Interlocked.Exchange(ref totalReceivedBytes, progress.RateBytes ?? progress.DownloadedBytes);
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes, rateBytes: progress.RateBytes);
                             }
                         });
                     await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
@@ -3327,13 +3329,14 @@ public sealed partial class AppController : IAsyncDisposable
                             if (!progress.Assembling)
                             {
                                 Interlocked.Exchange(ref totalDownloadBytes, Math.Max(0, progress.TotalBytes));
-                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                                Interlocked.Exchange(ref totalReceivedBytes, progress.RateBytes ?? progress.DownloadedBytes);
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes, rateBytes: progress.RateBytes);
                             }
                         });
                 }
 
                 var completedBytes = Interlocked.Read(ref totalDownloadBytes);
-                await OpsTransferMetricsAsync(opId, "download", 1, 1, completedBytes, completedBytes);
+                await OpsTransferMetricsAsync(opId, "download", 1, 1, completedBytes, completedBytes, rateBytes: Interlocked.Read(ref totalReceivedBytes));
                 await OpsUpdateAsync(opId, "done", "Concluído");
             }
             catch (OperationCanceledException)
@@ -3359,14 +3362,14 @@ public sealed partial class AppController : IAsyncDisposable
 
                 var opened = await OfferOpenVerifiedSizeMismatchAsync(mismatch);
                 var completedBytes = Interlocked.Read(ref totalDownloadBytes);
-                await OpsTransferMetricsAsync(opId, "download", 1, 1, completedBytes, completedBytes);
+                await OpsTransferMetricsAsync(opId, "download", 1, 1, completedBytes, completedBytes, rateBytes: Interlocked.Read(ref totalReceivedBytes));
                 await OpsUpdateAsync(opId, "done", opened ? "Concluído com aviso; arquivo aberto." : "Concluído com aviso.");
             }
             catch (Exception ex)
             {
                 if (transferState != null)
                 {
-                    await _transferManager.FailAsync(transferState, ex, CancellationToken.None);
+                    await _transferManager.RecordDownloadFailureAsync(transferState, ex, CancellationToken.None);
                 }
 
                 await OpsUpdateAsync(opId, "error", ex.Message);
@@ -3415,6 +3418,7 @@ public sealed partial class AppController : IAsyncDisposable
             var failed = 0;
             var totalBytes = toDownload.Sum(app => Math.Max(0, app.SizeBytes));
             long downloadedBytes = 0;
+            long receivedBytes = 0;
             await OpsTransferMetricsAsync(opId, "download", 0, toDownload.Count, 0, totalBytes);
             try
             {
@@ -3430,6 +3434,8 @@ public sealed partial class AppController : IAsyncDisposable
                     await OpsUpdateAsync(opId, "active", $"({i + 1}/{toDownload.Count}) {app.Name}");
                     TransferState? transferState = null;
                     long currentFileBytes = 0;
+                    long currentReceivedBytes = 0;
+                    var receivedBeforeFile = Interlocked.Read(ref receivedBytes);
                     long currentFileTotal = Math.Max(0, app.SizeBytes);
                     var completedBeforeFile = Interlocked.Read(ref downloadedBytes);
                     try
@@ -3452,13 +3458,19 @@ public sealed partial class AppController : IAsyncDisposable
                                     : Percent(done, toDownload.Count);
                                 _ = OpsProgressAsync(opId, Math.Min(99, overallPercent),
                                     progress.Assembling ? progress.Message : $"{FormatTransferBytes(aggregate)} / {FormatTransferBytes(totalBytes)} baixados");
-                                if (!progress.Assembling) _ = OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, aggregate, totalBytes);
+                                if (!progress.Assembling)
+                                {
+                                    Interlocked.Exchange(ref currentReceivedBytes, progress.RateBytes ?? progress.DownloadedBytes);
+                                    _ = OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, aggregate, totalBytes,
+                                        rateBytes: receivedBeforeFile + Interlocked.Read(ref currentReceivedBytes));
+                                }
                             });
                         await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                         var measuredTotal = Math.Max(Math.Max(0, app.SizeBytes), Math.Max(Interlocked.Read(ref currentFileTotal), Interlocked.Read(ref currentFileBytes)));
                         Interlocked.Exchange(ref downloadedBytes, completedBeforeFile + measuredTotal);
+                        Interlocked.Exchange(ref receivedBytes, receivedBeforeFile + Interlocked.Read(ref currentReceivedBytes));
                         done++;
-                        await OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, Interlocked.Read(ref downloadedBytes), totalBytes);
+                        await OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, Interlocked.Read(ref downloadedBytes), totalBytes, rateBytes: Interlocked.Read(ref receivedBytes));
                     }
                     catch (OperationCanceledException)
                     {
@@ -3484,14 +3496,15 @@ public sealed partial class AppController : IAsyncDisposable
                         await OfferOpenVerifiedSizeMismatchAsync(mismatch);
                         var measuredTotal = Math.Max(Math.Max(0, app.SizeBytes), Math.Max(Interlocked.Read(ref currentFileTotal), Interlocked.Read(ref currentFileBytes)));
                         Interlocked.Exchange(ref downloadedBytes, completedBeforeFile + measuredTotal);
+                        Interlocked.Exchange(ref receivedBytes, receivedBeforeFile + Interlocked.Read(ref currentReceivedBytes));
                         done++;
-                        await OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, Interlocked.Read(ref downloadedBytes), totalBytes);
+                        await OpsTransferMetricsAsync(opId, "download", done, toDownload.Count, Interlocked.Read(ref downloadedBytes), totalBytes, rateBytes: Interlocked.Read(ref receivedBytes));
                     }
                     catch (Exception ex)
                     {
                         if (transferState != null)
                         {
-                            await _transferManager.FailAsync(transferState, ex, CancellationToken.None);
+                            await _transferManager.RecordDownloadFailureAsync(transferState, ex, CancellationToken.None);
                         }
 
                         if (ex is EncryptedPayloadIntegrityException integrity &&
@@ -4778,6 +4791,7 @@ public sealed partial class AppController : IAsyncDisposable
                         ? (settings.DownloadPath.Trim().Length > 0 ? settings.DownloadPath : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
                         : state.DestinationPath);
                     var downloadBytes = Math.Max(0, entry.SizeBytes);
+                    long receivedBytes = 0;
                     await OpsTransferMetricsAsync(opId, "download", 0, 1, 0, downloadBytes);
                     await Downloader().DownloadAndAssembleAsync(
                         entry,
@@ -4790,10 +4804,13 @@ public sealed partial class AppController : IAsyncDisposable
                         {
                             _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Message);
                             if (!progress.Assembling)
-                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                            {
+                                Interlocked.Exchange(ref receivedBytes, progress.RateBytes ?? progress.DownloadedBytes);
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes, rateBytes: progress.RateBytes);
+                            }
                         });
                     await _transferManager.CompleteAsync(state, settings.KeepTransferHistory, cancellationToken);
-                    await OpsTransferMetricsAsync(opId, "download", 1, 1, downloadBytes, downloadBytes);
+                    await OpsTransferMetricsAsync(opId, "download", 1, 1, downloadBytes, downloadBytes, rateBytes: Interlocked.Read(ref receivedBytes));
                     resumed++;
                     await OpsUpdateAsync(opId, "done", "Concluído");
                 }
@@ -4817,7 +4834,7 @@ public sealed partial class AppController : IAsyncDisposable
             catch (Exception ex)
             {
                 AppLogger.Error("Transfer.Resume", ex, state.TransferId);
-                await _transferManager.FailAsync(state, ex, CancellationToken.None);
+                await _transferManager.RecordDownloadFailureAsync(state, ex, CancellationToken.None);
                 await OpsUpdateAsync(opId, "error", ex.Message);
             }
             finally

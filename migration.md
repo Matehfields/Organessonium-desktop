@@ -34,7 +34,7 @@ Introduzido por: validação SHA-256 por chunk e arquivo completo, protocolo che
 
 Motivo: não invalidar conteúdos existentes nem misturar hashes de uma origem atual com chunks antigos já confirmados.
 
-Código relacionado: Models/PayloadChecksums, FileMetadata, AppEntry, TransferState; Services/FileChecksums, EncryptionService, ForumDownloader, DownloadAssembler, MetadataService, SettingsStore; Bridge/AppController.UploadSingleAsync; Sync/CloudSyncRepository.
+Código relacionado: Models/PayloadChecksums, FileMetadata, AppEntry, TransferState; Services/FileChecksums, EncryptionService, ForumDownloader, ForumDownloader.Direct, PartialDownloadFile, MetadataService, SettingsStore; Bridge/AppController.UploadSingleAsync; Sync/CloudSyncRepository.
 
 Comportamento atual: upload novo calcula e persiste o manifesto antes da transmissão; retomada nova usa o manifesto persistido. Checkpoint antigo com partes confirmadas e sem manifesto termina sem inventar hashes. Arquivos antigos continuam com autenticação GCM/tamanho quando aplicável; ausência do campo é o único fallback. Campo declarado nulo, incompleto ou de versão desconhecida é erro, não legado. Cache antigo recebe coluna nullable aditiva, sem fabricar hashes. Rename/move/read não geram migração. Uma nova versão recebe hashes sem alterar as versões anteriores.
 
@@ -856,6 +856,22 @@ Impacto da remoção: catálogos e planos antigos em names deixam de ser encontr
 Procedimento: coordenar os escritores, copiar/validar registros mantendo sua ordem e referências, confirmar recuperação e somente depois remover mensagens antigas e o fallback. Nunca apagar mappings, metadados legados ou payloads por prefixo sem validação.
 
 Migração explícita disponível: `AppRegistry.MigrateNamesStorageJournalAsync`, acionada por `tools/NamesScanner --migrate-storage-journal`. Copia e verifica todos os registros antes das remoções, compara origem/destino novamente e retoma por marcador cifrado `legacyNamesMessageId`. `SharedStorageManager.Journal.cs` preserva a ordem lógica original, incluindo claims; eventos migrados descobertos após inicialização provocam replay completo. Manter esse marcador/leitor até não haver mais journal migrado ou até uma compactação autorizada preservar a mesma semântica. O comando não move `file`/`folder` legados nem remove mappings/payloads. O teste `sharedStorageJournalRouting` simula falha na cópia, falha na remoção, retomada sem duplicação, proteção de catálogo mais novo e download posterior.
+
+### DOWNLOAD-DIRECT-001
+
+Status: ativo.
+
+Descrição: checkpoints anteriores sem `downloadCheckpointVersion`/com zero usam `TempChunkPath` e arquivos plaintext separados. Downloads novos usam V1, um `.part` por transferência, offsets e SHA-256 local por região. Não muda o metadata remoto nem o formato dos uploads.
+
+Código relacionado: `ForumDownloader.Direct.cs`, `PartialDownloadFile`, `DownloadFileLayout`, `TransferState`, `TransferManager.Downloads.cs` e `TransferStateRepository`. Especificação: [downloads-direct.md](downloads-direct.md).
+
+Comportamento atual: importar incrementalmente apenas regiões antigas cujo tamanho e hash sejam verificáveis. Sem hash, baixar novamente. Confirmar dados em disco e checkpoint antes de remover arquivos antigos reconhecidos; preservar arquivos externos/inesperados, sem apagar diretórios recursivamente. A biblioteca mantém falhas recuperáveis pausadas. Checkpoints antigos de sincronização podem referenciar `SyncDownloads`; novos dados são gravados no volume da pasta vinculada. `TempPath` global e campos usados por uploads não foram retirados.
+
+Pode ser removido quando: não houver transferências anteriores pendentes em nenhuma instalação que receba esta versão.
+
+Impacto da remoção: chunks antigos deixam de ser aproveitados e podem ficar sem limpeza identificável. Não significa autorização para apagar dados antigos automaticamente.
+
+Procedimento: concluir ou cancelar explicitamente as transferências anteriores, conferir o definitivo e remover somente os arquivos comprovadamente pertencentes aos checkpoints encerrados. Depois retirar a importação e o campo legado dos consumidores de download, sem alterar uploads ou streaming.
 
 ## Verificações antes de uma versão definitiva
 

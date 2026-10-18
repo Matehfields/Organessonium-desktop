@@ -92,6 +92,9 @@ internal static partial class Program
         var downloadBytes = Enumerable.Range(0, 32768).Select(index => (byte)(index % 251)).ToArray();
         var original = await h.PrepareAsync("saved-download.bin", downloadBytes);
         var entry = (await h.UploadAsync([original])).Single();
+        // A legacy plaintext part is migratable only with independently verifiable integrity.
+        var digest = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(downloadBytes));
+        entry.Checksums = new PayloadChecksums { ChunkSizeBytes = downloadBytes.Length, Chunks = [digest], Sha256 = digest };
         await h.Transfers.CompleteAsync(original, false);
         var destination = h.Directory.CreateSubdirectory("download");
         var download = await h.Transfers.CreateDownloadAsync(entry, destination);
@@ -176,6 +179,22 @@ internal static partial class Program
                 return TestOutcome.Fail("o cancelamento explícito foi ignorado");
             }
             catch (OperationCanceledException) { }
+            var unavailable = AppEntry.File("unavailable.bin", "unavailable-thread", TransferState.Now(), 32, "/");
+            unavailable.FileId = "unavailable-download";
+            unavailable.Encryption = h.Encryption.CreateFileEncryption(EncryptionModes.Standard);
+            unavailable.ChunkMessageIds = ["99999999"]; unavailable.ChunkCount = 1;
+            await (Task)typeof(AppController).GetMethod("StartDownloadAsync", flags)!.Invoke(controller,
+                [unavailable.ThreadId, unavailable.Name, h.Directory.CreateSubdirectory("unavailable-download"), unavailable])!;
+            var errorVisible = false;
+            for (var attempt = 0; attempt < 100 && !errorVisible; attempt++)
+            {
+                errorVisible = await view.ExecuteScriptAsync("!!document.querySelector('.op-item[data-op-type=download][data-op-status=error]')") == "true";
+                if (!errorVisible) await Task.Delay(50);
+            }
+            RequireSync(errorVisible && (await h.Transfers.RecoverableAsync()).Any(saved =>
+                saved.FileId == unavailable.FileId && saved.Status == TransferStatuses.Paused) &&
+                h.Transfers.Repository.FailedDirectory.GetFiles().Length == 0,
+                "a falha do download não apareceu no painel ou descartou sua retomada");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

@@ -3,7 +3,7 @@ using Organessonium.Models;
 
 namespace Organessonium.Services;
 
-public sealed class TransferManager
+public sealed partial class TransferManager
 {
     private readonly TransferStateRepository _repository;
     private readonly SemaphoreSlim _uploadCheckpointGate = new(1, 1);
@@ -47,6 +47,32 @@ public sealed class TransferManager
         AppEntry entry,
         DirectoryInfo destination,
         CancellationToken cancellationToken = default)
+    {
+        await _downloadCreationGate.WaitAsync(cancellationToken);
+        try
+        {
+            var finalPath = PartialDownloadFile.Destination(destination, entry.Name);
+            if (PartialDownloadFile.IsActive(finalPath)) throw new DownloadAlreadyActiveException();
+            var identity = DownloadIdentity(entry);
+            foreach (var saved in await RecoverableAsync(cancellationToken))
+            {
+                if (saved.TransferType != TransferTypes.Download || string.IsNullOrWhiteSpace(saved.DestinationPath)) continue;
+                var savedIdentity = saved.DownloadIdentity;
+                if (savedIdentity == null && saved.DownloadMetadata != null)
+                {
+                    var oldEntry = new MetadataService().ToAppEntry(new MetadataEnvelope(saved.MetadataMessageId ?? "", saved.DownloadMetadata));
+                    if (oldEntry != null) savedIdentity = DownloadIdentity(oldEntry);
+                }
+                if (savedIdentity == identity && string.Equals(finalPath,
+                    PartialDownloadFile.Destination(new DirectoryInfo(saved.DestinationPath), saved.FileName), StringComparison.OrdinalIgnoreCase))
+                    return saved;
+            }
+            return await CreateDownloadCoreAsync(entry, destination, cancellationToken);
+        }
+        finally { _downloadCreationGate.Release(); }
+    }
+
+    private async Task<TransferState> CreateDownloadCoreAsync(AppEntry entry, DirectoryInfo destination, CancellationToken cancellationToken)
     {
         var chunks = entry.ChunkReferences != null
             ? ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds).Select(reference => new TransferChunkState
@@ -216,6 +242,17 @@ public sealed class TransferManager
         bool cleanupTemp,
         CancellationToken cancellationToken = default)
     {
+        if (state.TransferType == TransferTypes.Download)
+        {
+            if (!cleanupTemp)
+            {
+                await PauseAsync(state, new OperationCanceledException("Download cancelado; dados preservados para retomada."), cancellationToken);
+                return;
+            }
+            CleanupDownload(state);
+            await _repository.MoveToCancelledAsync(state, keepHistory, cancellationToken);
+            return;
+        }
         if (cleanupTemp)
         {
             CleanupTemp(state);

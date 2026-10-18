@@ -106,6 +106,8 @@ public sealed class TransferStateRepository
                 await using var writer = new StreamWriter(stream);
                 await writer.WriteAsync(json.AsMemory(), cancellationToken);
                 await writer.FlushAsync(cancellationToken);
+                if (state.TransferType == TransferTypes.Download && state.DownloadCheckpointVersion == TransferState.DirectDownloadVersion)
+                    stream.Flush(flushToDisk: true);
             }
 
             File.Move(temp.FullName, file.FullName, overwrite: true);

@@ -97,36 +97,11 @@ public sealed partial class ForumDownloader
     {
         onProgress("Recolhendo URLs dos anexos...");
         var parts = await CollectPartsAsync(threadId, cancellationToken);
-        if (parts.Count == 0)
-        {
-            throw new InvalidOperationException("Nenhum anexo encontrado na thread.");
-        }
-
-        var expectedBytes = parts.Sum(p => p.Size);
-        ValidateDestination(destDir, expectedBytes);
-        onProgress($"{parts.Count} URL(s) recolhida(s), {FormatBytes(expectedBytes)}. Baixando com {Math.Clamp(_settings.DownloadThreads, 1, 16)} thread(s)...");
-
-        var tempDir = ResolveTempDir(destDir, threadId);
-        Directory.CreateDirectory(tempDir.FullName);
-        ValidateDestination(tempDir, expectedBytes);
-        onProgress("Pasta temporÃ¡ria: " + tempDir.FullName);
-
-        var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress);
-        onProgress("Montando arquivo final...");
-
+        if (parts.Count == 0) throw new InvalidOperationException("Nenhum anexo encontrado na thread.");
         var firstName = parts[0].Name;
-        var archiveName = System.Text.RegularExpressions.Regex.IsMatch(firstName, @".*\.\d{3}$")
-            ? System.Text.RegularExpressions.Regex.Replace(firstName, @"\.\d{3}$", "")
-            : firstName;
-
-        Directory.CreateDirectory(destDir.FullName);
-        var output = new FileInfo(System.IO.Path.Combine(destDir.FullName, archiveName));
-        await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
-
-        try { tempDir.Delete(true); } catch { }
-        return output;
+        var name = Regex.IsMatch(firstName, @".*\.\d{3}$") ? Regex.Replace(firstName, @"\.\d{3}$", "") : firstName;
+        return await DownloadDirectAsync(parts, destDir, name, onProgress, cancellationToken, onDetailedProgress);
     }
-
     public async Task<FileInfo> DownloadAndAssembleAsync(
         AppEntry entry,
         DirectoryInfo destDir,
@@ -172,35 +147,15 @@ public sealed partial class ForumDownloader
         }
     }
 
-    private async Task<FileInfo> DownloadBatchAndAssembleAsync(
-        AppEntry entry,
-        DirectoryInfo destDir,
-        Action<string> onProgress,
-        CancellationToken cancellationToken,
-        Action<DownloadProgress>? onDetailedProgress = null)
+    private async Task<FileInfo> DownloadBatchAndAssembleAsync(AppEntry entry, DirectoryInfo destDir,
+        Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress = null)
     {
         onProgress("Recuperando partes pelo batch do metadata...");
         var parts = await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
-        if (parts.Count == 0)
-        {
-            throw new InvalidOperationException("NÃ£o foi possÃ­vel recuperar os chunks pelo batchId do metadata.json.");
-        }
-
-        var expectedBytes = parts.Sum(part => Math.Max(0, part.Size));
-        ValidateDestination(destDir, expectedBytes);
-        var tempDir = ResolveTempDir(destDir, entry.ThreadId);
-        tempDir.Create();
-        var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress);
-
-        destDir.Create();
-        var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name));
-        await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken);
-
-        try { tempDir.Delete(true); } catch { }
-        output.Refresh();
-        return output;
+        if (parts.Count == 0) throw new InvalidOperationException("Não foi possível recuperar os chunks pelo batchId do metadata.");
+        return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name,
+            onProgress, cancellationToken, onDetailedProgress);
     }
-
     private static bool CanRecoverByBatch(AppEntry entry, Exception ex)
     {
         return ex is not OperationCanceledException &&
@@ -225,192 +180,37 @@ public sealed partial class ForumDownloader
         Action<string> onProgress, CancellationToken cancellationToken, Action<DownloadProgress>? onDetailedProgress)
     {
         entry.Checksums?.Validate(entry.SizeBytes, entry.LogicalChunkCount);
-        if (entry.LogicalChunkCount == 0)
-        {
-            return await DownloadAndAssembleAsync(entry, destDir, onProgress, cancellationToken, onDetailedProgress);
-        }
-
-        state.Status = TransferStatuses.Downloading;
-        state.ThreadId = entry.ThreadId;
-        state.FileId = entry.FileId;
-        state.FileName = entry.Name;
-        state.MimeType = entry.MimeType;
-        state.SizeBytes = entry.SizeBytes;
-        state.Encryption = entry.Encryption?.Clone();
-        var references = entry.ChunkReferences == null ? null : ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
-        state.PayloadLayoutVersion = references == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment;
-        state.TotalChunks = entry.LogicalChunkCount;
-        state.Chunks = (references?.Select(reference => reference.MessageId) ?? entry.ChunkMessageIds)
-            .Select((messageId, index) =>
-            {
-                var attachmentId = references?[index].AttachmentId;
-                var existing = state.Chunks.FirstOrDefault(chunk => chunk.Index == index);
-                if (existing == null || !string.Equals(existing.MessageId, messageId, StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(existing.AttachmentId, attachmentId, StringComparison.Ordinal))
-                {
-                    return new TransferChunkState
-                    {
-                        Index = index,
-                        MessageId = messageId,
-                        AttachmentId = attachmentId
-                    };
-                }
-
-                existing.MessageId = messageId;
-                return existing;
-            })
-            .ToList();
-
-        onProgress($"Localizando partes 0/{entry.LogicalChunkCount}...");
-        var parts = await ResolveMessagePartsAsync(
-            entry.ThreadId,
-            entry.ChunkMessageIds,
-            entry.BatchId,
-            cancellationToken,
-            (completed, total) => onProgress($"Localizando partes {completed}/{total}..."),
-            references);
-
-        foreach (var part in parts)
-        {
-            if (entry.Encryption == null)
-            {
-                state.Chunks.First(chunk => chunk.Index == part.Index).SizeBytes = part.Size;
-            }
-        }
-
-        if (parts.Count == 0)
-        {
-            throw new InvalidOperationException("metadata.json nÃ£o contÃ©m chunks para baixar.");
-        }
-
-        var expectedBytes = parts.Sum(part => Math.Max(0, part.Size));
-        ValidateDestination(destDir, expectedBytes);
-        var tempDir = ResolveTempDir(destDir, state.TransferId);
-        tempDir.Create();
-        state.TempPath = tempDir.FullName;
-        onProgress("Pasta temporÃ¡ria: " + tempDir.FullName);
-        var available = new SortedDictionary<int, FileInfo>();
-        var existingBytes = 0L;
-        foreach (var part in parts)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var chunk = state.Chunks.First(item => item.Index == part.Index);
-            if (!chunk.Downloaded || string.IsNullOrWhiteSpace(chunk.TempChunkPath))
-            {
-                chunk.Downloaded = false;
-                chunk.TempChunkPath = null;
-                continue;
-            }
-
-            var source = new FileInfo(chunk.TempChunkPath);
-            source.Refresh();
-            if (!source.Exists ||
-                (entry.Encryption == null && part.Size > 0 && source.Length != part.Size) ||
-                (entry.Encryption != null && chunk.SizeBytes > 0 && source.Length != chunk.SizeBytes) ||
-                (entry.Checksums != null && !await FileChecksums.MatchesAsync(source, entry.Checksums.Chunks[part.Index], cancellationToken)))
-            {
-                chunk.Downloaded = false;
-                chunk.TempChunkPath = null;
-                TryDelete(source);
-                continue;
-            }
-
-            var target = new FileInfo(Path.Combine(tempDir.FullName, TempPartFileName(part)));
-            var relocated = await RelocateChunkAsync(source, target, cancellationToken);
-            chunk.TempChunkPath = relocated.FullName;
-            available[part.Index] = relocated;
-            existingBytes += relocated.Length;
-        }
-
-        state.DownloadedChunks = state.Chunks
-            .Where(chunk => chunk.Downloaded && !string.IsNullOrWhiteSpace(chunk.TempChunkPath))
-            .Select(chunk => chunk.Index)
-            .OrderBy(index => index)
-            .ToList();
-        state.PendingChunks = state.Chunks
-            .Where(chunk => !chunk.Downloaded)
-            .Select(chunk => chunk.Index)
-            .OrderBy(index => index)
-            .ToList();
-        await transferManager.SaveAsync(state, cancellationToken);
-
-        var pendingParts = parts.Where(part => !available.ContainsKey(part.Index)).ToList();
-        using var stateSaveGate = new SemaphoreSlim(1, 1);
-        var completedSinceCheckpoint = 0;
-        var checkpointPending = false;
-        SortedDictionary<int, FileInfo> downloaded;
+        if (entry.ChunkReferences != null) ChunkReference.Validate(entry.ChunkReferences, entry.ChunkMessageIds);
+        if (entry.Encryption != null && entry.LogicalChunkCount == 0)
+            throw new InvalidDataException("O metadata criptografado não contém referências aos chunks.");
+        var finalized = await RecoverFinalizedDownloadAsync(state, entry, onProgress, onDetailedProgress, cancellationToken);
+        if (finalized != null) return finalized;
+        List<Part> parts;
         try
         {
-            downloaded = await DownloadPartsAsync(
-                pendingParts,
-                tempDir,
-                onProgress,
-                cancellationToken,
-                onDetailedProgress,
-                onPartCompleted: async (part, file) =>
-                {
-                    await stateSaveGate.WaitAsync(cancellationToken);
-                    try
-                    {
-                        await transferManager.MarkDownloadChunkAsync(
-                            state,
-                            part.Index,
-                            file.FullName,
-                            file.Length,
-                            cancellationToken,
-                            persist: false);
-                        checkpointPending = true;
-                        completedSinceCheckpoint++;
-                        if (completedSinceCheckpoint >= 4)
-                        {
-                            await transferManager.SaveAsync(state, cancellationToken);
-                            checkpointPending = false;
-                            completedSinceCheckpoint = 0;
-                        }
-                    }
-                    finally
-                    {
-                        stateSaveGate.Release();
-                    }
-                },
-                initialDownloadedBytes: existingBytes,
-                encryption: EncryptionContext(entry, EncryptedPayloadRoles.Original), checksums: entry.Checksums);
+            parts = entry.LogicalChunkCount == 0
+                ? await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId)
+                : await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken,
+                    (done, total) => onProgress($"Localizando partes {done}/{total}..."), entry.ChunkReferences);
         }
-        finally
+        catch (Exception error) when (CanRecoverByBatch(entry, error))
         {
-            await stateSaveGate.WaitAsync(CancellationToken.None);
-            try
-            {
-                if (checkpointPending)
-                {
-                    await transferManager.SaveAsync(state, CancellationToken.None);
-                }
-            }
-            finally
-            {
-                stateSaveGate.Release();
-            }
+            parts = await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
         }
-
-        foreach (var part in downloaded)
-        {
-            available[part.Key] = part.Value;
-        }
-
-        onProgress("Montando arquivo final...");
-        destDir.Create();
-        var outputFile = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name));
-        await DownloadAssembler.AssembleAsync(parts.OrderBy(part => part.Index).Select(part => available[part.Index]),
-            outputFile, onProgress, onDetailedProgress, cancellationToken, entry.Checksums);
-
-        try { tempDir.Delete(true); } catch { }
-        outputFile.Refresh();
-        if (entry.Encryption != null)
-        {
-            EnsureExpectedPlaintextLength(outputFile, entry.SizeBytes);
-        }
-
-        return outputFile;
+        if (parts.Count == 0) throw new InvalidDataException("O arquivo não contém chunks para baixar.");
+        var identity = TransferManager.DownloadIdentity(entry);
+        if (state.DownloadCheckpointVersion != 0 && state.DownloadIdentity != identity)
+            throw new InvalidDataException("O checkpoint pertence a outra versão do arquivo.");
+        state.ThreadId = entry.ThreadId; state.FileId = entry.FileId; state.SizeBytes = entry.SizeBytes;
+        state.MimeType = entry.MimeType; state.Encryption = entry.Encryption?.Clone();
+        state.DownloadMetadata ??= MetadataService.CreateFileMetadata(entry);
+        state.Checksums = entry.Checksums;
+        state.PayloadLayoutVersion = entry.Storage?.Shared == true ? TransferPayloadLayouts.SharedStorage :
+            entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment;
+        return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name,
+            onProgress, cancellationToken, onDetailedProgress,
+            EncryptionContext(entry, EncryptedPayloadRoles.Original)?.WithChunkCount(parts.Count),
+            entry.SizeBytes, entry.Checksums, state, transferManager, identity);
     }
     public async Task<FileInfo?> DownloadVideoPreview480Async(
         AppEntry entry,
@@ -454,38 +254,11 @@ public sealed partial class ForumDownloader
         Action<DownloadProgress>? onProgress, CancellationToken cancellationToken)
     {
         var parts = await CollectPreviewPartsAsync(threadId, kind, cancellationToken);
-        if (parts.Count == 0)
-        {
-            return null;
-        }
-
-        destDir.Create();
-        var tempDir = new DirectoryInfo(Path.Combine(destDir.FullName, ".preview_parts_" + SafeKind(kind)));
-        tempDir.Create();
-        var downloaded = await DownloadPartsAsync(
-            parts,
-            tempDir,
-            _ => { },
-            cancellationToken,
-            onProgress);
+        if (parts.Count == 0) return null;
         var firstName = parts[0].Name;
-        var outputName = Regex.IsMatch(firstName, @".*\.\d{3}$")
-            ? Regex.Replace(firstName, @"\.\d{3}$", "")
-            : firstName;
-        var output = new FileInfo(Path.Combine(destDir.FullName, outputName));
-        await using (var outStream = new FileStream(output.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-        {
-            foreach (var part in downloaded.Values)
-            {
-                await using var inStream = new FileStream(part.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-                await inStream.CopyToAsync(outStream, cancellationToken);
-            }
-        }
-
-        try { tempDir.Delete(true); } catch { }
-        return output;
+        var name = Regex.IsMatch(firstName, @".*\.\d{3}$") ? Regex.Replace(firstName, @"\.\d{3}$", "") : firstName;
+        return await DownloadDirectAsync(parts, destDir, name, _ => { }, cancellationToken, onProgress);
     }
-
     public async Task<byte[]?> DownloadPreviewBytesAsync(
         string threadId,
         string kind,
@@ -1093,59 +866,16 @@ public sealed partial class ForumDownloader
 
         return resolved.ToList();
     }
-    private async Task<FileInfo> DownloadMessagePartsAsync(
-        string threadId,
-        IReadOnlyList<string> messageIds,
-        string outputName,
-        DirectoryInfo destDir,
-        Action<string> onProgress,
-        CancellationToken cancellationToken,
-        Action<DownloadProgress>? onDetailedProgress = null,
-        EncryptedPayloadContext? encryption = null,
-        long expectedPlaintextLength = -1,
-        IReadOnlyList<ChunkReference>? chunkReferences = null,
-        PayloadChecksums? checksums = null)
+    private async Task<FileInfo> DownloadMessagePartsAsync(string threadId, IReadOnlyList<string> messageIds,
+        string outputName, DirectoryInfo destDir, Action<string> onProgress, CancellationToken cancellationToken,
+        Action<DownloadProgress>? onDetailedProgress = null, EncryptedPayloadContext? encryption = null,
+        long expectedPlaintextLength = -1, IReadOnlyList<ChunkReference>? chunkReferences = null, PayloadChecksums? checksums = null)
     {
         var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken, chunkReferences: chunkReferences);
-        encryption = encryption?.WithChunkCount(parts.Count);
-
-        if (parts.Count == 0)
-        {
-            throw new InvalidOperationException("metadata.json nÃ£o contÃ©m chunks para baixar.");
-        }
-
-        var expectedBytes = parts.Sum(part => Math.Max(0, part.Size));
-        ValidateDestination(destDir, expectedBytes);
-        var tempDir = ResolveTempDir(destDir, threadId + "_meta");
-        tempDir.Create();
-        try
-        {
-            var downloaded = await DownloadPartsAsync(parts, tempDir, onProgress, cancellationToken, onDetailedProgress, encryption: encryption, checksums: checksums);
-
-            destDir.Create();
-            var output = new FileInfo(Path.Combine(destDir.FullName, string.IsNullOrWhiteSpace(outputName) ? downloaded.Values.First().Name : outputName));
-            await DownloadAssembler.AssembleAsync(downloaded.Values, output, onProgress, onDetailedProgress, cancellationToken, checksums);
-
-            try { tempDir.Delete(true); } catch { }
-            output.Refresh();
-            if (encryption != null)
-            {
-                EnsureExpectedPlaintextLength(output, expectedPlaintextLength);
-            }
-
-            return output;
-        }
-        catch
-        {
-            if (encryption != null)
-            {
-                try { tempDir.Delete(true); } catch { }
-            }
-
-            throw;
-        }
+        if (parts.Count == 0) throw new InvalidDataException("O arquivo não contém chunks para baixar.");
+        return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(outputName) ? parts[0].Name : outputName,
+            onProgress, cancellationToken, onDetailedProgress, encryption?.WithChunkCount(parts.Count), expectedPlaintextLength, checksums);
     }
-
     private static bool IsPreviewMessage(string? content)
     {
         return (content ?? "").StartsWith(PreviewPrefix, StringComparison.OrdinalIgnoreCase) ||
@@ -1203,27 +933,27 @@ public sealed partial class ForumDownloader
                partIndex > 0 && totalParts > 0 && partIndex <= totalParts;
     }
 
-    private async Task<SortedDictionary<int, FileInfo>> DownloadPartsAsync(
+    private async Task DownloadPartsAsync(
         IReadOnlyList<Part> parts,
-        DirectoryInfo tempDir,
+        PartialDownloadFile destination,
         Action<string> onProgress,
         CancellationToken cancellationToken,
         Action<DownloadProgress>? onDetailedProgress = null,
-        Func<Part, FileInfo, Task>? onPartCompleted = null,
+        Func<Part, string, Task>? onPartCompleted = null,
         long initialDownloadedBytes = 0,
         EncryptedPayloadContext? encryption = null,
         PayloadChecksums? checksums = null)
     {
         if (parts.Count == 0)
         {
-            return new SortedDictionary<int, FileInfo>();
+            return;
         }
 
         using var http = _downloadClientFactory();
         var downloadedBytes = initialDownloadedBytes;
-        var totalBytes = parts.Sum(part => Math.Max(0, part.Size)) + Math.Max(0, initialDownloadedBytes);
+        long receivedBytes = 0;
+        var totalBytes = destination.Layout.Length;
         var lastDetailedPercent = -1;
-        var result = new ConcurrentDictionary<int, FileInfo>();
         var parallelism = Math.Min(Math.Clamp(_settings.DownloadThreads, 1, 16), parts.Count);
         using var semaphore = new SemaphoreSlim(parallelism);
 
@@ -1232,15 +962,12 @@ public sealed partial class ForumDownloader
             await semaphore.WaitAsync(cancellationToken);
             try
             {
-                var target = new FileInfo(Path.Combine(tempDir.FullName, TempPartFileName(part)));
-                await DownloadPartWithRetryAsync(part, target);
-                target.Refresh();
+                var digest = await DownloadPartWithRetryAsync(part);
                 if (onPartCompleted != null)
                 {
-                    await onPartCompleted(part, target);
+                    await onPartCompleted(part, digest);
                 }
 
-                result[part.Index] = target;
                 onProgress($"{FormatBytes(Interlocked.Read(ref downloadedBytes))} / {FormatBytes(totalBytes)} baixados");
             }
             finally
@@ -1250,9 +977,8 @@ public sealed partial class ForumDownloader
         });
 
         await Task.WhenAll(tasks);
-        return new SortedDictionary<int, FileInfo>(result);
 
-        async Task DownloadPartWithRetryAsync(Part part, FileInfo target)
+        async Task<string> DownloadPartWithRetryAsync(Part part)
         {
             Exception? last = null;
             var maxAttempts = encryption == null ? MaxChunkDownloadAttempts : MaxEncryptedPayloadDownloadAttempts;
@@ -1260,6 +986,8 @@ public sealed partial class ForumDownloader
             for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 var countedBytes = 0L;
+                var reportedBytes = 0L;
+                var logicalLength = destination.Layout.Regions[part.Index].Length;
                 var useProxy = (attempt + networkRetryCount) % 2 == 0 &&
                                !string.IsNullOrWhiteSpace(part.ProxyUrl) &&
                                !string.Equals(part.ProxyUrl, part.Url, StringComparison.OrdinalIgnoreCase);
@@ -1271,69 +999,85 @@ public sealed partial class ForumDownloader
                     using var reservation = encryption == null ? null : await RamUploadBudget.ReserveExternalBytesAsync(
                         checked(part.Size * 2 + DownloadBufferSize), checked(part.Size * 2 + DownloadBufferSize), cancellationToken);
                     using var encryptedMemory = encryption == null ? null : new MemoryStream(checked((int)part.Size));
-                    using var plainHash = encryption == null && checksums != null ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
-                    target.Directory?.Create();
-                    await using var diskOutput = encryptedMemory == null
-                        ? new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true) : null;
-                    var outStream = (Stream?)encryptedMemory ?? diskOutput!;
+                    try
                     {
-                        using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
-                        request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
-                        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                        response.EnsureSuccessStatusCode();
-                        if (part.Size > 0 && response.Content.Headers.ContentLength == 0)
+                        using var plainHash = encryption == null ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+                        await using var diskOutput = encryptedMemory == null ? destination.OpenRegion(part.Index) : null;
+                        var outStream = (Stream?)encryptedMemory ?? diskOutput!;
                         {
-                            throw new IOException("Chunk recebido vazio do CDN: " + part.Name);
-                        }
-
-                        await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                        var buffer = new byte[DownloadBufferSize];
-                        while (true)
-                        {
-                            await VideoNetworkPriority.YieldAsync(cancellationToken);
-                            var read = await inStream.ReadAsync(buffer, cancellationToken);
-                            if (read <= 0)
+                            using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
+                            request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
+                            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                            response.EnsureSuccessStatusCode();
+                            if (part.Size > 0 && response.Content.Headers.ContentLength == 0)
                             {
-                                break;
+                                throw new IOException("Chunk recebido vazio do CDN: " + part.Name);
                             }
 
-                            if (part.Size > 0 && countedBytes + read > part.Size)
-                                throw new IOException("O chunk recebido excedeu o tamanho informado pelo servidor.");
-                            await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-                            plainHash?.AppendData(buffer, 0, read);
-                            countedBytes += read;
-                            var currentBytes = Interlocked.Add(ref downloadedBytes, read);
-                            ReportParallelProgress(currentBytes, part);
+                            await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                            var buffer = new byte[DownloadBufferSize];
+                            try
+                            {
+                                while (true)
+                                {
+                                    await VideoNetworkPriority.YieldAsync(cancellationToken);
+                                    var read = await inStream.ReadAsync(buffer, cancellationToken);
+                                    if (read <= 0)
+                                    {
+                                        break;
+                                    }
+
+                                    if (part.Size > 0 && countedBytes + read > part.Size)
+                                        throw new IOException("O chunk recebido excedeu o tamanho informado pelo servidor.");
+                                    await outStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                                    plainHash?.AppendData(buffer, 0, read);
+                                    countedBytes += read;
+                                    Interlocked.Add(ref receivedBytes, read);
+                                    var logical = encryption == null ? countedBytes : Math.Min(logicalLength, countedBytes * logicalLength / part.Size);
+                                    var currentBytes = Interlocked.Add(ref downloadedBytes, logical - reportedBytes);
+                                    reportedBytes = logical;
+                                    ReportParallelProgress(currentBytes, part);
+                                }
+
+                                await outStream.FlushAsync(cancellationToken);
+                            }
+                            finally { CryptographicOperations.ZeroMemory(buffer); }
                         }
 
-                        await outStream.FlushAsync(cancellationToken);
-                    }
-
-                    if (part.Size > 0 && countedBytes != part.Size)
-                    {
-                        throw new IOException($"Chunk {part.Index + 1} incompleto. Esperado {part.Size} bytes, recebido {countedBytes} bytes.");
-                    }
-
-                    if (countedBytes == 0)
-                    {
-                        throw new IOException("Chunk baixado estÃ¡ vazio: " + part.Name);
-                    }
-
-                    if (encryption != null)
-                    {
-                        var plaintext = _encryption.DecryptBytes(encryptedMemory!.GetBuffer().AsSpan(0, checked((int)countedBytes)),
-                            encryption.WithChunkIndex(part.Index));
-                        try
+                        if (part.Size > 0 && countedBytes != part.Size)
                         {
-                            if (encryption.Checksums == null) checksums?.VerifyChunk(part.Index, plaintext);
-                            await File.WriteAllBytesAsync(target.FullName, plaintext, cancellationToken);
+                            throw new IOException($"Chunk {part.Index + 1} incompleto. Esperado {part.Size} bytes, recebido {countedBytes} bytes.");
                         }
-                        finally { CryptographicOperations.ZeroMemory(plaintext); }
-                    }
-                    else if (plainHash != null && Convert.ToHexStringLower(plainHash.GetHashAndReset()) != checksums!.Chunks[part.Index])
-                        throw new PayloadChecksumException("O checksum de uma parte baixada não confere.");
 
-                    return;
+                        if (countedBytes == 0 && logicalLength != 0)
+                        {
+                            throw new IOException("Chunk baixado estÃ¡ vazio: " + part.Name);
+                        }
+
+                        if (encryption != null)
+                        {
+                            var plaintext = _encryption.DecryptBytes(encryptedMemory!.GetBuffer().AsSpan(0, checked((int)countedBytes)),
+                                encryption.WithChunkIndex(part.Index));
+                            try
+                            {
+                                if (encryption.Checksums == null) checksums?.VerifyChunk(part.Index, plaintext);
+                                if (plaintext.LongLength != logicalLength) throw new InvalidDataException("O tamanho autenticado diverge do intervalo calculado.");
+                                var digest = checksums?.Chunks[part.Index] ?? Convert.ToHexStringLower(SHA256.HashData(plaintext));
+                                await using var output = destination.OpenRegion(part.Index);
+                                await output.WriteAsync(plaintext, cancellationToken);
+                                return digest;
+                            }
+                            finally { CryptographicOperations.ZeroMemory(plaintext); }
+                        }
+                        var plainDigest = Convert.ToHexStringLower(plainHash!.GetHashAndReset());
+                        if (checksums != null && plainDigest != checksums.Chunks[part.Index])
+                            throw new PayloadChecksumException("O checksum de uma parte baixada não confere.");
+                        return plainDigest;
+                    }
+                    finally
+                    {
+                        if (encryptedMemory != null) CryptographicOperations.ZeroMemory(encryptedMemory.GetBuffer());
+                    }
                 }
                 catch (Exception ex) when ((ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested) &&
                                            (NetworkRetryPolicy.IsTransient(ex) || attempt < maxAttempts))
@@ -1341,10 +1085,9 @@ public sealed partial class ForumDownloader
                     last = ex;
                     if (countedBytes > 0)
                     {
-                        Interlocked.Add(ref downloadedBytes, -countedBytes);
+                        Interlocked.Add(ref downloadedBytes, -reportedBytes);
                     }
 
-                    TryDelete(target);
                     AppLogger.Error("Download.ChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}:{(useProxy ? "proxy" : "cdn")}");
                     var isEmptyResponse = ex is IOException io &&
                                           (io.Message.Contains("vazio", StringComparison.OrdinalIgnoreCase) ||
@@ -1369,10 +1112,9 @@ public sealed partial class ForumDownloader
                     last = ex;
                     if (countedBytes > 0)
                     {
-                        Interlocked.Add(ref downloadedBytes, -countedBytes);
+                        Interlocked.Add(ref downloadedBytes, -reportedBytes);
                     }
 
-                    TryDelete(target);
                     break;
                 }
             }
@@ -1395,72 +1137,12 @@ public sealed partial class ForumDownloader
 
             var percent = totalBytes <= 0
                 ? 0
-                : Math.Clamp((int)Math.Round(currentBytes * 80.0 / totalBytes), 0, 80);
+                : Math.Clamp((int)Math.Round(currentBytes * 99.0 / totalBytes), 0, 99);
             if (Interlocked.Exchange(ref lastDetailedPercent, percent) != percent)
             {
-                onDetailedProgress(new DownloadProgress(percent, part.Name, currentBytes, totalBytes));
+                onDetailedProgress(new DownloadProgress(percent, part.Name, currentBytes, totalBytes, RateBytes: Interlocked.Read(ref receivedBytes)));
             }
         }
-    }
-    private static async Task DownloadSinglePartWithRetryAsync(
-        HttpClient http,
-        Part part,
-        FileInfo target,
-        Action<DownloadProgress>? onDetailedProgress,
-        CancellationToken cancellationToken)
-    {
-        Exception? last = null;
-        for (var attempt = 1; attempt <= 4; attempt++)
-        {
-            try
-            {
-                target.Directory?.Create();
-                using var response = await http.GetAsync(part.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                response.EnsureSuccessStatusCode();
-                await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await using (var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true))
-                {
-                    await CopyWithProgressAsync(input, output, 0, Math.Max(0, part.Size), part.Name, onDetailedProgress, cancellationToken);
-                }
-
-                target.Refresh();
-                if (part.Size > 0 && target.Length != part.Size)
-                {
-                    throw new IOException($"Chunk {part.Index + 1} incompleto. Esperado {part.Size} bytes, recebido {target.Length} bytes.");
-                }
-
-                if (!target.Exists || target.Length == 0)
-                {
-                    throw new IOException("Chunk baixado estÃ¡ vazio: " + part.Name);
-                }
-
-                return;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException &&
-                                       (NetworkRetryPolicy.IsTransient(ex) || attempt < 4))
-            {
-                last = ex;
-                TryDelete(target);
-                AppLogger.Error("Download.StateChunkRetry", ex, $"{part.Index}:{part.Name}:attempt {attempt}");
-                if (NetworkRetryPolicy.IsTransient(ex))
-                {
-                    attempt--;
-                    await NetworkRetryPolicy.DelayAsync(attempt + 1, cancellationToken);
-                }
-                else
-                {
-                    await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt * attempt), cancellationToken);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                last = ex;
-                TryDelete(target);
-                break;
-            }
-        }
-
-        throw new IOException($"NÃ£o foi possÃ­vel baixar a parte {part.Index + 1}.", last);
     }
     private static async Task<long> CopyWithProgressAsync(
         Stream input,
@@ -1544,37 +1226,6 @@ public sealed partial class ForumDownloader
             // Partial chunks are retried or surfaced as transfer errors.
         }
     }
-    private static string SafeKind(string kind)
-    {
-        return string.Concat((kind ?? "preview").Select(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_'));
-    }
-
-    private DirectoryInfo ResolveTempDir(DirectoryInfo destDir, string threadId)
-    {
-        var suffix = string.IsNullOrWhiteSpace(threadId)
-            ? "download"
-            : threadId[..Math.Min(12, threadId.Length)];
-        var configured = _settings.TempPath?.Trim();
-        var baseDir = !string.IsNullOrWhiteSpace(configured) && SameVolume(configured, destDir.FullName)
-            ? configured
-            : destDir.FullName;
-        return new DirectoryInfo(Path.Combine(baseDir, ".organessonium_parts_" + suffix));
-    }
-
-    private static bool SameVolume(string left, string right)
-    {
-        try
-        {
-            var leftRoot = Path.GetPathRoot(Path.GetFullPath(left));
-            var rightRoot = Path.GetPathRoot(Path.GetFullPath(right));
-            return !string.IsNullOrWhiteSpace(leftRoot) &&
-                   string.Equals(leftRoot, rightRoot, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     private static bool SameFilePath(string left, string right)
     {
@@ -1588,35 +1239,8 @@ public sealed partial class ForumDownloader
         }
     }
 
-    private static async Task<FileInfo> RelocateChunkAsync(
-        FileInfo source,
-        FileInfo target,
-        CancellationToken cancellationToken)
-    {
-        source.Refresh();
-        target.Directory?.Create();
-        if (SameFilePath(source.FullName, target.FullName))
-        {
-            return source;
-        }
 
-        TryDelete(target);
-        if (SameVolume(source.FullName, target.FullName))
-        {
-            File.Move(source.FullName, target.FullName, true);
-        }
-        else
-        {
-            await using var input = new FileStream(source.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, DownloadBufferSize, true);
-            await using var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true);
-            await input.CopyToAsync(output, cancellationToken);
-            TryDelete(source);
-        }
-
-        target.Refresh();
-        return target;
-    }
-    private static void ValidateDestination(DirectoryInfo destDir, long expectedBytes)
+    private static void ValidateDestination(DirectoryInfo destDir, long expectedBytes, long allocatedBytes = 0)
     {
         Directory.CreateDirectory(destDir.FullName);
         var root = System.IO.Path.GetPathRoot(destDir.FullName);
@@ -1626,12 +1250,13 @@ public sealed partial class ForumDownloader
         }
 
         var drive = new DriveInfo(root);
-        if (expectedBytes > 0 && drive.AvailableFreeSpace > 0 && drive.AvailableFreeSpace < expectedBytes)
+        var neededBytes = Math.Max(0, expectedBytes - allocatedBytes);
+        if (neededBytes > 0 && drive.AvailableFreeSpace < neededBytes)
         {
             throw new IOException($"EspaÃ§o insuficiente no destino. NecessÃ¡rio: {FormatBytes(expectedBytes)}, disponÃ­vel: {FormatBytes(drive.AvailableFreeSpace)}.");
         }
 
-        if (expectedBytes >= 4L * 1024 * 1024 * 1024 && drive.DriveFormat.Contains("FAT", StringComparison.OrdinalIgnoreCase))
+        if (expectedBytes >= 4L * 1024 * 1024 * 1024 && drive.DriveFormat.StartsWith("FAT", StringComparison.OrdinalIgnoreCase))
         {
             throw new IOException($"O destino usa {drive.DriveFormat} e nÃ£o suporta arquivos maiores que 4 GB. Escolha uma pasta em NTFS/exFAT antes de baixar.");
         }
@@ -1674,7 +1299,7 @@ public sealed partial class ForumDownloader
     }
 }
 
-public sealed record DownloadProgress(int Percent, string Message, long DownloadedBytes, long TotalBytes, bool Assembling = false);
+public sealed record DownloadProgress(int Percent, string Message, long DownloadedBytes, long TotalBytes, bool Assembling = false, long? RateBytes = null);
 
 
 
