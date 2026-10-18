@@ -75,4 +75,4 @@ APIs: [RandomAccess](https://learn.microsoft.com/en-us/dotnet/api/system.io.rand
 - Testes: novo `tests/Organessonium.NetworkTests/DirectDownloadTests.cs`; ajustes de cenários reais em `ChecksumTests.cs`, `MultiAttachmentTests.cs`, `DesktopRegressionTests.cs` e registro em `Program.cs`.
 - Documentação: este documento, `README.md` e a compatibilidade `DOWNLOAD-DIRECT-001` em `migration.md`.
 
-Validação desta implementação: 15 testes relacionados aprovados, incluindo o painel oculto com retomada, métricas e erro recuperável visível. A solução Release compilou sem erros ou avisos. O projeto de testes conserva dois avisos CS0436 de inicializadores gerados pelo Windows App SDK, não introduzidos por esta alteração.
+Validação desta implementação: 15 testes relacionados aprovados, incluindo o painel oculto com retomada, métricas e erro recuperável visível. A solução Release compilou sem erros ou avisos. O projeto de testes reutiliza a inicialização do Windows App SDK presente no assembly do aplicativo, sem gerar inicializadores duplicados nem suprimir CS0436; compila sem avisos.

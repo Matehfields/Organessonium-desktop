@@ -10,6 +10,13 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <UseWPF>true</UseWPF>
+    <!-- The referenced app assembly already initializes the Windows App SDK. -->
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+    <WindowsAppSdkUndockedRegFreeWinRTInitialize>false</WindowsAppSdkUndockedRegFreeWinRTInitialize>
+    <WindowsAppSdkCompatibilityInitialize>false</WindowsAppSdkCompatibilityInitialize>
+    <WindowsAppSdkAutoInitialize>false</WindowsAppSdkAutoInitialize>
+    <WarningsAsErrors>$(WarningsAsErrors);CS0436</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
