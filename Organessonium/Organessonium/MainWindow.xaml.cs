@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     private string _lastSystemAccent = "";
     private bool _recoveringWebView;
     private bool _isWebViewFullscreen;
+    private bool _isPreviewVisible;
     private WindowState _savedWindowState;
     private WindowStyle _savedWindowStyle;
     private ResizeMode _savedResizeMode;
@@ -355,9 +356,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (Application.Current is not App { Exiting: true } && (_isWebViewFullscreen || _isPreviewVisible))
+        {
+            e.Cancel = true;
+            _isPreviewVisible = false;
+            SetWebViewFullscreen(false);
+            if (_bridge != null) await _bridge.CallAsync("_closePreviewFromHost");
+            return;
+        }
+        if (Application.Current is App backgroundApp && backgroundApp.KeepBackgroundOnClose)
+        {
+            e.Cancel = true;
+            Hide();
+            backgroundApp.WindowHidden(this);
+            return;
+        }
+
         e.Cancel = true;
         _shutdownInProgress = true;
-        if (Application.Current is App app && app.KeepBackgroundOnClose) Hide();
         SystemEvents.UserPreferenceChanged -= OnSystemUserPreferenceChanged;
         if (_windowsColors != null) _windowsColors.ColorValuesChanged -= OnSystemAccentChanged;
         RemoveShellDropSupport();
@@ -422,6 +438,9 @@ public partial class MainWindow : Window
         AppLogger.Error(
             "WebView.ProcessFailed",
             new InvalidOperationException("WebView2 process failed: " + e.ProcessFailedKind));
+        // Chromium restarts these processes itself; recreating the control loses the user's session.
+        if (e.ProcessFailedKind is CoreWebView2ProcessFailedKind.GpuProcessExited or CoreWebView2ProcessFailedKind.UtilityProcessExited)
+            return;
         _ = RecoverWebViewAsync();
     }
 
@@ -648,6 +667,10 @@ public partial class MainWindow : Window
                     return true;
                 case "setTitleBarDragRegion":
                     SetNativeTitleBarDragRegion(document.RootElement);
+                    return true;
+                case "setPreviewVisible":
+                    if (document.RootElement.TryGetProperty("args", out var previewArgs) && previewArgs.GetArrayLength() > 0)
+                        _isPreviewVisible = previewArgs[0].ValueKind == JsonValueKind.True;
                     return true;
                 default:
                     return false;

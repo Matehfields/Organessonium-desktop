@@ -129,6 +129,8 @@ internal static partial class Program
         internal Dictionary<string, bool> ArchivedThreads { get; } = new();
         internal Dictionary<string, bool> LockedThreads { get; } = new();
         internal ConcurrentDictionary<(string Thread, string Message), int> MessageReads { get; } = new();
+        internal ConcurrentDictionary<string, int> MessagePages { get; } = new();
+        internal int MissingMessageReads;
         internal List<(string Thread, string Message)> DeletedMessages { get; } = [];
         internal IReadOnlyList<DiscordMessageDto> Messages(string channel) { lock (_gate) return _channels.GetValueOrDefault(channel)?.Values.ToArray() ?? []; }
         internal IReadOnlyList<string> FileThreads() { lock (_gate) return _parents.Where(pair => pair.Value == "files").Select(pair => pair.Key).ToArray(); }
@@ -181,10 +183,19 @@ internal static partial class Program
                     if (parts.Length == 2 && parts[1] == "messages")
                     {
                         var query = request.RequestUri.Query.TrimStart('?').Split('&').Select(p => p.Split('=')).Where(p => p.Length == 2).ToDictionary(p => p[0], p => p[1]);
+                        MessagePages.AddOrUpdate(channel, 1, (_, count) => count + 1);
                         var messages = _channels.GetValueOrDefault(channel)?.Values.AsEnumerable() ?? [];
                         if (query.TryGetValue("before", out var before)) messages = messages.Where(m => ulong.Parse(m.Id) < ulong.Parse(before));
+                        if (query.TryGetValue("around", out var around))
+                        {
+                            var ordered = messages.OrderBy(m => ulong.Parse(m.Id)).ToArray();
+                            var center = Array.FindIndex(ordered, message => message.Id == around);
+                            var take = int.Parse(query.GetValueOrDefault("limit", "100"));
+                            messages = ordered.Skip(Math.Max(0, center - take / 2)).Take(take);
+                        }
                         return Json(messages.OrderByDescending(m => ulong.Parse(m.Id)).Take(int.Parse(query.GetValueOrDefault("limit", "100"))).ToArray());
                     }
+                    if (parts.Length == 3 && parts[1] == "messages") MissingMessageReads++;
                     return new(HttpStatusCode.NotFound);
                 }
             }

@@ -57,6 +57,8 @@ public partial class App
         if (_exiting) return;
         if (_mainWindow != null)
         {
+            _tray?.Dispose();
+            _tray = null;
             _mainWindow.Show();
             if (_mainWindow.WindowState == WindowState.Minimized) _mainWindow.WindowState = WindowState.Normal;
             _mainWindow.Activate();
@@ -73,6 +75,11 @@ public partial class App
     }
 
     internal bool KeepBackgroundOnClose => !_exiting && (_desktopStore?.Load().CloseToTray ?? false);
+
+    internal void WindowHidden(MainWindow window)
+    {
+        if (ReferenceEquals(_mainWindow, window)) EnsureTray();
+    }
 
     internal void WindowReleased(MainWindow window)
     {

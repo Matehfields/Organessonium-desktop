@@ -14,6 +14,10 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),
+        ("serialFreshnessAndMetadataCache", SerialFreshnessAndMetadataCacheAsync),
+        ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),
+        ("resumedTransfersAndNetworkHidden", ResumedTransfersAndNetworkHiddenAsync),
         ("fileChecksumsTransferAndResume", FileChecksumsTransferAndResumeAsync),
         ("fileChecksumsRejectCorruption", FileChecksumsRejectCorruptionAsync),
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),

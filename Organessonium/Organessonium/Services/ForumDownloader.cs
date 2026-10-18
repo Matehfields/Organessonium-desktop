@@ -1234,6 +1234,7 @@ public sealed partial class ForumDownloader
             {
                 var target = new FileInfo(Path.Combine(tempDir.FullName, TempPartFileName(part)));
                 await DownloadPartWithRetryAsync(part, target);
+                target.Refresh();
                 if (onPartCompleted != null)
                 {
                     await onPartCompleted(part, target);
@@ -1334,7 +1335,7 @@ public sealed partial class ForumDownloader
 
                     return;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException &&
+                catch (Exception ex) when ((ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested) &&
                                            (NetworkRetryPolicy.IsTransient(ex) || attempt < maxAttempts))
                 {
                     last = ex;

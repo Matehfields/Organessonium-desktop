@@ -57,7 +57,25 @@ public sealed partial class DiscordApiClient
         IEnumerable<string> messageIds, CancellationToken token = default)
     {
         var result = new ConcurrentDictionary<string, DiscordMessageDto>(StringComparer.Ordinal);
-        await Parallel.ForEachAsync(messageIds.Distinct(StringComparer.Ordinal),
+        var pending = messageIds.Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+        foreach (var id in pending.ToArray())
+            if (_payloadMessages.TryGetValue((threadId, id), out var cached) &&
+                cached.Created >= DateTimeOffset.UtcNow.AddSeconds(-DiscordLimits.ResolvedMessageCacheSeconds) &&
+                cached.Message.IsValueCreated && cached.Message.Value.IsCompletedSuccessfully)
+            { result[id] = cached.Message.Value.Result; pending.Remove(id); }
+        // One page may describe hundreds of logical chunks. Preserve exact IDs and variable attachment sizes.
+        while (pending.Count >= 8)
+        {
+            var anchor = pending.OrderBy(id => id, StringComparer.Ordinal).ElementAt(pending.Count / 2);
+            using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get,
+                $"channels/{threadId}/messages?around={anchor}&limit={DiscordLimits.MessagesPerPage}"), token, waitForTransientNetwork: true);
+            var page = await ReadJsonAsync<List<DiscordMessageDto>>(response, token);
+            var before = pending.Count;
+            foreach (var message in page)
+                if (pending.Remove(message.Id)) result[message.Id] = message;
+            if (pending.Count == before) break;
+        }
+        await Parallel.ForEachAsync(pending,
             new ParallelOptions { CancellationToken = token, MaxDegreeOfParallelism = 8 },
             async (id, cancellation) => result[id] = await ResolvePayloadMessageAsync(threadId, id, cancellation));
         return result;

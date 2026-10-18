@@ -9,6 +9,9 @@ namespace Organessonium.Bridge;
 public sealed class WebMessageBridge
 {
     private readonly WebView2 _webView;
+    private readonly Func<string, Task>? _scriptExecutor;
+
+    internal WebMessageBridge(WebView2 webView, Func<string, Task> scriptExecutor) : this(webView) => _scriptExecutor = scriptExecutor;
 
     public WebMessageBridge(WebView2 webView)
     {
@@ -62,6 +65,7 @@ public sealed class WebMessageBridge
 
         try
         {
+            if (_scriptExecutor != null) { await _scriptExecutor(script); return; }
             if (_webView.CoreWebView2 == null)
             {
                 return;

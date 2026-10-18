@@ -1200,7 +1200,8 @@ window._onPreviewProgress = (percent, phase, downloadedBytes, totalBytes) => {
     ring.setAttribute('aria-valuenow', String(Math.round(value)));
 };
 
-window._onPreviewReady = (type, name, data) => {
+window._onPreviewReady = (type, name, data, requestId) => {
+    if (requestId && (!previewAppRef || fileRequestId(previewAppRef) !== requestId)) return;
     if (type === 'markdown' && finishMarkdownEditor(name, data)) return;
     disposeActiveImage();
     resetPdfPreviewState();
@@ -1278,6 +1279,10 @@ window._onPreviewReady = (type, name, data) => {
         body.appendChild(shell);
 
         player.addEventListener('error', () => {
+            if (type === 'video' && player.error?.code === 4 && player.dataset.quality === 'full' && qualities.includes('480p')) {
+                requestQualitySwitch('480p');
+                return;
+            }
             if (videoChrome) videoChrome.classList.add('hidden');
             player.classList.add('hidden');
             fallback.classList.remove('hidden');
@@ -1431,7 +1436,7 @@ function setMediaElementSource(player, src, mime) {
     while (player.firstChild) player.removeChild(player.firstChild);
     const source = document.createElement('source');
     source.src = src;
-    if (mime) source.type = mime;
+    if (mime && player.canPlayType(mime)) source.type = mime;
     player.appendChild(source);
 }
 
@@ -1494,6 +1499,16 @@ window._onVideoStreamError = (threadId, message) => {
 window.addEventListener?.('pagehide', () => reportVideoPlayback($('preview-body')?.querySelector('video'), true));
 
 function createVideoChrome(player) {
+    try {
+        const savedVolume = JSON.parse(localStorage.getItem('video-volume') || 'null');
+        if (savedVolume && Number.isFinite(savedVolume.volume)) {
+            player.volume = Math.max(0, Math.min(1, savedVolume.volume));
+            player.muted = !!savedVolume.muted;
+        }
+    } catch (_) {}
+    player.addEventListener('volumechange', () => {
+        try { localStorage.setItem('video-volume', JSON.stringify({volume:player.volume, muted:player.muted})); } catch (_) {}
+    });
     const frame = document.createElement('div');
     frame.className = 'preview-video-frame';
     frame.appendChild(player);
@@ -2597,7 +2612,7 @@ function refreshBatchProgress(id) {
     const weight = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1), 0);
     const total = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1) *
         (['done','error','cancelled'].includes(row.dataset.fileStatus) ? 100 : Math.max(0, Number(row.dataset.progress) || 0)), 0);
-    setOpProgress(id, total / weight);
+    setOpProgress(id, Math.min(99, total / weight));
 }
 
 function formatTransferRate(bytesPerSecond) {
@@ -5076,6 +5091,7 @@ const PREVIEWABLE = new Set(['jpg','jpeg','png','gif','bmp','webp','tiff','tif',
 function canPreview(name) { return !!name; }
 
 function loadPreviewApp(app, showLoading) {
+    window.bridge.setPreviewVisible?.(true);
     stopVideoPlayback();
     const previous = previewAppRef;
     if (previous && fileRequestId(previous) !== fileRequestId(app)) window.bridge.closePreview(fileRequestId(previous));
@@ -5106,6 +5122,7 @@ function isMarkdownFile(name) {
 }
 
 function closePreview() {
+    window.bridge.setPreviewVisible?.(false);
     stopVideoPlayback();
     disposeActiveImage();
     resetPdfPreviewState();
@@ -5117,6 +5134,7 @@ function closePreview() {
     </div>`;
     if (previewAppRef) { window.bridge.closePreview(fileRequestId(previewAppRef)); previewAppRef = null; }
 }
+window._closePreviewFromHost = closePreview;
 
 function previewPrev() {
     if (previewIndex <= 0) return; previewIndex--;

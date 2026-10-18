@@ -112,6 +112,8 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly ConcurrentDictionary<string, TaskCompletionSource<UploadConflictResponse>> _uploadConflictResponses = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _transferOperations = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _uploadFileOperations = new();
+    private int _interruptedTransfersChecked;
+    private int _resumingTransfers;
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _transferCompletions = new();
     private readonly SemaphoreSlim _registryLoadGate = new(1, 1);
     private readonly TransferManager _transferManager;
@@ -258,7 +260,7 @@ public sealed partial class AppController : IAsyncDisposable
                 _currentPath = requestedPath;
                 _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
-            case "loadApps": _ = RunAsync(LoadAppsAsync); return Task.CompletedTask;
+            case "loadApps": _ = RunAsync(async () => { await LoadAppsAsync(); await NotifyInterruptedTransfersAsync(); }); return Task.CompletedTask;
             case "loadFavorites": _ = RunAsync(() => LoadFavoritesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "loadSynchronizedDevices": _ = RunAsync(() => LoadSynchronizedDevicesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "setFavorite": _ = RunAsync(() => SetFavoriteAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
@@ -266,7 +268,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "refreshServerIndex": _ = RunAsync(() => RefreshServerIndexAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
-            case "requestPreview": _ = RunAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "requestPreview": _ = RunAsync(() => Task.Run(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1)))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
             case "videoPlayback": _ = RunAsync(() => UpdateVideoPlaybackAsync(args)); return Task.CompletedTask;
@@ -402,7 +404,6 @@ public sealed partial class AppController : IAsyncDisposable
             await ReplaceSessionAsync(session);
             if (_syncHost != null) await _syncHost.ReloadAsync();
             await _onConnected(session);
-            await NotifyInterruptedTransfersAsync();
         }
         catch (Exception ex)
         {
@@ -1327,7 +1328,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if (!_loggingOut)
             {
-                await LoadVisibleThumbnailsAsync(visibleIdsJson, libraryView);
+                await Task.Run(() => LoadVisibleThumbnailsAsync(visibleIdsJson, libraryView));
             }
         }
         finally
@@ -1431,9 +1432,9 @@ public sealed partial class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onPreviewLoading");
         await _bridge.CallAsync("_onPreviewProgress", 0, "locating", 0, 0);
         ClosePreview(threadId);
-        CancellationTokenSource? videoRequest = null;
-        if (type == "video") _videoOpenRequests[threadId] = videoRequest = new CancellationTokenSource();
-        var cancellation = videoRequest?.Token ?? CancellationToken.None;
+        var previewRequest = new CancellationTokenSource();
+        _videoOpenRequests[threadId] = previewRequest;
+        var cancellation = previewRequest.Token;
         DirectoryInfo? tempDir = null;
         try
         {
@@ -1458,7 +1459,7 @@ public sealed partial class AppController : IAsyncDisposable
                     src = streamUrl, mime = low ? "video/mp4" : MediaMime(name), quality = low ? "480p" : "full",
                     qualities, fileId = entry.FileId, resumeSeconds = progress?.ResumeAt() ?? 0,
                     savedDuration = progress?.DurationSeconds ?? 0
-                }, JsonOptions.Web));
+                }, JsonOptions.Web), threadId);
                 return;
             }
 
@@ -1476,14 +1477,15 @@ public sealed partial class AppController : IAsyncDisposable
                         tempDir,
                         _ => { },
                         onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
-                : await GetOrDownloadFullPreviewFileAsync(threadId, name, tempDir, "generic");
+                : await GetOrDownloadFullPreviewFileAsync(threadId, name, tempDir, "generic", cancellation);
 
+            cancellation.ThrowIfCancellationRequested();
             switch (type)
             {
                 case "image":
                     var imageUrl = _previewResources.Register(file, GuessMime(name));
                     TrackPreviewUrl(threadId, "default", imageUrl);
-                    await SendPreviewReadyAsync("image", name, imageUrl);
+                    await SendPreviewReadyAsync("image", name, imageUrl, threadId);
                     break;
                 case "pdf":
                     var pdfUrl = _previewResources.Register(file, "application/pdf");
@@ -1526,7 +1528,7 @@ public sealed partial class AppController : IAsyncDisposable
                 tempDir = null;
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { if (tempDir != null) CleanDir(tempDir); }
         catch (Exception ex)
         {
             if (tempDir != null)
@@ -1707,7 +1709,6 @@ public sealed partial class AppController : IAsyncDisposable
         var video = new VideoStreamSession(provider, _store.Load().VideoPrefetchChunks);
         try
         {
-            await video.WarmUpAsync().WaitAsync(cancellation);
             cancellation.ThrowIfCancellationRequested();
             var url = _previewResources.RegisterVideo(video, lowQuality ? "video/mp4" : MediaMime(entry.Name));
             _videoSessions[entry.RequestId + "|" + quality] = video;
@@ -1739,7 +1740,8 @@ public sealed partial class AppController : IAsyncDisposable
         string threadId,
         string name,
         DirectoryInfo tempDir,
-        string phase)
+        string phase,
+        CancellationToken cancellationToken = default)
     {
         var cached = _store.GetCachedPreviewFile(threadId, "full", name);
         if (cached != null)
@@ -1748,19 +1750,21 @@ public sealed partial class AppController : IAsyncDisposable
             return cached;
         }
 
-        var entry = await FindLoadedFileDetailsAsync(threadId);
+        var entry = await FindLoadedFileDetailsAsync(threadId, cancellationToken);
         var downloaded = entry != null
             ? await Downloader().DownloadAndAssembleAsync(
                 entry,
                 tempDir,
                 _ => { },
+                cancellationToken,
                 onDetailedProgress: progress => ReportPreviewProgress(progress, phase))
             : await Downloader().DownloadAndAssembleAsync(
                 threadId,
                 tempDir,
                 _ => { },
+                cancellationToken,
                 onDetailedProgress: progress => ReportPreviewProgress(progress, phase));
-        var stored = await CopyToPreviewCacheAsync(downloaded, threadId, "full", name);
+        var stored = await CopyToPreviewCacheAsync(downloaded, threadId, "full", name, cancellationToken);
         await SendPreviewCacheSizeAsync();
         return stored;
     }
@@ -1817,15 +1821,22 @@ public sealed partial class AppController : IAsyncDisposable
         return stored;
     }
 
-    private async Task<FileInfo> CopyToPreviewCacheAsync(FileInfo source, string threadId, string slot, string name)
+    private async Task<FileInfo> CopyToPreviewCacheAsync(FileInfo source, string threadId, string slot, string name, CancellationToken cancellationToken = default)
     {
         var target = _store.GetPreviewCacheFile(threadId, slot, name);
         target.Directory?.Create();
         if (!SamePath(source, target))
         {
-            await using var input = new FileStream(source.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true);
-            await using var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.Read, 128 * 1024, true);
-            await input.CopyToAsync(output);
+            var temporary = target.FullName + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                await using (var input = new FileStream(source.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true))
+                await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
+                    await input.CopyToAsync(output, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                File.Move(temporary, target.FullName, true);
+            }
+            finally { try { File.Delete(temporary); } catch { } }
         }
 
         target.Refresh();
@@ -2061,6 +2072,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task UploadPathsAsync(IEnumerable<string> paths)
     {
+        using var networkWait = NetworkRetryPolicy.TransferScope();
         var basePath = _currentPath;
         var tasks = new List<UploadTask>();
         var folderCount = 0;
@@ -2329,6 +2341,7 @@ public sealed partial class AppController : IAsyncDisposable
         ISet<string> serialFolderIds,
         CancellationToken cancellationToken)
     {
+        using var networkWait = NetworkRetryPolicy.TransferScope(cancellationToken);
         var settings = _store.Load();
         var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
         var registry = Registry();
@@ -2362,7 +2375,7 @@ public sealed partial class AppController : IAsyncDisposable
         for (var index = 0; index < fileCancellations.Length; index++)
             _uploadFileOperations[opId + ":" + index] = fileCancellations[index];
 
-        var producers = tasks.Select((task, index) => task.PreparedTransfer is { Storage.Shared: true } planned
+        var producers = tasks.Select((task, index) => task.PreparedTransfer is { Storage.Shared: true } planned && planned.UploadedChunks.Count < planned.TotalChunks
             ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
                 planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
                 waitingForPublication: () => Volatile.Read(ref publishing) > 0) : null).ToArray();
@@ -2428,7 +2441,7 @@ public sealed partial class AppController : IAsyncDisposable
                     transferActivity: transferActivity,
                     deferSerialSynchronization: true,
                     replacement: task.Replacement,
-                    onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null,
+                    onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null && !task.Resuming,
                     onOriginalUploaded: ReleaseOriginal,
                     onPublishingMetadata: () =>
                     {
@@ -2577,6 +2590,7 @@ public sealed partial class AppController : IAsyncDisposable
         Action? onOriginalUploaded = null,
         Action? onPublishingMetadata = null)
     {
+        using var networkWait = NetworkRetryPolicy.TransferScope(cancellationToken);
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
         adaptiveUploadGate ??= ownedGate;
@@ -3249,6 +3263,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task StartDownloadAsync(string threadId, string name, DirectoryInfo? selectedDestination = null, AppEntry? selectedVersion = null)
     {
+        using var networkWait = NetworkRetryPolicy.TransferScope();
         if (string.IsNullOrWhiteSpace(threadId) || threadId.StartsWith("folder_", StringComparison.Ordinal))
         {
             await StartFolderDownloadAsync(threadId, name);
@@ -3368,6 +3383,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task StartFolderDownloadAsync(string folderThreadId, string folderName)
     {
+        using var networkWait = NetworkRetryPolicy.TransferScope();
         var baseDir = await ResolveDownloadDirectoryAsync("Salvar pasta em...");
         if (baseDir == null)
         {
@@ -4651,16 +4667,10 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task NotifyInterruptedTransfersAsync()
     {
+        if (Interlocked.Exchange(ref _interruptedTransfersChecked, 1) != 0) return;
         var states = (await _transferManager.RecoverableAsync()).Where(state => state.SyncFolderId == null).ToList();
         if (states.Count == 0)
         {
-            return;
-        }
-
-        var settings = _store.Load();
-        if (settings.AutoResumeTransfers)
-        {
-            _ = RunAsync(ResumeInterruptedTransfersAsync);
             return;
         }
 
@@ -4687,6 +4697,14 @@ public sealed partial class AppController : IAsyncDisposable
         IReadOnlyList<TransferState>? selectedStates,
         bool silent)
     {
+        if (Interlocked.CompareExchange(ref _resumingTransfers, 1, 0) != 0) return;
+        try { await ResumeInterruptedTransfersCoreAsync(selectedStates, silent); }
+        finally { Volatile.Write(ref _resumingTransfers, 0); }
+    }
+
+    private async Task ResumeInterruptedTransfersCoreAsync(IReadOnlyList<TransferState>? selectedStates, bool silent)
+    {
+        using var networkWait = NetworkRetryPolicy.TransferScope();
         var states = (selectedStates ?? await _transferManager.RecoverableAsync()).Where(state => state.SyncFolderId == null).ToList();
         if (states.Count == 0)
         {
@@ -4703,18 +4721,37 @@ public sealed partial class AppController : IAsyncDisposable
         }
         var settings = _store.Load();
         var registry = Registry();
+        await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
         var all = CurrentLocalEntries();
-        var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
-        var throttle = new UiThrottle();
         var resumed = 0;
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using var uploadGate = new AdaptiveUploadGate(settings.EffectiveUploadThreads, adaptive: !settings.ForceUploadParallelism);
-        using var liveUpload = UploadConcurrencyRegistry.Register(uploadGate);
-        using var memoryCoordinator = new UploadMemoryCoordinator(settings.EffectiveUploadThreads, forceParallelism: settings.ForceUploadParallelism);
-
-        for (var i = 0; i < states.Count; i++)
+        var uploads = new List<UploadTask>();
+        foreach (var state in states.Where(state => state.TransferType == TransferTypes.Upload))
         {
-            var state = states[i];
+            var source = new FileInfo(state.SourcePath);
+            if (!await Task.Run(() => source.Exists))
+            {
+                await OpsAddAsync(state.TransferId, "upload", state.FileName);
+                await OpsUpdateAsync(state.TransferId, "error", "Arquivo de origem não existe mais.");
+                continue;
+            }
+            uploads.Add(new UploadTask(source, state.TargetPath, state.Replacement) { PreparedTransfer = state, Resuming = true });
+        }
+        if (uploads.Count > 0)
+        {
+            var uploadId = NewId();
+            await OpsUploadBatchAsync(uploadId, uploads.Select(task => task.PreparedTransfer!.FileName).ToArray(), uploads.Select(task => task.File.Length).ToArray());
+            var token = BeginTransferOperation(uploadId);
+            try
+            {
+                await RunUploadQueueAsync(uploadId, uploads, all, serialFolderIds, token);
+                resumed += uploads.Count;
+            }
+            finally { EndTransferOperation(uploadId); }
+        }
+
+        foreach (var state in states.Where(state => state.TransferType == TransferTypes.Download))
+        {
             var opId = state.TransferId;
             await OpsAddAsync(opId, state.TransferType, state.FileName);
             var cancellationToken = BeginTransferOperation(opId);
@@ -4723,54 +4760,23 @@ public sealed partial class AppController : IAsyncDisposable
                 state.Status = TransferStatuses.Recovering;
                 await _transferManager.SaveAsync(state, cancellationToken);
 
-                if (state.TransferType.Equals(TransferTypes.Upload, StringComparison.OrdinalIgnoreCase))
-                {
-                    var source = new FileInfo(state.SourcePath);
-                    if (!await Task.Run(() => source.Exists, cancellationToken))
-                    {
-                        throw new FileNotFoundException("Arquivo de origem não existe mais.", state.SourcePath);
-                    }
-
-                    var uploaded = await Task.Run(() => UploadSingleAsync(
-                        opId,
-                        i,
-                        states.Count,
-                        source,
-                        state.TargetPath,
-                        all,
-                        uploader,
-                        registry,
-                        settings,
-                        throttle,
-                        cancellationToken,
-                        state,
-                        adaptiveUploadGate: uploadGate,
-                        memoryCoordinator: memoryCoordinator,
-                        deferSerialSynchronization: true), cancellationToken);
-                    ReplaceLocalEntry(all, uploaded);
-                    TrackFolderSerial(serialFolderIds, uploaded.ParentFolderId);
-                    resumed++;
-                    await OpsUpdateAsync(opId, "done", "Concluído");
-                    continue;
-                }
-
                 if (state.TransferType.Equals(TransferTypes.Download, StringComparison.OrdinalIgnoreCase))
                 {
-                    var entry = all.FirstOrDefault(app =>
+                    var entry = state.DownloadMetadata == null ? all.FirstOrDefault(app =>
                         (!string.IsNullOrWhiteSpace(state.FileId) && app.FileId == state.FileId) ||
-                        (state.Storage?.Shared != true && !string.IsNullOrWhiteSpace(state.ThreadId) && app.ThreadId == state.ThreadId));
+                        (state.Storage?.Shared != true && !string.IsNullOrWhiteSpace(state.ThreadId) && app.ThreadId == state.ThreadId))
+                        : new MetadataService().ToAppEntry(new MetadataEnvelope(state.MetadataMessageId ?? "", state.DownloadMetadata));
                     if (entry == null)
                     {
                         throw new InvalidOperationException("Arquivo não encontrado na listagem atual para retomar download.");
                     }
-                    entry = state.DownloadMetadata == null
-                        ? await registry.LoadFileDetailsAsync(entry, cancellationToken)
-                        : new MetadataService().ToAppEntry(new MetadataEnvelope(entry.MetadataMessageId, state.DownloadMetadata))
-                          ?? throw new InvalidDataException("Metadados do download interrompido inválidos.");
+                    if (state.DownloadMetadata == null) entry = await registry.LoadFileDetailsAsync(entry, cancellationToken);
 
                     var destination = new DirectoryInfo(string.IsNullOrWhiteSpace(state.DestinationPath)
                         ? (settings.DownloadPath.Trim().Length > 0 ? settings.DownloadPath : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile))
                         : state.DestinationPath);
+                    var downloadBytes = Math.Max(0, entry.SizeBytes);
+                    await OpsTransferMetricsAsync(opId, "download", 0, 1, 0, downloadBytes);
                     await Downloader().DownloadAndAssembleAsync(
                         entry,
                         destination,
@@ -4778,8 +4784,14 @@ public sealed partial class AppController : IAsyncDisposable
                         _transferManager,
                         msg => _ = OpsUpdateAsync(opId, "active", msg),
                         cancellationToken,
-                        progress => _ = OpsProgressAsync(opId, progress.Percent, progress.Message));
+                        progress =>
+                        {
+                            _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Message);
+                            if (!progress.Assembling)
+                                _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes);
+                        });
                     await _transferManager.CompleteAsync(state, settings.KeepTransferHistory, cancellationToken);
+                    await OpsTransferMetricsAsync(opId, "download", 1, 1, downloadBytes, downloadBytes);
                     resumed++;
                     await OpsUpdateAsync(opId, "done", "Concluído");
                 }
@@ -4803,17 +4815,8 @@ public sealed partial class AppController : IAsyncDisposable
             catch (Exception ex)
             {
                 AppLogger.Error("Transfer.Resume", ex, state.TransferId);
-                if (state.TransferType.Equals(TransferTypes.Upload, StringComparison.OrdinalIgnoreCase) &&
-                    IsResumableUploadFailure(ex))
-                {
-                    await _transferManager.PauseAsync(state, ex, CancellationToken.None);
-                    await OpsUpdateAsync(opId, "waiting", FriendlyUploadError(ex));
-                }
-                else
-                {
-                    await _transferManager.FailAsync(state, ex, CancellationToken.None);
-                    await OpsUpdateAsync(opId, "error", ex.Message);
-                }
+                await _transferManager.FailAsync(state, ex, CancellationToken.None);
+                await OpsUpdateAsync(opId, "error", ex.Message);
             }
             finally
             {
@@ -4822,7 +4825,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
-        await LoadAppsAsync();
+        await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
         if (!silent)
         {
             await _bridge.CallAsync("_onStatus", $"{resumed}/{states.Count} transferência(s) retomada(s).", false);
@@ -4870,7 +4873,7 @@ public sealed partial class AppController : IAsyncDisposable
                 $"Órfãos detectados: {orphanThreadIds.Count}; recuperáveis: {repairable.Count}.");
             if (repairable.Count > 0)
             {
-                await ResumeInterruptedTransfersAsync(repairable, silent: true);
+                await NotifyInterruptedTransfersAsync();
             }
         }
         catch (OperationCanceledException)
@@ -5196,9 +5199,9 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private Task SendPreviewReadyAsync(string type, string name, string data)
+    private Task SendPreviewReadyAsync(string type, string name, string data, string? requestId = null)
     {
-        return _bridge.CallAsync("_onPreviewReady", type, name, data);
+        return _bridge.CallAsync("_onPreviewReady", type, name, data, requestId);
     }
 
     private static string? PreviewType(string name)
@@ -7021,6 +7024,7 @@ private static string ClassifyConnectError(Exception ex)
     private sealed record ResolvedDiscordChannels(string NamesChannelId, string FoldersForumId, string AppsForumId, string SerialChannelId);
     private sealed record UploadTask(FileInfo File, string Path, FileReplacement? Replacement = null)
     {
+        internal bool Resuming { get; init; }
         internal TransferState? PreparedTransfer { get; init; }
     }
     private sealed record UploadConflictResponse(string Action, bool ApplyToAll);

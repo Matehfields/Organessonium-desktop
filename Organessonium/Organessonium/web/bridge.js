@@ -105,6 +105,7 @@ dataPath: args[10],
         resolveUploadConflict: function () { send('resolveUploadConflict', arguments); },
         applyWindowTheme: function () { send('applyWindowTheme', arguments); },
         setHostFullscreen: function () { send('setHostFullscreen', arguments); },
+        setPreviewVisible: function () { send('setPreviewVisible', arguments); },
         setTitleBarDragRegion: function () { send('setTitleBarDragRegion', arguments); },
         testProxy: function () { send('testProxy', arguments); },
         saveSettings: function () {

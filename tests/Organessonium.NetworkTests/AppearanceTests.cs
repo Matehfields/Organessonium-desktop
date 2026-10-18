@@ -140,6 +140,50 @@ internal static partial class Program
             await using (var preview = File.Create(Path.Combine(captures, "cards-dark-1920.png")))
                 await view.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, preview);
             await Check("window.__errors.length===0", "erro JavaScript na interface: " + await view.ExecuteScriptAsync("window.__errors"));
+            await view.ExecuteScriptAsync("""
+                document.documentElement.setAttribute('data-theme','light');
+                window.__volumePlayer=document.createElement('video');
+                window.__volumeFrame=createVideoChrome(window.__volumePlayer);
+                window.__volumePlayer.volume=.23;
+                window.__volumePlayer.dispatchEvent(new Event('volumechange'));
+                window.__nextPlayer=document.createElement('video');
+                window.__nextFrame=createVideoChrome(window.__nextPlayer);
+                openPreview(window.__entries[0]);window._closePreviewFromHost();
+                """);
+            await Check("Math.abs(window.__nextPlayer.volume-.23)<.001&&window.__nextFrame.querySelector('[data-video-volume]').value==='0.23'",
+                "o player esqueceu o volume entre vídeos");
+            await Check("document.getElementById('preview-overlay').classList.contains('hidden')&&document.querySelector('.preview-topbar').firstElementChild.id==='preview-close'",
+                "fechar a prévia pelo host falhou ou o botão permaneceu junto dos controles da janela");
+            await Check("getComputedStyle(document.getElementById('sidebar-files')).getPropertyValue('--icon-color').trim()==='#c77800'&&getComputedStyle(document.getElementById('sidebar-devices')).getPropertyValue('--icon-color').trim()==='#0078bd'",
+                "o tema claro não aplicou os tons mais saturados da navegação");
+            await view.ExecuteScriptAsync("settings.previewEnabled=true;openPreview(window.__entries[0]);openPreview(window.__entries[3]);window._onPreviewReady('image','obsolete.jpg','data:image/png;base64,invalid',fileRequestId(window.__entries[0]))");
+            await Check("!document.querySelector('#preview-body img[alt=\"obsolete.jpg\"]')&&previewAppRef.fileId==='file-3'",
+                "a resposta de uma foto anterior substituiu a prévia atual");
+            var movie = new FileInfo(Path.Combine(directory.FullName, "synthetic.mov"));
+            var ffmpeg = Path.Combine(Path.GetDirectoryName(assembly.Location)!, "media", "ffmpeg.exe");
+            var start = new System.Diagnostics.ProcessStartInfo(ffmpeg)
+            {
+                UseShellExecute = false, CreateNoWindow = true, WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                RedirectStandardError = true
+            };
+            foreach (var argument in new[] { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=128x72:r=10", "-t", "1",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", "-f", "mov", movie.FullName }) start.ArgumentList.Add(argument);
+            using (var process = System.Diagnostics.Process.Start(start)!)
+            {
+                var errors = process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+                RequireSync(process.ExitCode == 0, "não foi possível gerar o MOV sintético: " + await errors);
+            }
+            using var media = new PreviewResourceRegistry();
+            using var adapter = new Organessonium.Bridge.WebView2PreviewAdapter(view, media);
+            adapter.Attach();
+            var mediaData = JsonSerializer.Serialize(new { src = media.Register(movie, "video/quicktime"), mime = "video/quicktime", quality = "full", qualities = new[] { "full" } });
+            await view.ExecuteScriptAsync("window._onPreviewReady('video','synthetic.mov'," + JsonSerializer.Serialize(mediaData) + ")");
+            for (var attempt = 0; attempt < 50 && await view.ExecuteScriptAsync("document.querySelector('#preview-body video')?.readyState>=2") != "true"; attempt++)
+                await Task.Delay(100);
+            await Check("(()=>{const video=document.querySelector('#preview-body video');return video.readyState>=2&&!video.error&&!video.querySelector('source').hasAttribute('type')})()",
+                "o MOV H.264 não foi carregado pelo player: " + await view.ExecuteScriptAsync("(()=>{const v=document.querySelector('#preview-body video');return {state:v?.readyState,error:v?.error?.code}})()"));
+            await view.ExecuteScriptAsync("closePreview()");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

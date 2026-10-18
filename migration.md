@@ -4,6 +4,26 @@ Inventário técnico compartilhado do desktop C# e do cliente Flutter durante de
 
 ## Compatibilidades atuais
 
+### TRANSFER-LEGACY-002
+
+Status: ativo.
+
+Descrição: configurações/checkpoints de retomada produzidos antes da unificação do painel de transferências.
+
+Introduzido por: retomada pela fila normal de uploads e confirmação após a interface estar disponível.
+
+Motivo: conservar partes confirmadas, layouts unitário/multi-attachment/shared, reservas, snapshots e origens de desenvolvimento sem reiniciar o envio.
+
+Código relacionado: AppSettings.AutoResumeTransfers; TransferState; TransferManager.CreateDownloadAsync; AppController.NotifyInterruptedTransfersAsync, ResumeInterruptedTransfersCoreAsync, RunUploadQueueAsync e UploadSingleAsync.
+
+Comportamento atual: `autoResumeTransfers` continua legível/persistido, mas não dispensa a pergunta inicial. O sincronizador mantém sua recuperação independente. Checkpoints de download novos incluem metadataMessageId e snapshot; antigos sem snapshot procuram os detalhes na coleção disponível. Retomadas conservam seu layout e chunks confirmados; não convertem automaticamente para shared nem inventam checksums ausentes. Não existe mais painel alternativo para upload retomado.
+
+Pode ser removido quando: houver decisão explícita de abandonar configurações/checkpoints anteriores.
+
+Impacto da remoção: checkpoints sem snapshot completo ou de layouts antigos podem deixar de retomar; remover a preferência sem migração descarta apenas um valor hoje ignorado na confirmação.
+
+Procedimento para remoção: retirar a preferência de modelo/persistência somente após revisar seus consumidores; exigir snapshot e layout suportado na retomada; atualizar os testes de retomada e README. Não remover autenticação, validação de checksum, checkpoints ou o prompt atual.
+
 ### CHECKSUM-LEGACY-001
 
 Status: ativo.
@@ -562,7 +582,7 @@ Motivo: Evitar continuar uma transferência parcialmente enviada em outro layout
 
 Código relacionado: TransferState/TransferChunkState.Normalize; TransferManager.CreateUpload/MarkUploadChunkAsync/MarkUploadChunksAsync; TransferStateRepository; AppController e CloudSyncRepository retomada.
 
-Comportamento atual: Propriedade ausente recebe layout 1. Layouts desconhecidos falham. Retomadas antigas preservam thread, chunks confirmados, tamanho lógico e quantidade global registrados; não fabricam attachmentIds. Novas transferências usam layout 2. O estado conserva também videoPreview480pChunks legado e videoPreview480pChunkRefs novo.
+Comportamento atual: Propriedade ausente recebe layout 1. Layouts desconhecidos falham. Retomadas antigas preservam thread, chunks confirmados, tamanho lógico e quantidade global registrados; não fabricam attachmentIds. Novos dedicados usam layout 2; shared usa layout 3. O estado conserva também videoPreview480pChunks legado e videoPreview480pChunkRefs novo.
 
 Pode ser removido quando: Não houver transferências recuperáveis no layout 1 e a política de upgrades permitir descartar checkpoints anteriores.
 

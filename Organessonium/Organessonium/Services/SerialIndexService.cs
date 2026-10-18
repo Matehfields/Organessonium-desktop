@@ -19,6 +19,7 @@ public sealed class SerialIndexService
     private readonly IMetadataCodec _metadataCodec;
     private readonly SerialMetadataTransport _transport;
     private readonly ConcurrentDictionary<string, FolderSerial> _loadedFolders = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _verifiedLocalHashes = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _verifiedRemoteSerialIds = new(StringComparer.OrdinalIgnoreCase);
 
     public SerialIndexService(
@@ -59,6 +60,15 @@ public sealed class SerialIndexService
         FolderIndexMapping mapping,
         CancellationToken cancellationToken = default)
     {
+        if (!string.IsNullOrWhiteSpace(mapping.SerialSha256) &&
+            (!_verifiedLocalHashes.TryGetValue(mapping.FolderId, out var verifiedHash) ||
+             !verifiedHash.Equals(mapping.SerialSha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            var cachedHash = await CachedSerialSha256Async(mapping.FolderId, cancellationToken);
+            if (!mapping.SerialSha256.Equals(cachedHash, StringComparison.OrdinalIgnoreCase))
+                await InvalidateCachedFolderAsync(mapping.FolderId);
+            _verifiedLocalHashes[mapping.FolderId] = mapping.SerialSha256;
+        }
         if (_loadedFolders.TryGetValue(mapping.FolderId, out var loaded))
         {
             return loaded;
@@ -390,6 +400,7 @@ public sealed class SerialIndexService
 
     public Task InvalidateCachedFolderAsync(string folderId)
     {
+        _verifiedLocalHashes.TryRemove(folderId, out _);
         _loadedFolders.TryRemove(folderId, out _);
         var file = CacheFile(folderId);
         try
@@ -689,16 +700,15 @@ public sealed class SerialIndexService
     {
         _cacheDirectory.Create();
         var target = CacheFile(folderId);
-        var temporary = new FileInfo(target.FullName + ".tmp");
-        await File.WriteAllBytesAsync(temporary.FullName, bytes, cancellationToken);
+        var temporary = new FileInfo(target.FullName + "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
+            await File.WriteAllBytesAsync(temporary.FullName, bytes, cancellationToken);
             File.Move(temporary.FullName, target.FullName, true);
         }
-        catch
+        finally
         {
             try { temporary.Delete(); } catch { }
-            throw;
         }
     }
 

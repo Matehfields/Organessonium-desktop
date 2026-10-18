@@ -202,6 +202,10 @@ img{
 #sidebar-favorites{--icon-color:#fbbc04;}
 #sidebar-devices{--icon-color:#40a9e2;}
 #sidebar-trash{--icon-color:#e57373;}
+[data-theme="light"] #sidebar-files{--icon-color:#c77800;}
+[data-theme="light"] #sidebar-favorites{--icon-color:#c58b00;}
+[data-theme="light"] #sidebar-devices{--icon-color:#0078bd;}
+[data-theme="light"] #sidebar-trash{--icon-color:#cf3f45;}
 #sidebar-settings{--icon-color:var(--icon-neutral,#c4c7c5);}
 .sidebar-server-summary{
     width:218px;flex-shrink:0;

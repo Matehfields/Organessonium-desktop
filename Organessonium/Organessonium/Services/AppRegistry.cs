@@ -194,12 +194,21 @@ public sealed partial class AppRegistry
             return entry;
         }
 
-        var channels = new List<string> { _settings.NamesChannelId };
+        if (!forceRefresh && !string.IsNullOrEmpty(entry.Encryption?.Salt))
+        {
+            var known = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId))
+                .FirstOrDefault(candidate => candidate.FileId == entry.FileId && candidate.MetadataMessageId == entry.MetadataMessageId &&
+                    candidate.ThreadId == entry.ThreadId && candidate.Encryption?.Salt == entry.Encryption?.Salt &&
+                    candidate.PreviewMessageId == entry.PreviewMessageId && candidate.LogicalChunkCount > 0);
+            if (known != null) { known.Path = entry.Path; return known; }
+        }
+        var channels = new List<string>();
         if (_mappings.TryGetValue(NormalizeFolderId(entry.ParentFolderId), out var mapping) &&
             !channels.Contains(mapping.ThreadId, StringComparer.Ordinal))
         {
             channels.Add(mapping.ThreadId);
         }
+        if (!channels.Contains(_settings.NamesChannelId, StringComparer.Ordinal)) channels.Add(_settings.NamesChannelId);
 
         foreach (var channelId in channels.Where(id => !string.IsNullOrWhiteSpace(id)))
         {
@@ -225,6 +234,7 @@ public sealed partial class AppRegistry
                 throw;
             }
             catch (MetadataCodecException) { throw; }
+            catch (DiscordApiException ex) when ((int)ex.StatusCode == 404) { }
             catch (Exception ex)
             {
                 AppLogger.Error("Registry.LoadFileDetails", ex, entry.MetadataMessageId);
@@ -694,6 +704,9 @@ public sealed partial class AppRegistry
             }
             foreach (var mapping in canonical)
             {
+                if (_mappings.TryGetValue(mapping.FolderId, out var previous) &&
+                    (previous.SerialMessageId != mapping.SerialMessageId || previous.SerialSha256 != mapping.SerialSha256))
+                    await _serials.InvalidateCachedFolderAsync(mapping.FolderId);
                 _mappings[mapping.FolderId] = mapping;
             }
             var currentIds = canonical.Select(mapping => mapping.FolderId)

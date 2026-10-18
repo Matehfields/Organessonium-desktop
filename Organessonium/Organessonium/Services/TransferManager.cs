@@ -63,6 +63,7 @@ public sealed class TransferManager
         {
             TransferType = TransferTypes.Download,
             DownloadMetadata = MetadataService.CreateFileMetadata(entry),
+            MetadataMessageId = entry.MetadataMessageId,
             Storage = entry.Storage,
             PayloadLayoutVersion = entry.Storage?.Shared == true ? TransferPayloadLayouts.SharedStorage :
                 entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment,

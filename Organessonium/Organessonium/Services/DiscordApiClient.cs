@@ -995,7 +995,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         bool waitForTransientNetwork = false,
         bool replayUnknownResult = true)
     {
-        var shouldWaitForTransientNetwork = waitForTransientNetwork || onRateLimitWait != null;
+        var shouldWaitForTransientNetwork = waitForTransientNetwork || onRateLimitWait != null || NetworkRetryPolicy.WaitingForTransferConnection;
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = await Task.Run(requestFactory, cancellationToken).ConfigureAwait(false);
@@ -1026,6 +1026,13 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
                     reservation.Observe(response);
                 }
                 catch (HttpRequestException) when (replayUnknownResult && (shouldWaitForTransientNetwork || attempt < 11))
+                {
+                    bodySlot?.Dispose();
+                    await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
+                    continue;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && replayUnknownResult &&
+                                                         (shouldWaitForTransientNetwork || attempt < 11))
                 {
                     bodySlot?.Dispose();
                     await WaitTransientRetryAsync(attempt, onRateLimitWait, cancellationToken);
