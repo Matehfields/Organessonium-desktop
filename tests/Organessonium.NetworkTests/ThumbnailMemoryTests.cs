@@ -1,0 +1,133 @@
+using System.Diagnostics;
+using System.Reflection;
+using Microsoft.Data.Sqlite;
+using Microsoft.Web.WebView2.Core;
+using Organessonium.Services;
+
+namespace Organessonium.NetworkTests;
+
+internal static partial class Program
+{
+    private static Task<TestOutcome> ThumbnailViewportAndCrashRecoveryHiddenAsync() => OnHiddenDispatcherAsync(async () =>
+    {
+        var directory = Directory.CreateTempSubdirectory("organessonium-thumbnail-viewport-");
+        var host = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        CoreWebView2Controller? browser = null;
+        try
+        {
+            AppMemoryBudget.Initialize();
+            var environment = await CoreWebView2Environment.CreateAsync(null, directory.CreateSubdirectory("browser").FullName);
+            browser = await environment.CreateCoreWebView2ControllerAsync(host);
+            browser.IsVisible = true; browser.Bounds = new System.Drawing.Rectangle(0, 0, 1366, 768);
+            var resources = directory.CreateSubdirectory("web");
+            var assembly = typeof(AppRegistry).Assembly;
+            foreach (var resource in assembly.GetManifestResourceNames().Where(name => name.StartsWith("web/", StringComparison.Ordinal)))
+            {
+                var path = Path.Combine(resources.FullName, resource[4..].Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                using var input = assembly.GetManifestResourceStream(resource)!;
+                await using var output = File.Create(path);
+                await input.CopyToAsync(output);
+            }
+            var view = browser.CoreWebView2;
+            view.SetVirtualHostNameToFolderMapping("organessonium.local", resources.FullName, CoreWebView2HostResourceAccessKind.Allow);
+            var loaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.NavigationCompleted += (_, _) => loaded.TrySetResult();
+            view.Navigate("https://organessonium.local/index.html");
+            await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            await view.ExecuteScriptAsync("""
+                window.__organessoniumSettings={previewEnabled:true,language:'pt-BR',animationsEnabled:false};window.onBridgeReady();
+                window.__errors=[];window.addEventListener('error',e=>window.__errors.push(e.message));
+                window.__delivered=new Set();window.__images={};
+                window.__image=id=>{if(window.__images[id])return window.__images[id];const c=document.createElement('canvas');c.width=c.height=200;const g=c.getContext('2d');g.fillStyle='#58a';g.fillRect(0,0,200,200);g.fillStyle='white';g.fillText(id,8,80);return window.__images[id]=c.toDataURL('image/png')};
+                window.bridge.loadVisibleThumbnails=json=>JSON.parse(json).forEach(id=>{window.__delivered.add(id);window._thumbs=window._thumbs||{};window._thumbs[id]=window.__image(id);window._onThumb(id)});
+                window.__entries=Array.from({length:600},(_,i)=>({name:'photo-'+String(i).padStart(4,'0')+'.png',fileId:'photo-'+i,threadId:'thread-'+i,metadataMessageId:'metadata-'+i,type:'file',sizeBytes:2048,path:'/',parentFolderId:'root'}));
+                window._onAppsLoaded(window.__entries);
+                """);
+            await Task.Delay(350);
+            async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
+            await Check("document.querySelectorAll('[data-thumb] img').length>0", "as miniaturas iniciais não apareceram");
+            await view.ExecuteScriptAsync("window.__firstCard=document.querySelector('.cards-grid .file-card');window.__firstImage=window.__firstCard.querySelector('img');window._onThumb(window.__firstCard.querySelector('[data-thumb]').dataset.thumb);render()");
+            await Task.Delay(100);
+            await Check("window.__firstCard===document.querySelector('.cards-grid .file-card')&&window.__firstImage===window.__firstCard.querySelector('img')",
+                "uma resposta repetida/renderização recriou o card ou a imagem visível");
+            for (var step = 0; step <= 24; step++)
+            {
+                await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=(document.getElementById('main-area').scrollHeight-innerHeight)*" + step + "/24");
+                await Task.Delay(160);
+                await Check("document.querySelectorAll('[data-thumb] img').length<=64&&Object.keys(window._thumbs||{}).length<=128",
+                    "a rolagem reteve imagens fora da tela ou ultrapassou o cache limitado");
+            }
+            await Check("window.__delivered.size>300&&!window.__firstCard.querySelector('img')&&document.querySelectorAll('.cards-grid .file-card').length===600",
+                "o teste não percorreu a biblioteca, reteve a primeira imagem ou removeu cards");
+            await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=0");
+            await Task.Delay(300);
+            await Check("!!window.__firstCard.querySelector('img')", "voltar ao começo não recarregou a miniatura descartada");
+            for (var step = 0; step < 4; step++)
+            {
+                await view.ExecuteScriptAsync("setView('list')"); await Task.Delay(50);
+                await view.ExecuteScriptAsync("setView('grid')"); await Task.Delay(100);
+            }
+            await view.ExecuteScriptAsync("window._onAppsLoaded([])");
+            await Task.Delay(100);
+            await Check("!document.querySelector('[data-thumb]')&&visibleThumbnailIds.size===0&&window.__errors.length===0",
+                "trocar grade/lista/pasta conservou alvos removidos ou gerou erro");
+            ThumbnailCache.Configure(directory.CreateSubdirectory("thumbnails"));
+            ThumbnailCache.Clear();
+            var png = Convert.FromBase64String(System.Text.Json.JsonSerializer.Deserialize<string>(
+                await view.ExecuteScriptAsync("window.__image('cache-test').split(',')[1]"))!);
+            var expected = ThumbnailCache.Store("evicted-first", png);
+            for (var index = 0; index < 180; index++) ThumbnailCache.Store("cached-" + index, png);
+            var cachedMemory = (System.Collections.IDictionary)typeof(ThumbnailCache).GetField("Memory", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+            RequireSync(cachedMemory.Count == 128 && !cachedMemory.Contains("evicted-first") && ThumbnailCache.Get("evicted-first") == expected,
+                "o cache C# cresceu sem limite ou não recarregou a miniatura descartada a partir do disco");
+            // Exercise the byte budget as well as entry count, using data stored only in this fixture directory.
+            var larger = new byte[1024 * 1024]; png.CopyTo(larger, 0);
+            for (var index = 0; index < 12; index++) ThumbnailCache.Store("larger-" + index, larger);
+            var characters = (long)typeof(ThumbnailCache).GetField("MemoryCharacters", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+            RequireSync(characters <= 8L * 1024 * 1024 && ThumbnailCache.Get("larger-0") != null,
+                "o orçamento de 16 MiB do cache C# foi excedido ou o fallback local falhou");
+            ThumbnailCache.Clear();
+            AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
+            RequireSync(AppMemoryBudget.PeakCommittedBytes < AppMemoryBudget.LimitBytes, "a navegação atingiu o limite de 1 GB");
+
+            // Terminate only this fixture's renderer, never a user browser or the app.
+            var window = new MainWindow(new SettingsStore(directory.CreateSubdirectory("data")));
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            var recovering = typeof(MainWindow).GetField("_recoveringWebView", flags)!;
+            var shuttingDown = typeof(MainWindow).GetField("_shutdownInProgress", flags)!;
+            var callback = typeof(MainWindow).GetMethod("OnWebViewProcessFailed", flags)!;
+            var failed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.ProcessFailed += (_, args) =>
+            {
+                if (args.ProcessFailedKind != CoreWebView2ProcessFailedKind.RenderProcessExited) return;
+                callback.Invoke(window, [view, args]);
+                failed.TrySetResult(!(bool)recovering.GetValue(window)!);
+                shuttingDown.SetValue(window, true); // Prevent a replacement WPF control in this never-shown test window.
+            };
+            try
+            {
+                var renderer = environment.GetProcessInfos().First(info => info.Kind == CoreWebView2ProcessKind.Renderer);
+                using var process = Process.GetProcessById(renderer.ProcessId);
+                process.Kill();
+                RequireSync(await failed.Task.WaitAsync(TimeSpan.FromSeconds(10)), "a recuperação descartou o WebView durante o callback nativo");
+                await Task.Delay(100);
+                RequireSync(!window.IsVisible && !IsWindowVisible(host), "o teste exibiu uma janela");
+            }
+            finally
+            {
+                shuttingDown.SetValue(window, false);
+                window.Closing -= typeof(MainWindow).GetMethod("OnClosing", flags, null,
+                    [typeof(object), typeof(System.ComponentModel.CancelEventArgs)], null)!.CreateDelegate<System.ComponentModel.CancelEventHandler>(window);
+                window.Close(); // No AppController/startup was created for this callback-only shell.
+            }
+            return TestOutcome.Pass();
+        }
+        finally
+        {
+            browser?.Close(); DestroyWindow(host); SqliteConnection.ClearAllPools();
+            ThumbnailCache.Clear();
+            try { directory.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    });
+}

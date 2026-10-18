@@ -441,7 +441,7 @@ public partial class MainWindow : Window
         // Chromium restarts these processes itself; recreating the control loses the user's session.
         if (e.ProcessFailedKind is CoreWebView2ProcessFailedKind.GpuProcessExited or CoreWebView2ProcessFailedKind.UtilityProcessExited)
             return;
-        _ = RecoverWebViewAsync();
+        Dispatcher.BeginInvoke(new Action(() => _ = RecoverWebViewAsync()));
     }
 
     private void OnContainsFullScreenElementChanged(object? sender, object e)
@@ -501,7 +501,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_recoveringWebView || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+        if (_recoveringWebView || _shutdownInProgress || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
         {
             return;
         }

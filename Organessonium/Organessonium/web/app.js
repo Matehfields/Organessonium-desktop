@@ -41,6 +41,8 @@ let cardPreviewFrame = 0;
 let thumbnailRequestTimer = 0;
 let thumbnailObserver = null;
 let visibleThumbnailIds = new Set();
+const thumbnailCacheLimit = 128;
+const thumbnailCacheOrder = new Map();
 let folderLoadingPath = '';
 let folderStatisticsTimer = 0;
 let folderFileCounts = new Map();
@@ -1086,9 +1088,25 @@ function syncOpenMarkdownApps() {
 window._onThumb = tid => {
     const url = window._thumbs && window._thumbs[tid];
     if (!url) return;
-
-    document.querySelectorAll('[data-thumb="' + tid + '"]').forEach(el => applyThumbnailElement(el, url));
+    touchThumbnailCache(tid);
+    if (visibleThumbnailIds.has(tid))
+        document.querySelectorAll('[data-thumb="' + tid + '"]').forEach(el => applyThumbnailElement(el, url));
 };
+
+function touchThumbnailCache(tid) {
+    thumbnailCacheOrder.delete(tid);
+    thumbnailCacheOrder.set(tid, true);
+    trimThumbnailCache();
+}
+
+function trimThumbnailCache() {
+    for (const tid of thumbnailCacheOrder.keys()) {
+        if (thumbnailCacheOrder.size <= thumbnailCacheLimit) break;
+        if (visibleThumbnailIds.has(tid)) continue;
+        thumbnailCacheOrder.delete(tid);
+        if (window._thumbs) delete window._thumbs[tid];
+    }
+}
 
 function ensureThumbnailObserver() {
     if (thumbnailObserver) return thumbnailObserver;
@@ -1100,12 +1118,14 @@ function ensureThumbnailObserver() {
             if (entry.isIntersecting) {
                 visibleThumbnailIds.add(tid);
                 const cached = window._thumbs && window._thumbs[tid];
-                if (cached) applyThumbnailElement(el, cached);
+                if (cached) { touchThumbnailCache(tid); applyThumbnailElement(el, cached); }
                 else scheduleVisibleThumbnails();
             } else {
                 visibleThumbnailIds.delete(tid);
+                if (el.querySelector('img')) resetThumbnailElement(el);
             }
         });
+        trimThumbnailCache();
     }, { root:$('main-area'), rootMargin:'180px 0px', threshold:.01 });
     return thumbnailObserver;
 }
@@ -1125,6 +1145,7 @@ function bindThumbnailPreview(card, app, type, color) {
 
 function applyThumbnailElement(el, url) {
     if (!el || !url) return;
+    if (el.querySelector('img')?.getAttribute('src') === url) return;
     const img = document.createElement('img');
     img.className = 'card-preview-img';
     img.alt = '';
@@ -1141,6 +1162,7 @@ function applyThumbnailElement(el, url) {
 
 function resetThumbnailElement(el) {
     if (!el) return;
+    el.querySelectorAll('img').forEach(img => img.removeAttribute('src'));
     const type = el.dataset.thumbType || 'generic';
     const color = el.dataset.thumbColor || TYPE_COLOR.generic;
     el.innerHTML = icon(fileIcon(type), 48, color);
@@ -6181,6 +6203,7 @@ function syncRenderedItems(container, items, kind, create) {
 }
 
 function render() {
+    resetThumbnailViewport();
     renderPathCrumbs();
     const viewApps = appsForActiveView();
     const favoritesView = activeLibraryView === 'favorites';
@@ -6250,6 +6273,7 @@ function render() {
         if (foldersWrap && filesList.children[1] !== foldersWrap) filesList.insertBefore(foldersWrap, filesList.children[1] || null);
     }
     updateSelectionUI();
+    document.querySelectorAll('[data-thumb]').forEach(el => ensureThumbnailObserver().observe(el));
     scheduleCardPreviewSync();
 }
 
@@ -6324,12 +6348,6 @@ function makeFileCard(app) {
             <span class="card-name" title="${esc(app.name)}">${esc(truncate(app.name,22))}</span>
             <button class="btn-more" aria-label="Opções">${icon('more_vert',16)}</button>
         </div>`;
-
-    // Aplica thumb já em cache
-    if (isThumbable && window._thumbs && window._thumbs[fileRequestId(app)]) {
-        const prev=card.querySelector('.card-preview');
-        applyThumbnailElement(prev, window._thumbs[fileRequestId(app)]);
-    }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);
     card.addEventListener('click', e=>{
@@ -6465,11 +6483,6 @@ function makeDriveFileCard(app) {
                 : `<div class="card-preview">${icon(fileIcon(type),48,clr)}</div>`}
             ${app.favorite ? `<span class="item-favorite card-favorite" title="${esc(t('removeFavorite'))}">${icon('star',18)}</span>` : ''}
         </div>`;
-
-    if (isThumbable && window._thumbs && window._thumbs[fileRequestId(app)]) {
-        const prev = card.querySelector('.card-preview');
-        applyThumbnailElement(prev, window._thumbs[fileRequestId(app)]);
-    }
 
     if (isThumbable) bindThumbnailPreview(card, app, type, clr);
     card.addEventListener('click', e => {

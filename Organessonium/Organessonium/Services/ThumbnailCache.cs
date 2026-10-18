@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.IO;
 using System.Windows.Media.Imaging;
 
@@ -6,7 +5,12 @@ namespace Organessonium.Services;
 
 public static class ThumbnailCache
 {
-    private static readonly ConcurrentDictionary<string, string> Memory = new();
+    private const int MemoryEntryLimit = 128;
+    private const long MemoryCharacterLimit = 8L * 1024 * 1024; // UTF-16 strings: at most 16 MiB of character data.
+    private static readonly object MemorySync = new();
+    private static readonly Dictionary<string, (string Value, LinkedListNode<string> Node)> Memory = new();
+    private static readonly LinkedList<string> MemoryOrder = new();
+    private static long MemoryCharacters;
     private static DirectoryInfo? CacheDirectory;
 
     public static void Configure(DirectoryInfo previewDirectory)
@@ -31,9 +35,14 @@ public static class ThumbnailCache
 
     public static string? Get(string threadId)
     {
-        if (Memory.TryGetValue(threadId, out var value))
+        lock (MemorySync)
         {
-            return value;
+            if (Memory.TryGetValue(threadId, out var value))
+            {
+                MemoryOrder.Remove(value.Node);
+                MemoryOrder.AddLast(value.Node);
+                return value.Value;
+            }
         }
 
         var file = ThumbnailFile(threadId) ?? LegacyThumbnailFile(threadId);
@@ -52,7 +61,7 @@ public static class ThumbnailCache
             }
 
             var dataUrl = "data:" + DetectImageMime(bytes) + ";base64," + Convert.ToBase64String(bytes);
-            Memory[threadId] = dataUrl;
+            Remember(threadId, dataUrl);
             return dataUrl;
         }
         catch
@@ -63,7 +72,7 @@ public static class ThumbnailCache
 
     public static void Remove(string threadId)
     {
-        Memory.TryRemove(threadId, out _);
+        lock (MemorySync) RemoveFromMemory(threadId);
         var file = ThumbnailFile(threadId);
         if (file?.Exists == true)
         {
@@ -79,7 +88,32 @@ public static class ThumbnailCache
 
     public static void Clear()
     {
-        Memory.Clear();
+        lock (MemorySync)
+        {
+            Memory.Clear();
+            MemoryOrder.Clear();
+            MemoryCharacters = 0;
+        }
+    }
+
+    private static void Remember(string key, string value)
+    {
+        lock (MemorySync)
+        {
+            RemoveFromMemory(key);
+            if (value.Length > MemoryCharacterLimit) return;
+            Memory[key] = (value, MemoryOrder.AddLast(key));
+            MemoryCharacters += value.Length;
+            while (Memory.Count > MemoryEntryLimit || MemoryCharacters > MemoryCharacterLimit)
+                RemoveFromMemory(MemoryOrder.First!.Value);
+        }
+    }
+
+    private static void RemoveFromMemory(string key)
+    {
+        if (!Memory.Remove(key, out var value)) return;
+        MemoryOrder.Remove(value.Node);
+        MemoryCharacters -= value.Value.Length;
     }
 
     public static string? GenerateAndStore(string threadId, byte[] bytes)
@@ -145,7 +179,7 @@ public static class ThumbnailCache
             }
 
             var dataUrl = "data:" + DetectImageMime(imageBytes) + ";base64," + Convert.ToBase64String(imageBytes);
-            Memory[threadId] = dataUrl;
+            Remember(threadId, dataUrl);
             return dataUrl;
         }
         catch
