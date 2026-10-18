@@ -154,6 +154,7 @@ public sealed partial class AppController : IAsyncDisposable
         var playbackStore = new VideoPlaybackProgressStore(store.DatabasePath);
         playbackStore.Prune();
         _videoProgress = new VideoPlaybackTracker(playbackStore);
+        _videoMemoryGuard = new VideoPlaybackMemoryGuard(() => !_loggingOut && !_videoSessions.IsEmpty, ReleaseVideoMemoryAsync);
         if (Application.Current is App { SyncHost: { } syncHost }) AttachSyncHost(syncHost);
     }
 
@@ -202,6 +203,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _videoMemoryGuard.Dispose();
         DetachSyncHost();
         _loggingOut = true;
         foreach (var request in _videoOpenRequests.Values) request.Cancel();

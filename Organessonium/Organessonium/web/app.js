@@ -187,6 +187,9 @@ const I18N = {
         mediaLoadError:'Não foi possível reproduzir este formato dentro do app.',
         openExternal:'Abrir externamente',
         quality:'Qualidade', preview480:'480p', fullQuality:'Completa', previewDownloading:'Baixando prévia...',
+        videoMemoryFallback:'Liberando memória para tentar a prévia 480p...',
+        videoMemoryTitle:'Reprodução interrompida para proteger o aplicativo',
+        videoMemoryStopped:'A reprodução foi interrompida para evitar que o aplicativo fechasse por falta de memória. Use o download ou tente outro vídeo.',
         previewCache:'Carregando do cache',
         previewLocating:'Localizando partes da prévia...', previewDownloadGeneric:'Baixando arquivo para a prévia',
         previewDownload480:'Baixando prévia 480p', previewDownloadFull:'Baixando qualidade completa',
@@ -328,6 +331,9 @@ const I18N = {
         mediaLoadError:'This format could not be played inside the app.',
         openExternal:'Open externally',
         quality:'Quality', preview480:'480p', fullQuality:'Full', previewDownloading:'Downloading preview...',
+        videoMemoryFallback:'Releasing memory to try the 480p preview...',
+        videoMemoryTitle:'Playback stopped to protect the application',
+        videoMemoryStopped:'Playback was stopped to prevent the application from closing due to insufficient memory. Download the file or try another video.',
         previewCache:'Loading from cache',
         previewLocating:'Locating preview parts...', previewDownloadGeneric:'Downloading file for preview',
         previewDownload480:'Downloading 480p preview', previewDownloadFull:'Downloading full quality',
@@ -1413,6 +1419,7 @@ window._onVideoQualityReady = (threadId, quality, src, mime) => {
     if (progress) progress.classList.add('hidden');
     setPreviewQualityUi(shell, quality);
     player.dataset.quality = quality;
+    delete player.dataset.memoryRecovery;
     player.classList.remove('hidden');
     shell.querySelector('.preview-video-frame')?.classList.remove('hidden');
     shell.querySelector('.preview-media-fallback')?.classList.add('hidden');
@@ -1431,6 +1438,10 @@ window._onVideoQualityError = (threadId, message) => {
     shell.querySelector('.preview-media-quality-progress')?.classList.add('hidden');
     if (pendingVideoQualitySwitch?.previousQuality) setPreviewQualityUi(shell, pendingVideoQualitySwitch.previousQuality);
     pendingVideoQualitySwitch = null;
+    if (shell.querySelector('video')?.dataset.memoryRecovery === 'true') {
+        window._onVideoStreamError(threadId, t('videoMemoryStopped'), t('videoMemoryTitle'));
+        return;
+    }
     setStatus(t('errorPrefix') + (message || t('previewErrorTitle')), false);
 };
 
@@ -1505,7 +1516,34 @@ function stopVideoPlayback() {
     player.load();
 }
 
-window._onVideoStreamError = (threadId, message) => {
+let pendingVideoMemoryRecovery = null;
+window._onVideoMemoryPressure = threadId => {
+    if (fileRequestId(previewAppRef) !== threadId) return;
+    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
+    const player = shell?.querySelector('video');
+    if (!player) return;
+    const fallback = player.dataset.quality !== '480p' && player.dataset.memoryFallbackAttempted !== 'true' &&
+        !!shell.querySelector('[data-video-quality-option="480p"]');
+    if (fallback) player.dataset.memoryFallbackAttempted = 'true';
+    player.dataset.memoryRecovery = 'true';
+    pendingVideoMemoryRecovery = fallback ? {
+        threadId, time: Number.isFinite(player.currentTime) ? player.currentTime : 0,
+        playing: !player.paused, previousQuality: player.dataset.quality
+    } : null;
+    stopVideoPlayback();
+    if (!fallback) { window._onVideoStreamError(threadId, t('videoMemoryStopped'), t('videoMemoryTitle')); return; }
+    const progress = shell.querySelector('.preview-media-quality-progress');
+    progress?.classList.remove('hidden');
+    if (progress?.querySelector('small')) progress.querySelector('small').textContent = t('videoMemoryFallback');
+};
+window._onVideoMemoryReleased = threadId => {
+    if (fileRequestId(previewAppRef) !== threadId || pendingVideoMemoryRecovery?.threadId !== threadId) return;
+    pendingVideoQualitySwitch = pendingVideoMemoryRecovery;
+    pendingVideoMemoryRecovery = null;
+    window.bridge.requestVideoQuality(threadId, previewAppRef.name, '480p');
+};
+
+window._onVideoStreamError = (threadId, message, title) => {
     if (fileRequestId(previewAppRef) !== threadId) return;
     const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
     if (!shell) return;
@@ -1515,6 +1553,7 @@ window._onVideoStreamError = (threadId, message) => {
     const fallback = shell.querySelector('.preview-media-fallback');
     fallback?.classList.remove('hidden');
     if (fallback?.querySelector('p')) fallback.querySelector('p').textContent = message;
+    if (title && fallback?.querySelector('strong')) fallback.querySelector('strong').textContent = title;
 };
 
 window.addEventListener?.('pagehide', () => reportVideoPlayback($('preview-body')?.querySelector('video'), true));

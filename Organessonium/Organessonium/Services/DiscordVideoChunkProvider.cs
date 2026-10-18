@@ -2,6 +2,7 @@ using System.Buffers;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Numerics;
 using Organessonium.Models;
 
 namespace Organessonium.Services;
@@ -18,7 +19,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
     private readonly EncryptedPayloadContext? _context;
     private readonly HttpClient _http;
     // Scoped to this video, without the per-thread retention of ArrayPool.Shared.
-    private readonly ArrayPool<byte> _encryptedBuffers = ArrayPool<byte>.Create(DiscordLimits.AttachmentBytes, 2);
+    private ArrayPool<byte>? _encryptedBuffers = ArrayPool<byte>.Create(DiscordLimits.AttachmentBytes, 2);
     internal IAsyncDisposable? ReadLease { get; set; }
 
     public DiscordVideoChunkProvider(DiscordApiClient discord, string threadId,
@@ -45,6 +46,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
 
     public async Task<byte[]> DownloadAsync(int chunkIndex, CancellationToken cancellationToken)
     {
+        var buffers = Volatile.Read(ref _encryptedBuffers) ?? throw new ObjectDisposedException(nameof(DiscordVideoChunkProvider));
         var attachment = _attachments[chunkIndex];
         Exception? last = null;
         for (var attempt = 1; attempt <= 4; attempt++)
@@ -52,6 +54,10 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
+                var payloadLength = checked((int)attachment.Size);
+                var residentBytes = _context == null ? payloadLength :
+                    (long)BitOperations.RoundUpToPowerOf2((uint)payloadLength) + Index.Chunks[chunkIndex].Length;
+                using var memory = await RamUploadBudget.ReserveExternalBytesAsync(residentBytes, residentBytes, cancellationToken).ConfigureAwait(false);
                 using var priority = VideoNetworkPriority.Enter();
                 using var response = await _http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
                 if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound)
@@ -74,8 +80,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                 response.EnsureSuccessStatusCode();
                 if (response.Content.Headers.ContentLength is long actual && actual != attachment.Size)
                     throw new InvalidDataException("O tamanho do anexo do vídeo é inválido.");
-                var payloadLength = checked((int)attachment.Size);
-                var payload = _context == null ? new byte[payloadLength] : _encryptedBuffers.Rent(payloadLength);
+                var payload = _context == null ? new byte[payloadLength] : buffers.Rent(payloadLength);
                 try
                 {
                     await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -87,7 +92,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                     // Authenticate GCM, role, salt, plaintext length and the real chunk ordinal first.
                     return _encryption.DecryptBytes(payload.AsSpan(0, payloadLength), _context.WithChunkIndex(chunkIndex).WithChunkCount(_attachments.Length));
                 }
-                finally { if (_context != null) _encryptedBuffers.Return(payload, clearArray: true); }
+                finally { if (_context != null) buffers.Return(payload, clearArray: true); }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)
@@ -101,6 +106,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
 
     public void Dispose()
     {
+        Interlocked.Exchange(ref _encryptedBuffers, null);
         _http.Dispose();
         var lease = ReadLease; ReadLease = null;
         if (lease != null) _ = ReleaseReadAsync(lease);

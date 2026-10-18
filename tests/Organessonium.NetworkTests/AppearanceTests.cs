@@ -208,7 +208,7 @@ internal static partial class Program
             var processFailures = new List<string>();
             view.ProcessFailed += (_, args) => processFailures.Add(args.ProcessFailedKind.ToString());
             var mediaData = JsonSerializer.Serialize(new { src = media.RegisterVideo(video, "video/quicktime"), mime = "video/quicktime", quality = "full", qualities = new[] { "full" } });
-            await view.ExecuteScriptAsync("window._onPreviewReady('video','synthetic.mov'," + JsonSerializer.Serialize(mediaData) + ")");
+            await view.ExecuteScriptAsync("openPreview(window.__entries[3]);window._onPreviewReady('video','synthetic.mov'," + JsonSerializer.Serialize(mediaData) + ")");
             for (var attempt = 0; attempt < 50 && await view.ExecuteScriptAsync("document.querySelector('#preview-body video')?.readyState>=2") != "true"; attempt++)
                 await Task.Delay(100);
             await Check("(()=>{const video=document.querySelector('#preview-body video');return video.readyState>=2&&!video.error&&!video.querySelector('source').hasAttribute('type')})()",
@@ -223,6 +223,28 @@ internal static partial class Program
             RequireSync(processFailures.Count == 0, "o WebView falhou durante a reprodução: " + string.Join(",", processFailures));
             AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
             RequireSync(AppMemoryBudget.PeakCommittedBytes < AppMemoryBudget.LimitBytes, "a reprodução atingiu o limite de 1 GB");
+            var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+            var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var active = true;
+            using (var guard = new VideoPlaybackMemoryGuard(() => active, async () =>
+            {
+                active = false;
+                await await dispatcher.InvokeAsync(() => view.ExecuteScriptAsync("window._onVideoMemoryPressure(fileRequestId(previewAppRef))"));
+                released.TrySetResult();
+            }, () => VideoPlaybackMemoryGuard.PressureBytes))
+            {
+                await released.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await Check("(()=>{const shell=document.querySelector('.preview-media-player-shell.video'),v=shell.querySelector('video'),f=shell.querySelector('.preview-media-fallback');return v.paused&&!v.querySelector('source')&&!f.classList.contains('hidden')&&f.textContent.includes('memória')})()",
+                    "a proteção de memória não liberou o vídeo ou não exibiu o motivo na interface");
+            }
+            var lowerUrl = media.Register(movie, "video/mp4");
+            var withFallback = JsonSerializer.Serialize(new { src = lowerUrl, mime = "video/mp4", quality = "full", qualities = new[] { "full", "480p" } });
+            await view.ExecuteScriptAsync("window._onPreviewReady('video','synthetic.mov'," + JsonSerializer.Serialize(withFallback) + ");window.__memoryRequests=0;window.bridge.requestVideoQuality=(id,name,quality)=>{window.__memoryRequests++;window._onVideoQualityReady(id,quality," + JsonSerializer.Serialize(lowerUrl) + ",'video/mp4')};window._onVideoMemoryPressure(fileRequestId(previewAppRef))");
+            await Check("window.__memoryRequests===0&&!document.querySelector('#preview-body video source')", "a prévia começou antes da liberação de memória");
+            await view.ExecuteScriptAsync("window._onVideoMemoryReleased(fileRequestId(previewAppRef))");
+            await Check("window.__memoryRequests===1&&document.querySelector('#preview-body video').dataset.quality==='480p'", "a proteção não selecionou 480p após liberar a sessão");
+            await view.ExecuteScriptAsync("window._onVideoMemoryPressure(fileRequestId(previewAppRef));window._onVideoMemoryReleased(fileRequestId(previewAppRef))");
+            await Check("window.__memoryRequests===1&&!document.querySelector('.preview-media-fallback').classList.contains('hidden')&&document.querySelector('.preview-media-fallback strong').textContent.includes('proteger')", "a proteção repetiu o fallback sem limite ou não informou a interrupção");
             await view.ExecuteScriptAsync("closePreview()");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();

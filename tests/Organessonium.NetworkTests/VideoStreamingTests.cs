@@ -93,6 +93,47 @@ internal static partial class Program
             ? TestOutcome.Pass() : TestOutcome.Fail("256 MiB de reprodução ainda geram buffers descartáveis: " + allocated);
     }
 
+    private static async Task<TestOutcome> VideoMemoryAdmissionAndCloseAsync()
+    {
+        AppMemoryBudget.Initialize();
+        var crypto = CreateEncryptionService(out _);
+        var source = new byte[DiscordLimits.PlaintextChunkBytes];
+        source.AsSpan().Fill(73);
+        var context = new EncryptedPayloadContext("memory-admission", crypto.CreateFileEncryption(EncryptionModes.Standard), EncryptedPayloadRoles.Original, 0, 1);
+        var payload = crypto.EncryptBytes(source, context);
+        var requests = 0;
+        using var handler = new VideoHttpHandler((_, _) =>
+        {
+            Interlocked.Increment(ref requests);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) });
+        });
+        using var discord = new DiscordApiClient("memory-fixture", new HttpClient(handler, false));
+        using var provider = new DiscordVideoChunkProvider(discord, "fixture-thread",
+            [new VideoAttachment(0, "fixture-message", "chunk.bin", "https://cdn.invalid/chunk", payload.Length)],
+            crypto, context, source.Length, new HttpClient(handler, false));
+        GC.Collect();
+        var pressureBytes = AppMemoryBudget.AdmissionBytes - AppMemoryBudget.CommittedBytes() -
+            2L * DiscordLimits.AttachmentBytes - 8L * 1024 * 1024;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var pressure = await RamUploadBudget.ReserveExternalBytesAsync(pressureBytes, 0, timeout.Token);
+        using (var cancelled = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+        {
+            var waiting = provider.DownloadAsync(0, cancelled.Token);
+            await Task.Delay(300, timeout.Token);
+            RequireSync(!waiting.IsCompleted && requests == 0, "o vídeo iniciou CDN/alocação sem espaço no orçamento global");
+            cancelled.Cancel();
+            try { await waiting; return TestOutcome.Fail("cancelar não interrompeu a espera por RAM"); }
+            catch (OperationCanceledException) when (cancelled.IsCancellationRequested) { }
+        }
+        pressure.Dispose();
+        var restored = await provider.DownloadAsync(0, timeout.Token);
+        RequireSync(restored.AsSpan().SequenceEqual(source) && requests == 1, "o vídeo não retomou bytes autenticados após liberar RAM");
+        provider.Dispose();
+        try { await provider.DownloadAsync(0, timeout.Token); return TestOutcome.Fail("a sessão fechada voltou a baixar chunks"); }
+        catch (ObjectDisposedException) { }
+        return TestOutcome.Pass();
+    }
+
     private static async Task<TestOutcome> VideoSeekAndDeduplicationAsync()
     {
         var provider = new PatternChunks(Enumerable.Repeat(1024, 20).ToArray()) { DelayMilliseconds = 80 };

@@ -58,6 +58,7 @@ internal static partial class Program
         ("videoVariableChunkMapping", VideoVariableChunkMappingAsync),
         ("videoVirtualResourceRanges", VideoVirtualResourceRangesAsync),
         ("videoResponseBuffersBounded", VideoResponseBuffersBoundedAsync),
+        ("videoMemoryAdmissionAndClose", VideoMemoryAdmissionAndCloseAsync),
         ("videoSeekAndDeduplication", VideoSeekAndDeduplicationAsync),
         ("videoPrefetchAndRelease", VideoPrefetchAndReleaseAsync),
         ("videoCloseCancelsRequiredRead", VideoCloseCancelsRequiredReadAsync),
