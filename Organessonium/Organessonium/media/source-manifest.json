@@ -1,27 +1,593 @@
 {
-  "runtime": "N-126168-gb16b5f2a01-20260815",
+  "runtime": "N-126168-gb16b5f2a01-organessonium-b16b5f2a01",
   "architecture": "win-x64",
   "license": "GPL-3.0-or-later",
-  "sha256": "4762609c60e0c6acfa478b6421d06fd1d1ebba4f5f033aac51ea316d960b8d1d",
-  "redistributionReady": false,
-  "note": "FFmpeg core and supplier recipe revision are verified. The supplier updates cc during the rav1e build; exact transitive revisions and complete dependency sources still require verification.",
-  "supplierBuild": "https://github.com/BtbN/FFmpeg-Builds/actions/runs/31883715790",
-  "sources": [
+  "sha256": "fd1c6fcdff40a82b1e92fce1a7db3a8eb9006b6c89a1f6fc97232ecb456f197f",
+  "redistributionReady": true,
+  "runtimeArchive": {
+    "path": "runtime-package.zip",
+    "sha256": "0058340d9f42b763ddbb72a8d690d13b0d91bb6ee5913adb46783150e5e61fb3"
+  },
+  "correspondingSourceArchive": {
+    "path": "sources/ffmpeg-corresponding-source.zip",
+    "sha256": "6af48f54fe45d04056711d26a6b94a41c8d2af3c4b9a846627ab14b2088be142"
+  },
+  "runtimeFiles": [
     {
-      "name": "FFmpeg",
-      "commit": "b16b5f2a01f3c4f8c9a7769d7a35e8b193946d3e",
-      "url": "https://codeload.github.com/FFmpeg/FFmpeg/zip/b16b5f2a01f3c4f8c9a7769d7a35e8b193946d3e",
-      "archive": "sources/ffmpeg-source.zip",
-      "sha256": "4127c816b3f969d4b3422968ecf56c4bf4be77b8262b34c18b46b0df2c617ffc",
-      "verified": true
+      "path": "ffmpeg.exe",
+      "sha256": "fd1c6fcdff40a82b1e92fce1a7db3a8eb9006b6c89a1f6fc97232ecb456f197f",
+      "sourcePackage": "controlled-source"
     },
     {
-      "name": "BtbN build recipes confirmed by supplier workflow head_sha",
-      "commit": "590a6612d7d961e9258429e501619e0b7d7cbedf",
-      "url": "https://codeload.github.com/BtbN/FFmpeg-Builds/zip/590a6612d7d961e9258429e501619e0b7d7cbedf",
-      "archive": "sources/build-recipes.zip",
-      "sha256": "0a6f3f2f4e9b8d4d4eb7040f1d53d3aa43963866b641fd15e7f87831abdde5e8",
-      "verified": true
+      "path": "libintl-8.dll",
+      "sha256": "0e5a178731e6be6d115442a6ade3df7f03265cd1fc4338f8b6f86a8001cbf582",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-gettext-runtime"
+    },
+    {
+      "path": "libdvdcss-2.dll",
+      "sha256": "a691f36e9f4dd1dac01e841cada8d4f5500c3f8ad3171a129424a2194151b8e8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libdvdcss"
+    },
+    {
+      "path": "libssl-3-x64.dll",
+      "sha256": "8b71cd694f8edfbddc76674111278db6bcdcde0dcd63b99238420193848e6dbf",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-openssl"
+    },
+    {
+      "path": "libcrypto-3-x64.dll",
+      "sha256": "97308feea369b305e562c0098638a1b02a06f52ee9fcc4b8cf3da362ff563cf4",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-openssl"
+    },
+    {
+      "path": "libzstd.dll",
+      "sha256": "48368ab0ca622d0ec12f41ce85d91f22866bf5da92c77a69a06483564c93816c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zstd"
+    },
+    {
+      "path": "libssh2-1.dll",
+      "sha256": "7c9b4edb678b738b919950492c4a390482fdd644d1276d4728990fdd3c3ea989",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libssh2"
+    },
+    {
+      "path": "libpsl-5.dll",
+      "sha256": "a531e72de3c64d43fb83cbfb6fa63e5ee982a970292ec51314e29d0acabf1dd5",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libpsl"
+    },
+    {
+      "path": "libngtcp2_crypto_ossl-0.dll",
+      "sha256": "e63698046730c9dfcaee49d52298c489ae4c0b28770bcc3ba7f612d35d031dd8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-ngtcp2"
+    },
+    {
+      "path": "libngtcp2-16.dll",
+      "sha256": "e77294cc542bfa35a932217ab0130b19cb45f232fb257d8869d967e750e40b31",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-ngtcp2"
+    },
+    {
+      "path": "libnghttp3-9.dll",
+      "sha256": "eed257dd6092a2f67a760f3f75103ec27cec929281bb2d7b51afabf21a2cad70",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-nghttp3"
+    },
+    {
+      "path": "libnghttp2-14.dll",
+      "sha256": "550b9933ce54833ebb2c0e24b43e1463006c6c62305c471570c6bf18095581bd",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-nghttp2"
+    },
+    {
+      "path": "libexpat-1.dll",
+      "sha256": "8a10cf7e89524b621d5f74bd4aedc659c47c7ce397d489f323a1065ba695027a",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-expat"
+    },
+    {
+      "path": "libidn2-0.dll",
+      "sha256": "a054a6bb69aaf4666157f968740412e9697085cbc1e48a78f8dd9622169c5aaf",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libidn2"
+    },
+    {
+      "path": "libunibreak-7.dll",
+      "sha256": "f1f4bb5b5bb3dbf8d142df3012f13e4b5b0246565496d43718a6f33321e96283",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libunibreak"
+    },
+    {
+      "path": "libpng16-16.dll",
+      "sha256": "7f425fd2b41d83869bb31bf761b4fb315f11040d55540661f96e582e1ec79a36",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libpng"
+    },
+    {
+      "path": "libzvbi-0.dll",
+      "sha256": "e8193ad6853c223f30cda1fa5a6d5e956b809f5fc09197954b49e20f65824fe1",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zvbi"
+    },
+    {
+      "path": "libzmq.dll",
+      "sha256": "6cdd06bfee2f1b4e1eb17d9d92245b0f743a40140a32db8c8fef452de7775675",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zeromq"
+    },
+    {
+      "path": "libzimg-2.dll",
+      "sha256": "99625f39de8de654a90077362aafaa4e565c97908b39c0e9614562f9dfb57200",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zimg"
+    },
+    {
+      "path": "zlib1.dll",
+      "sha256": "11cd91171765cd65f1c3362e3df67e5f5a618a6b88c8cdec899b802eaf1c7b0d",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zlib"
+    },
+    {
+      "path": "xvidcore.dll",
+      "sha256": "5107ab029f4f06a5a360ac769c20a150d4bd1a1922575517b9054768ff219611",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-xvidcore"
+    },
+    {
+      "path": "libxml2-16.dll",
+      "sha256": "b30887288a3ab17f2fa983b512630d3aa20ceca2e29c2c26113c6e0f4e2b643a",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libxml2"
+    },
+    {
+      "path": "libx265-217.dll",
+      "sha256": "48a6c942cab3196d740d7af3cfc8359dc7bd833c87c1ca24b8d231b70daa9e18",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-x265"
+    },
+    {
+      "path": "libx264-165.dll",
+      "sha256": "a58995b5af6d0fcf5d17f354bfa54bb05d99056ed167eec9c8e86a3a63478ec1",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libx264"
+    },
+    {
+      "path": "libwebpmux-3.dll",
+      "sha256": "9bd85116a22923d648d6b0ad09f21d08df7bd3d8860b24a5b4a6d4ac788b7340",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libwebp"
+    },
+    {
+      "path": "libbrotlidec.dll",
+      "sha256": "e270b6e576594ee8ee6e33ccc54e34a54304616dd6225652e11e49d6f17ef896",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-brotli"
+    },
+    {
+      "path": "libwebp-7.dll",
+      "sha256": "8dfe40c4e0abc90ddf18f080898987e01253d099b2b2d6daf7db521e55c00446",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libwebp"
+    },
+    {
+      "path": "libglib-2.0-0.dll",
+      "sha256": "3a1abec0184b238db54399cb9243393d9436d96b8fdb9bd9f2875da207c5b458",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-glib2"
+    },
+    {
+      "path": "libbrotlienc.dll",
+      "sha256": "82573820fe9cc3f57004b6603428e2fa1bfc9d2048707bfcead3cfc5ef3ab284",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-brotli"
+    },
+    {
+      "path": "libbrotlicommon.dll",
+      "sha256": "c62c08223e450dfc2fff33c752cc228505ffd9d755201958ba800d5d30481a2c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-brotli"
+    },
+    {
+      "path": "libsodium-26.dll",
+      "sha256": "4090a35deeb8450b24502593901aab4387713cce3a0cb0ab1decf55de7bee65c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libsodium"
+    },
+    {
+      "path": "libsharpyuv-0.dll",
+      "sha256": "d29380c7056383f3e7a80bf9e150f0b8c425c1cf2568d1336e88979ddc2307af",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libwebp"
+    },
+    {
+      "path": "libogg-0.dll",
+      "sha256": "2f102fba6f2a49516be85cb2643f6a9ba394dc5657aedb3ea235b6603c12d3d2",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libogg"
+    },
+    {
+      "path": "libgomp-1.dll",
+      "sha256": "ccaf59dc8cff15ace88ab47acd68a5b014167cad8f960e7683466a4c821e41c4",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libgomp"
+    },
+    {
+      "path": "libsamplerate-0.dll",
+      "sha256": "4f7f9b2ecea84bb8f5b27c8f36e85e8a100663c745ac25e82a512f485b663ac7",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libsamplerate"
+    },
+    {
+      "path": "libfftw3-3.dll",
+      "sha256": "0d600147b2479b83a5f437d3f8033e3607addb1bbd0c95f522d933564a2c7485",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-fftw"
+    },
+    {
+      "path": "libmbedcrypto-16.dll",
+      "sha256": "bc816e6bf3903a1fb5e4f3f31792d010abb26391547ee2528f5c88d94e2635a8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-mbedtls"
+    },
+    {
+      "path": "liblz4.dll",
+      "sha256": "5e83fd34144fa033c12e22718317ec2123f8a3460903932b0bfddb8aad379cfd",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-lz4"
+    },
+    {
+      "path": "libcjson-1.dll",
+      "sha256": "000793a5cb5394824c57351ca52711b5fb1fcfa6ea39db830e2af2d0693260a8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-cjson"
+    },
+    {
+      "path": "vulkan-1.dll",
+      "sha256": "31862137c4179dcdbba782760f3e401f9fb526477947079d7f63987864f9b0eb",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-vulkan-loader"
+    },
+    {
+      "path": "libgraphite2.dll",
+      "sha256": "93953e4744bcfce9a7bc439b956544bc213095cb1349c3602a58370f32b25c18",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-graphite2"
+    },
+    {
+      "path": "libspirv-cross-c-shared.dll",
+      "sha256": "bc4bdcf63b9bbf60777bc10340050ae6edfbb3be3faf3fa636af53ecf7d2bbc8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-spirv-cross"
+    },
+    {
+      "path": "liblcms2-2.dll",
+      "sha256": "03314471fadd04cdd63c108472ff85d058903d236a0356c14eda363f0e1ccb65",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-lcms2"
+    },
+    {
+      "path": "libdovi.dll",
+      "sha256": "75988509f0d2166e2060ed548913bd7b34556bc16b3f9a02469de1dd2347a7fb",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libdovi"
+    },
+    {
+      "path": "libvorbisfile-3.dll",
+      "sha256": "00691eca4ae9e6a4d56b05a043082df7934b710bc66f3d72c33170f783df503f",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libvorbis"
+    },
+    {
+      "path": "libmpg123-0.dll",
+      "sha256": "bd63359e95781ce1a9f4e1d0d7c98be32583731e34d09df0c6a020d215048ff5",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-mpg123"
+    },
+    {
+      "path": "libzix-0.dll",
+      "sha256": "55111e190f83fa59f3bf53354d7473cce219b239cce323de537b7521e109fab3",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-zix"
+    },
+    {
+      "path": "libsratom-0.dll",
+      "sha256": "92eb7f96270b2614a0b3104cb20165b2e7e49c0184f46e97cb7a9c197d92b714",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-sratom"
+    },
+    {
+      "path": "libsord-0.dll",
+      "sha256": "87098c9efa95509dc0e601db1aae106a5e6789b1d9a02d8d172c55fb734ac3a9",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-sord"
+    },
+    {
+      "path": "libserd-0.dll",
+      "sha256": "2797248e7f1aa68ae5b28d82983271aefbfb21ce3c29b5bf3f3bb61823185cc9",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-serd"
+    },
+    {
+      "path": "libcryptopp.dll",
+      "sha256": "ca63c3b48b96f7fda821472723e261664869655845cd451972ec5a1246330642",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-crypto++"
+    },
+    {
+      "path": "libjxl_cms.dll",
+      "sha256": "da3bf1847c40b66ffc036212d83f5e9acb0770de737d0383c8f1efbef65388c9",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libjxl"
+    },
+    {
+      "path": "libhwy.dll",
+      "sha256": "9ba0ac7bad82c4c88e9bb8d6ca8c6a83877adc1f71cc48590c65b8d26108a41c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-highway"
+    },
+    {
+      "path": "libshaderc_shared.dll",
+      "sha256": "331df8a45983735b823c893a9b872c3414af6eadca9fa189d0b6dfe97960b3cf",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-shaderc"
+    },
+    {
+      "path": "libunistring-5.dll",
+      "sha256": "ee39258fa1086269674a8179d3cfaf7c4e380ada14441b5dd9ed53d82d15c4e3",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libunistring"
+    },
+    {
+      "path": "libvpx-1.dll",
+      "sha256": "759bb95b0cd6c75bfce910f003b26a2d95ed3c94ef1a20dcfd4c89a0569f2016",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libvpx"
+    },
+    {
+      "path": "libvorbisenc-2.dll",
+      "sha256": "971cfa7c8866653aae9760a317dc3838e821f3911d9c6a8a8ef90f4a13de798f",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libvorbis"
+    },
+    {
+      "path": "liblzma-5.dll",
+      "sha256": "d97a260b8bb4f6affc34ec47249429240068b94bb6f7dc30c4d64daaafb3ac69",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-xz"
+    },
+    {
+      "path": "liblilv-0.dll",
+      "sha256": "57dc5ff178fb8b81f9d51d3fec39f862420e9f5d12f1e5cff2af4dfc792e2a4f",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-lilv"
+    },
+    {
+      "path": "libkvazaar-7.dll",
+      "sha256": "642f969e7118ae8e8068c30182fbda3cd6100c5f291f404d9f37d6fd00982c30",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-kvazaar"
+    },
+    {
+      "path": "libjxl_threads.dll",
+      "sha256": "b065e2464cf13626d2ad95f82091b4bd988dcc8aeb7fd65b364b59d4bdf4199e",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libjxl"
+    },
+    {
+      "path": "libjxl.dll",
+      "sha256": "f0db8ef57af445a5b807a5b6d27f9a3c4c7441af61cebfee5542fb7529fb35a5",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libjxl"
+    },
+    {
+      "path": "libiconv-2.dll",
+      "sha256": "94ec68fb8d342b6c91b6b48a8d95092819cdcd006a7166e0b68062f946afd08a",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libiconv"
+    },
+    {
+      "path": "libharfbuzz-0.dll",
+      "sha256": "842d73ce2dd9ee506ef68f4d3e9ca29b62c87e34999cd2720505bf3c9d3f575c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-harfbuzz"
+    },
+    {
+      "path": "libgmp-10.dll",
+      "sha256": "c2567ccf3f410c3411ba7cd4b7ba14f393a0e70a1d0c0593297df6706b5fba96",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-gmp"
+    },
+    {
+      "path": "libgme.dll",
+      "sha256": "98e306bc1443f4f5a0744baf0477d2f856594bb3f8036440ad7cb1f30a1f5a72",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libgme"
+    },
+    {
+      "path": "libgcc_s_seh-1.dll",
+      "sha256": "791ebf66e99c7c1b4ed3666468cec45a0172b4c8942ac6c84c3e9cab3e1b5270",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libgcc"
+    },
+    {
+      "path": "libfribidi-0.dll",
+      "sha256": "14bd0ed4c24d0068434bc23cd4f39e8dc0edcf56f2c9996b6fe39b39ffc54673",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-fribidi"
+    },
+    {
+      "path": "libmp3lame-0.dll",
+      "sha256": "7ae709bf841478222fc468d6aa08cdb47a683feb40ff13fe9fb36359333d4559",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-lame"
+    },
+    {
+      "path": "libfreetype-6.dll",
+      "sha256": "19604dde573cbb8a13053fc231eee99b91cd972e0e9a3e1465f44ad6985e83ee",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-freetype"
+    },
+    {
+      "path": "libdvdread-8.dll",
+      "sha256": "658acc812360cf6c24d684ad250b2d0021d4c74a2e1229b477d66843906c351b",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libdvdread"
+    },
+    {
+      "path": "libdvdnav-4.dll",
+      "sha256": "37cf3d8555ec2f00f50a6bef46b952bd0576c2db41d4debd6133a6c6bdeca02e",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libdvdnav"
+    },
+    {
+      "path": "libdav1d-7.dll",
+      "sha256": "bbe67862f77c22f6f509684207b5363542e5b52c1a1faa354e12a11d072ad766",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-dav1d"
+    },
+    {
+      "path": "libcurl-4.dll",
+      "sha256": "529af2acc6ce7507dbc96fd96e196555bb9a38d9cbb47dee441ea2cce325428d",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-curl"
+    },
+    {
+      "path": "libchromaprint.dll",
+      "sha256": "5edbcb5cc0507386a8d19eafdc894470a3d4f6d111464a341c0fb8f83e4aceef",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-chromaprint"
+    },
+    {
+      "path": "libbz2-1.dll",
+      "sha256": "1790bf6473c9d48db14c1f0ee8124142327556d281299ea2a72ee361118ee01a",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-bzip2"
+    },
+    {
+      "path": "libbluray-4.dll",
+      "sha256": "24870a1b32ff8b36cfa94479d802dfabc55a12e7bbde8584606f7e2d44d3c6dd",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libbluray"
+    },
+    {
+      "path": "libass-9.dll",
+      "sha256": "cb2b46133b3bd9630384148bd7229e987af9703208d4329fc2215f4170b8dc6b",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libass"
+    },
+    {
+      "path": "libaribcaption.dll",
+      "sha256": "8c04b11c2a390096be8aad33c95ad397045bacebe1f7435104fa779c41b138f7",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libaribcaption"
+    },
+    {
+      "path": "libaribb24-0.dll",
+      "sha256": "39b989fac18e7178e98034287c5848e54438ca1d85e1423176cdabf418c47b24",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-aribb24"
+    },
+    {
+      "path": "libaom.dll",
+      "sha256": "61c2c12b0fd9fb42b4cdb5eca107eded4abe6ba8d59941e33737260da6f5355e",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-aom"
+    },
+    {
+      "path": "libfontconfig-1.dll",
+      "sha256": "be30a200fa4000d0a7a1d3911391969627440148f01d0028a319bcb9fa112202",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-fontconfig"
+    },
+    {
+      "path": "libvpl-2.dll",
+      "sha256": "88bd6fece68ebad05d3e78581455bb902cc1d3930018931d0830616097e74d73",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libvpl"
+    },
+    {
+      "path": "libopenal-1.dll",
+      "sha256": "cb33f3a9505f38b4a82510bf303547e5e66c525eff591085c752e3d81dfc51cb",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-openal"
+    },
+    {
+      "path": "libopencore-amrnb-0.dll",
+      "sha256": "9d36d5661fd002f8889d90e0a53f2c5d693c641c075ef55c26ade85d958d1369",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-opencore-amr"
+    },
+    {
+      "path": "libvorbis-0.dll",
+      "sha256": "d1b40d7f33171ccb8cd2a238bea36c01176c54de5bf22afae332fb33f26a008f",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libvorbis"
+    },
+    {
+      "path": "libvmaf.dll",
+      "sha256": "ee8f24681bca47e8e7f4bfb986e2b0edb96541609278e6f47c45469ba66cd305",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-vmaf"
+    },
+    {
+      "path": "libvidstab.dll",
+      "sha256": "6980084b957f32cf13248d8b0160a698d75e1148f6b35af85f57f559242fb623",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-vid.stab"
+    },
+    {
+      "path": "libva_win32.dll",
+      "sha256": "2721e9c28099699b6d723d3d56671ca46db21a5bdb9e2c41df516da17d6539b7",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libva"
+    },
+    {
+      "path": "libva.dll",
+      "sha256": "20591e45edfcbf7f4b5735f9096b19be9796b0f61d1ab041f39d2732357593ae",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libva"
+    },
+    {
+      "path": "libtwolame-0.dll",
+      "sha256": "cdf1f7ab897135ffee0bae5e2e732e8540afcd343aeb91750450f55cc82afce4",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-twolame"
+    },
+    {
+      "path": "libtheoraenc-2.dll",
+      "sha256": "ed0fb82d04220070d2f53832a9cb653546ddce2c704a53bfacae7597666db4d7",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libtheora"
+    },
+    {
+      "path": "libtheoradec-2.dll",
+      "sha256": "0b9877e581421abe4090abacf2cd8c04df6de00520d7a34b9f41b46a11a02a80",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libtheora"
+    },
+    {
+      "path": "libSvtAv1Enc-4.dll",
+      "sha256": "34f015c70ac283ba90bf5bbe0fec6e6af0fcbd50762566826405c8ccfade6e75",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-svt-av1"
+    },
+    {
+      "path": "libstdc++-6.dll",
+      "sha256": "4e4822dc4aaa99383f581dae7ab9464ae89346c5ca742f7efbcdebe20b0fe7b5",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libstdc++"
+    },
+    {
+      "path": "libssh.dll",
+      "sha256": "dbaf4b60ccbcef6aa5d6385d8d1965d4f483999b9ced1d5a2afbf719028b3d1e",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libssh"
+    },
+    {
+      "path": "OpenCL.dll",
+      "sha256": "3bb201f63e97ee5e331a213b778eec4c75ed981a7d41706d84c99696b83f56fc",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-opencl-icd"
+    },
+    {
+      "path": "libsrt.dll",
+      "sha256": "6ad77ab5b1a9dc3d2d0bb929bfe9c6a46eb119c5f81d32014176ab873abeebdc",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-srt"
+    },
+    {
+      "path": "libsnappy.dll",
+      "sha256": "9de2700ed48900c9f7a26fd35d5be6162aaea28d29391972dd1bcc0dc8e0512c",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-snappy"
+    },
+    {
+      "path": "librubberband-2.dll",
+      "sha256": "8c29915a561a8b9ff7959aee88bb4117c9120e26bdb2898a900361398aeb0a50",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-rubberband"
+    },
+    {
+      "path": "librist.dll",
+      "sha256": "20dd12537488145290fab0ce821f6a8c1af83ef504b503710871069de063c09b",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-librist"
+    },
+    {
+      "path": "librav1e.dll",
+      "sha256": "bc549e2178589f371469d1bd23544859ff118e48218eae2bfca7126654988779",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-rav1e"
+    },
+    {
+      "path": "libwinpthread-1.dll",
+      "sha256": "a5df05bf091bc2ba0a89f83a60d2049e9d434bb9631fec82faf20ff64a53456a",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libwinpthread"
+    },
+    {
+      "path": "libplacebo-360.dll",
+      "sha256": "8eb2c3fe24a124d9dbf0383d60ac7dde6c0dd5607b2451cad0d924271e46d5b8",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libplacebo"
+    },
+    {
+      "path": "libopus-0.dll",
+      "sha256": "e747edad6bf02cf5cdcce417b95be3b7ba108f93df1b024778be5d73fa6dae39",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-opus"
+    },
+    {
+      "path": "libopenmpt-0.dll",
+      "sha256": "1b48f0318fb903251c3c33c3dbd55ff27a2f3ccdcc292765818092d33bffbfe4",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libopenmpt"
+    },
+    {
+      "path": "libopenjp2-7.dll",
+      "sha256": "94f9507828d391cf96d700d34918114f1c1e03f91dd1243a19275e0435690925",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-openjpeg2"
+    },
+    {
+      "path": "libopenh264-7.dll",
+      "sha256": "6722d93cb98a1d804c5469b9f21a46e2a7acc4aa134c932b339cbd59fbe03ca2",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-openh264"
+    },
+    {
+      "path": "libopencore-amrwb-0.dll",
+      "sha256": "54341e49eab692d77e0ff8534a40a3cce6d0d58b9cd157ed69c817c4b852bbdb",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-opencore-amr"
+    },
+    {
+      "path": "libsoxr.dll",
+      "sha256": "47f6a0fbaa08f7ba38b051de741ebc7a2613bfb3ed276ebbe6fbafb6ee47b445",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-libsoxr"
+    },
+    {
+      "path": "libpcre2-8-0.dll",
+      "sha256": "1f609cde2ce432efb7d2b0c7b84a14a6dbfc9622d1ac1a3cbadf51c5b0b4dada",
+      "sourcePackage": "mingw-w64-ucrt-x86_64-pcre2"
+    },
+    {
+      "path": "GPL-3.0.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "sourcePackage": "notices"
+    },
+    {
+      "path": "BtbN-LICENSE.txt",
+      "sha256": "c1b3cc7eec42bd9c4f6247169bb887b4a9bc904abfd2a7f7f9231ed357844993",
+      "sourcePackage": "notices"
+    },
+    {
+      "path": "NOTICE.md",
+      "sha256": "a32f0b1a37a297593832ea61436ab60ebfc5b70c9931d09eb510232a573f290d",
+      "sourcePackage": "notices"
+    },
+    {
+      "path": "THIRD-PARTY-NOTICES.txt",
+      "sha256": "f1d107e14cfb5847f5788123a7aca7bc0da5edee10765caa9592113835cf3137",
+      "sourcePackage": "notices"
     }
-  ]
+  ],
+  "sourceInventory": "source-inventory.json"
 }

@@ -46,7 +46,16 @@
       <LogicalName>web/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
     <Resource Include="Assets\app.ico" />
-    <Content Include="media\**\*" Exclude="media\sources\**\*">
+    <!-- Only the explicit archive may enter the single-file publication. -->
+    <Content Remove="media\**\*" />
+    <None Remove="media\**\*" />
+    <EmbeddedResource Include="media\runtime-package.zip" Condition="Exists('media\runtime-package.zip')">
+      <LogicalName>media/runtime-package.zip</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="media\source-manifest.json">
+      <LogicalName>media/source-manifest.json</LogicalName>
+    </EmbeddedResource>
+    <Content Include="media\**\*" Exclude="media\sources\**\*;media\build\**\*" Condition="!Exists('media\runtime-package.zip')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
@@ -54,13 +63,13 @@
   </ItemGroup>
 
   <Target Name="VerifyMediaRuntime" BeforeTargets="PrepareForPublish">
-    <Error Condition="!Exists('media\ffmpeg.exe')" Text="FFmpeg ausente. Prepare media/ffmpeg.exe e sua licença conforme media/NOTICE.md antes de publicar." />
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\media\Verify-Sources.ps1&quot;" />
+    <Error Condition="!Exists('media\runtime-package.zip') And !Exists('media\ffmpeg.exe')" Text="FFmpeg ausente. Prepare o pacote de mídia conforme media/NOTICE.md antes de publicar." />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\media\Verify-Sources.ps1&quot; -MediaDirectory &quot;$(MSBuildProjectDirectory)\media&quot;" />
   </Target>
 
-  <Target Name="CopyMediaRuntime" AfterTargets="Publish">
+  <Target Name="CopyMediaRuntime" AfterTargets="Publish" Condition="!Exists('media\runtime-package.zip')">
     <ItemGroup>
-      <_MediaRuntimeFile Include="media\**\*" Exclude="media\sources\**\*" />
+      <_MediaRuntimeFile Include="media\**\*" Exclude="media\sources\**\*;media\build\**\*" />
     </ItemGroup>
     <Copy SourceFiles="@(_MediaRuntimeFile)"
           DestinationFiles="@(_MediaRuntimeFile->'$(PublishDir)media\%(RecursiveDir)%(Filename)%(Extension)')"

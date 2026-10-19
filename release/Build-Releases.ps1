@@ -15,7 +15,7 @@ $settingsPath = Join-Path $PSScriptRoot 'release-settings.json'
 $localSettingsPath = Join-Path $PSScriptRoot 'release-settings.local.json'
 $mediaRoot = Join-Path (Split-Path -Parent $projectPath) 'media'
 # Check before creating/replacing any release artifact.
-& (Join-Path $mediaRoot 'Verify-Sources.ps1')
+& (Join-Path $mediaRoot 'Verify-Sources.ps1') -ForRedistribution
 
 function Write-Step {
     param([string]$Message)
@@ -666,6 +666,10 @@ foreach ($architecture in $architectures) {
         throw "A publicação $($architecture.Rid) não produziu Organessonium.exe."
     }
     $publishedExecutables[$architecture.Name] = $publishedExe
+    if ($architecture.Name -eq [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()) {
+        Write-Step 'Verificando extracao e execucao da midia embutida, sem interface'
+        Invoke-Native -FilePath $publishedExe -Arguments @('--verify-media-runtime')
+    }
 }
 
 $msiPublishedDirectories = @{}
@@ -712,10 +716,26 @@ if ($LASTEXITCODE -ne 0 -or $trackedFiles.Count -eq 0) {
     throw 'Git não conseguiu enumerar os arquivos necessários do código-fonte.'
 }
 Test-PublicSourceFiles -RelativePaths $trackedFiles -Root $repoRoot
+$mediaManifest = Read-JsonObjectUtf8 -Path (Join-Path $mediaRoot 'source-manifest.json')
+# A clean source extraction can build/publish without looking for external media
+# binaries or sources. These generated inputs are verified before this step.
+$mediaInputs = @([string]$mediaManifest.runtimeArchive.path, [string]$mediaManifest.correspondingSourceArchive.path)
+foreach ($mediaInput in $mediaInputs) {
+    $trackedFiles += 'Organessonium/Organessonium/media/' + $mediaInput.Replace('\', '/')
+}
+$trackedFiles = @($trackedFiles | Sort-Object -Unique)
 $sourceZip = Join-Path $outputDirectory 'Organessonium-windows-source.zip'
 New-PortableSourceZip -RelativePaths $trackedFiles -Root $repoRoot -Destination $sourceZip
 Test-SourceZip -Path $sourceZip
 $ffmpegSourceZip = New-FfmpegSourcePackage -Root $mediaRoot -Directory $outputDirectory
+
+Write-Step 'Copiando os executaveis portateis com midia e licencas embutidas'
+$portablePaths = @()
+foreach ($architecture in $architectures) {
+    $portableExe = Join-Path $outputDirectory ("Organessonium-{0}.exe" -f $architecture.Name)
+    Copy-Item -LiteralPath $publishedExecutables[$architecture.Name] -Destination $portableExe
+    $portablePaths += $portableExe
+}
 
 $sourceVerifyDirectory = Join-Path $verifyDirectory 'source'
 $null = New-Item -ItemType Directory -Force -Path $sourceVerifyDirectory
@@ -796,7 +816,16 @@ foreach ($architecture in $architectures) {
     $assetsDirectory = Join-Path $msixStageDirectory 'Assets'
     $null = New-Item -ItemType Directory -Force -Path $assetsDirectory
     Copy-Item -LiteralPath $publishedExecutables[$architecture.Name] -Destination (Join-Path $msixStageDirectory 'Organessonium.exe') -Force
-    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $publishedExecutables[$architecture.Name]) 'media') -Destination $msixStageDirectory -Recurse
+    $storeMedia = Join-Path $msixStageDirectory 'media'
+    $null = New-Item -ItemType Directory -Force -Path $storeMedia
+    foreach ($notice in @('GPL-3.0.txt', 'BtbN-LICENSE.txt', 'NOTICE.md', 'THIRD-PARTY-NOTICES.txt', 'source-manifest.json')) {
+        Copy-Item -LiteralPath (Join-Path $mediaRoot $notice) -Destination $storeMedia
+    }
+    # Store users receive the exact corresponding source with the binary. No
+    # mutable download URL, login or later manual source request is necessary.
+    $storeSources = Join-Path $msixStageDirectory 'media\sources'
+    $null = New-Item -ItemType Directory -Force -Path $storeSources
+    Copy-Item -LiteralPath $ffmpegSourceZip -Destination (Join-Path $storeSources 'ffmpeg-corresponding-source.zip')
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'StoreLogo.png') -Width 50 -Height 50 -LogoSize 44
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square44x44Logo.png') -Width 44 -Height 44 -LogoSize 38
     Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square150x150Logo.png') -Width 150 -Height 150 -LogoSize 128
@@ -869,7 +898,7 @@ if ($RunWack) {
 }
 
 Write-Step 'Gerando hashes SHA-256'
-$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath) + @($msixPaths.Values)
+$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath) + @($msixPaths.Values) + $portablePaths
 $hashLines = foreach ($file in $releaseFiles) {
     $relativeOutputPath = [System.IO.Path]::GetFullPath($file).Substring([System.IO.Path]::GetFullPath($outputDirectory).Length).TrimStart('\').Replace('\', '/')
     '{0}  {1}' -f (Get-Sha256Hex -Path $file), $relativeOutputPath

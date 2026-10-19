@@ -34,7 +34,7 @@ internal static partial class Program
                 RequireSync(encoder.ExitCode == 0, "fixture HEVC inválida");
             }
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(40));
-            using var thumbnail = await FfmpegMediaService.ThumbnailAsync(source, timeout.Token, ffmpeg);
+            using var thumbnail = await FfmpegMediaService.ThumbnailAsync(source, timeout.Token);
             ThumbnailCache.Configure(directory.CreateSubdirectory("Previews"));
             ThumbnailCache.Store("media-test", thumbnail.Bytes);
             var crypto = CreateEncryptionService(out _);
@@ -42,7 +42,7 @@ internal static partial class Program
             using var server = new GroupedDiscordFixture();
             using var api = new DiscordApiClient("media-ui-" + Guid.NewGuid(), new HttpClient(server, false));
             await FfmpegPreviewUpload.UploadAsync(source, "480.mp4", "thread", new ForumUploader(api, "files"), crypto,
-                context, true, false, null, null, timeout.Token, executable: ffmpeg);
+                context, true, false, null, null, timeout.Token);
             var preview = crypto.DecryptBytes(server.AttemptPayloads.Single().Single(), context);
             var mediaInfo = JsonSerializer.Serialize(new { src = "data:video/mp4;base64," + Convert.ToBase64String(preview),
                 mime = "video/mp4", quality = "480p", qualities = new[] { "480p", "full" }, fileId = context.FileId });

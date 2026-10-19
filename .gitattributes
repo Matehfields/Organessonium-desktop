@@ -1,0 +1,4 @@
+Organessonium/Organessonium/media/build/*.sh text eol=lf
+Organessonium/Organessonium/media/build/ffmpeg-config.txt text eol=lf
+# Generated license texts stay verbatim, including upstream whitespace/headings.
+Organessonium/Organessonium/media/THIRD-PARTY-NOTICES.txt -diff linguist-generated=true

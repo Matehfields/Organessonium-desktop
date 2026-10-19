@@ -4,6 +4,8 @@
 artifacts/
 release/release-settings.local.json
 Organessonium/Organessonium/media/ffmpeg.exe
+Organessonium/Organessonium/media/*.dll
+Organessonium/Organessonium/media/runtime-package.zip
 Organessonium/Organessonium/media/sources/
 
 # IDE and local tooling state

@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "archive": "package-sources/mingw-w64-curl-8.23.0-1.src.tar.zst",
+      "sha256": "85206b050a96ce7e78f25f15307bd1545472ceaaa834e00169573b0a61a5436b",
+      "review": "The match is a comment about ENABLE_UNICODE; no build-time curl download. Upstream and patches are in the signed source archive.",
+      "additionalSources": []
+    },
+    {
+      "archive": "package-sources/mingw-w64-python-3.14.8-1.src.tar.zst",
+      "sha256": "80c14d4b98dc08c53b37374e2f7a6f5bb00afd8f637e82d92e8fa0a920a4cc13",
+      "review": "Python is configured with --without-ensurepip. The signed archive contains upstream and all recipe patches; no pip bootstrap is performed.",
+      "additionalSources": []
+    },
+    {
+      "archive": "package-sources/mingw-w64-mpfr-4.2.2-3.src.tar.zst",
+      "sha256": "c8c9b1e091b744165b150d59b7599bcf014fe9c3ae21df98fd3807f05f702c60",
+      "review": "wget/allpatches appears only in a commented source entry. The patch invocation is disabled; the signed archive contains the upstream tarball and signature.",
+      "additionalSources": []
+    },
+    {
+      "archive": "package-sources/mingw-w64-libdovi-3.4.0-1.src.tar.zst",
+      "sha256": "50e7303249bd57b9bb543e87e5de4b6331d744b22d2d26861bc8968ee60a70a3",
+      "review": "Source Cargo.lock was accepted by cargo vendor --locked for dolby_vision; build uses --frozen. All locked crates and notices are included.",
+      "additionalSources": [
+        "source-audit/vendor/libdovi"
+      ]
+    },
+    {
+      "archive": "package-sources/mingw-w64-rav1e-0.8.1-1.src.tar.zst",
+      "sha256": "4a991f3a7d0e4ef23bc5e7eaae9ea0c83d16a18c48a3e621f1f3dfb10464b49d",
+      "review": "The recipe fetches --locked and builds --frozen. Source Cargo.lock was accepted by cargo vendor --locked; all vendored crates and notices are included.",
+      "additionalSources": [
+        "source-audit/vendor/rav1e"
+      ]
+    }
+  ]
+}

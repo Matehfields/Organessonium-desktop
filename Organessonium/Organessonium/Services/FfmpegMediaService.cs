@@ -12,8 +12,7 @@ internal static class FfmpegMediaService
     internal static int PreviewChunkBytes => EncryptionService.MaximumPlaintextPayloadBytes;
     private const long WorkingBytes = 192L * 1024 * 1024;
     private static readonly SemaphoreSlim Gate = new(1, 1);
-    internal static string Executable => Path.Combine(AppContext.BaseDirectory, "media", "ffmpeg.exe");
-    internal static bool Available => File.Exists(Executable) && Environment.Is64BitOperatingSystem &&
+    internal static bool Available => EmbeddedMediaRuntime.Available && Environment.Is64BitOperatingSystem &&
         (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.X64 ||
             OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000));
 
@@ -72,7 +71,8 @@ internal static class FfmpegMediaService
         }
         using (reservation)
         {
-            var info = new ProcessStartInfo(executable ?? Executable)
+            var runtime = executable ?? await EmbeddedMediaRuntime.GetExecutableAsync(token).ConfigureAwait(false);
+            var info = new ProcessStartInfo(runtime)
             {
                 UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardOutput = true, RedirectStandardError = true
