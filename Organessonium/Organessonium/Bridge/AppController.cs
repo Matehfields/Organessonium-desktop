@@ -315,7 +315,6 @@ public sealed partial class AppController : IAsyncDisposable
             case "applyWindowTheme": _onThemeChanged(ArgString(args, 0, _store.Load().Theme)); return Task.CompletedTask;
             case "setHostFullscreen": SetHostFullscreen(ArgBool(args, 0, false)); return Task.CompletedTask;
             case "chooseDownloadPath": return ChoosePathAsync("download", "Pasta de downloads");
-            case "chooseTempPath": return ChoosePathAsync("temp", "Pasta temporária");
             case "chooseDataPath": return ChooseDataPathAsync();
             default: return Task.CompletedTask;
         }
@@ -4403,8 +4402,7 @@ public sealed partial class AppController : IAsyncDisposable
         settings.CardSize = ArgString(args, 0, "medium");
         settings.DownloadThreads = Math.Clamp(ArgInt(args, 1, 4), 1, 16);
         settings.Theme = NormalizeTheme(ArgString(args, 2, "system"));
-        settings.DownloadPath = ArgString(args, 3);
-        settings.TempPath = ArgString(args, 4);
+        settings.DownloadPath = WindowsDownloadsFolder.Resolve(ArgString(args, 3));
         settings.PreviewEnabled = ArgBool(args, 5, true);
         settings.Language = NormalizeLanguage(ArgString(args, 6, "system"));
         settings.AnimationsEnabled = ArgBool(args, 7, true);
@@ -4501,25 +4499,10 @@ public sealed partial class AppController : IAsyncDisposable
             }
         });
     }
-    private async Task<DirectoryInfo?> ResolveDownloadDirectoryAsync(string title)
+    private Task<DirectoryInfo?> ResolveDownloadDirectoryAsync(string title)
     {
-        var settings = _store.Load();
-        if (!string.IsNullOrWhiteSpace(settings.DownloadPath))
-        {
-            var dir = Directory.CreateDirectory(settings.DownloadPath);
-            return dir;
-        }
-
-        DirectoryInfo? selected = null;
-        await _owner.Dispatcher.InvokeAsync(() =>
-        {
-            var dialog = new OpenFolderDialog { Title = title };
-            if (dialog.ShowDialog(_owner) == true)
-            {
-                selected = Directory.CreateDirectory(dialog.FolderName);
-            }
-        });
-        return selected;
+        var path = WindowsDownloadsFolder.Resolve(_store.Load().DownloadPath);
+        return Task.FromResult<DirectoryInfo?>(Directory.CreateDirectory(path));
     }
 
     private AppRegistry Registry()

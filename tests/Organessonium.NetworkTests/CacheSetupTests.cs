@@ -177,6 +177,31 @@ internal static partial class Program
             using var dummyView = new WebView2();
             var bridge = new WebMessageBridge(dummyView, script => view.ExecuteScriptAsync(script));
             await using var controller = new AppController(new System.Windows.Window(), store, bridge, _ => Task.CompletedTask);
+            using (var connection = new SqliteConnection("Data Source=" + store.DatabasePath))
+            {
+                connection.Open(); using var command = connection.CreateCommand();
+                command.CommandText = "INSERT OR REPLACE INTO settings(key,value,updated_at) VALUES('tempPath','retired-test-folder',''),('downloadPath','','')";
+                command.ExecuteNonQuery();
+            }
+            var defaults = store.Load();
+            RequireSync(defaults.DownloadPath == WindowsDownloadsFolder.DefaultPath && Path.IsPathFullyQualified(defaults.DownloadPath),
+                "a configuração vazia não usou a pasta Downloads do Windows");
+            store.Save(defaults);
+            RequireSync(!JsonSerializer.Serialize(store.Load(), JsonOptions.Web).Contains("tempPath", StringComparison.Ordinal),
+                "a configuração temporária continua publicada na interface");
+            await bridge.SetSettingsAsync(defaults);
+            await view.ExecuteScriptAsync("loadSettings();openSettings()");
+            await Check("!document.getElementById('setting-tmppath')&&document.getElementById('setting-dlpath').offsetWidth>0&&document.getElementById('setting-dlpath').value===" +
+                JsonSerializer.Serialize(defaults.DownloadPath), "a tela não removeu a pasta temporária ou não exibiu Downloads como padrão");
+            view.WebMessageReceived += async (_, args) =>
+            {
+                using var json = JsonDocument.Parse(args.WebMessageAsJson);
+                if (json.RootElement.GetProperty("method").GetString() == "saveSettings") await controller.HandleJsonMessageAsync(args.WebMessageAsJson);
+            };
+            var customDownload = root.CreateSubdirectory("chosen-downloads").FullName;
+            await bridge.CallAsync("_onPathChosen", "download", customDownload);
+            for (var attempt = 0; attempt < 50 && store.Load().DownloadPath != customDownload; attempt++) await Task.Delay(50);
+            RequireSync(new SettingsStore(store.DataDirectory).Load().DownloadPath == customDownload, "a escolha personalizada de downloads não foi preservada");
             await (Task)typeof(AppController).GetMethod("SendLibraryStatisticsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(controller, [new LibraryStatistics(2, 1, 64424509440)])!;
             await view.ExecuteScriptAsync("window._onAppsLoaded([]);window._onServerReadState(true)");
             await Check("document.getElementById('storage-display').textContent.includes('60')&&document.getElementById('server-read-status').querySelector('.svg-icon').getAnimations()[0].effect.getKeyframes().at(-1).transform.includes('-360deg')", "totais locais ou sentido da animação incorretos");

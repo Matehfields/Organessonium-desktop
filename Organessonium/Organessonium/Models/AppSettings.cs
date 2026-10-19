@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Organessonium.Services;
 
 namespace Organessonium.Models;
 
@@ -60,10 +61,7 @@ public sealed class AppSettings
     public int VideoPrefetchChunks { get; set; } = 1;
 
     [JsonPropertyName("downloadPath")]
-    public string DownloadPath { get; set; } = "";
-
-    [JsonPropertyName("tempPath")]
-    public string TempPath { get; set; } = "";
+    public string DownloadPath { get; set; } = WindowsDownloadsFolder.DefaultPath;
 
     [JsonPropertyName("dataPath")]
     public string DataPath { get; set; } = "";
@@ -141,7 +139,6 @@ public sealed class AppSettings
             PreviewThreads = PreviewThreads,
             VideoPrefetchChunks = VideoPrefetchChunks,
             DownloadPath = DownloadPath,
-            TempPath = TempPath,
             DataPath = DataPath,
             PreviewEnabled = PreviewEnabled,
             GenerateVideoPreviews = GenerateVideoPreviews,

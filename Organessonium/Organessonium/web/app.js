@@ -17,7 +17,7 @@ const nonfatalMessages = [];
 let uploadConflictState = null;
 let settings = {
     accentColorMode:'system', accentColor:'#0078D4',
-    cardSize:'medium', downloadThreads:4, uploadThreads:4, forceUploadParallelism:false, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', tempPath:'', dataPath:'',
+    cardSize:'medium', downloadThreads:4, uploadThreads:4, forceUploadParallelism:false, previewThreads:4, maxParallelUploads:3, theme:'system', downloadPath:'', dataPath:'',
     previewEnabled:true, generateVideoPreviews:true, videoPreviewQuality:'low', videoPrefetchChunks:1, language:'system',
     animationsEnabled:true, hardwareAcceleration:true, encryptionMode:'standard', customKeyAvailable:false,
     proxy:{ proxyMode:'automatic', proxyHost:'', proxyPort:0, proxyProtocol:'auto', proxyAuthenticationEnabled:false, proxyUsername:'', proxyPassword:'' }
@@ -159,7 +159,7 @@ const I18N = {
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         transferEta:v => 'Tempo restante estimado: ' + v.eta,
         downloads:'Downloads', downloadFolder:'Pasta de downloads',
-        tempFolder:'Pasta temporária', dataFolder:'Pasta de dados', dataFolderHelp:'Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.', choose:'Escolher', connection:'Conexão',
+        defaultDownloadFolder:'Padrão: Downloads do Windows', dataFolder:'Pasta de dados', dataFolderHelp:'Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.', choose:'Escolher', connection:'Conexão',
         network:'Rede e proxy', proxyMode:'Modo de conexão', proxyModeAuto:'Automático (usar configuração do sistema)',
         proxyModeDisabled:'Desativado (conexão direta)', proxyModeManual:'Manual',
         proxyModeHelp:'O proxy é usado para falar com o Discord. Mude aqui se estiver atrás de um firewall ou rede corporativa.',
@@ -304,7 +304,7 @@ const I18N = {
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         transferEta:v => 'Estimated time remaining: ' + v.eta,
         downloads:'Downloads', downloadFolder:'Downloads folder',
-        tempFolder:'Temporary folder', dataFolder:'Data folder', dataFolderHelp:'Used on the next startup. Current data is copied without deleting anything.', choose:'Choose', connection:'Connection',
+        defaultDownloadFolder:'Default: Windows Downloads', dataFolder:'Data folder', dataFolderHelp:'Used on the next startup. Current data is copied without deleting anything.', choose:'Choose', connection:'Connection',
         network:'Network and proxy', proxyMode:'Connection mode', proxyModeAuto:'Automatic (use system settings)',
         proxyModeDisabled:'Disabled (direct connection)', proxyModeManual:'Manual',
         proxyModeHelp:'The proxy is used to talk to Discord. Change this if you are behind a firewall or corporate network.',
@@ -601,7 +601,7 @@ function applyI18n() {
     setText('setting-force-upload-help', 'forceUploadParallelismHelp');
     setText('settings-downloads-title', 'downloads');
     setText('setting-dlpath-label', 'downloadFolder');
-    setText('setting-tmppath-label', 'tempFolder');
+    $('setting-dlpath').placeholder = t('defaultDownloadFolder');
     setText('setting-datapath-label', 'dataFolder');
     setText('setting-datapath-help', 'dataFolderHelp');
     setText('btn-choose-dl', 'choose');
@@ -2390,7 +2390,7 @@ window._onDragLeave = () => dragOverlay.classList.add('hidden');
 window._onPathChosen = (type, path) => {
     if (type==='download') { $('setting-dlpath').value  = path; settings.downloadPath = path; }
     else if (type==='data') { $('setting-datapath').value = path; settings.dataPath = path; }
-    else                   { $('setting-tmppath').value = path; settings.tempPath     = path; }
+    else return;
     queueSettingsSave();
 };
 
@@ -3048,10 +3048,8 @@ document.addEventListener('DOMContentLoaded', () => {
         window.bridge.testProxy(proxy.proxyHost || '', proxy.proxyPort || 0, proxy.proxyProtocol || 'auto', !!proxy.proxyAuthenticationEnabled, proxy.proxyUsername || '', proxy.proxyPassword || '', true);
     });
     $('btn-choose-dl').addEventListener('click',  () => window.bridge.chooseDownloadPath());
-    $('btn-choose-tmp').addEventListener('click', () => window.bridge.chooseTempPath());
     if ($('btn-choose-data')) $('btn-choose-data').addEventListener('click', () => window.bridge.chooseDataPath());
     bindPathSetting('setting-dlpath', 'downloadPath');
-    bindPathSetting('setting-tmppath', 'tempPath');
     bindPathSetting('setting-datapath', 'dataPath');
     $('setting-preview').addEventListener('change', e => {
         settings.previewEnabled = e.target.checked;
@@ -5800,7 +5798,7 @@ function loadSettings() {
     syncUploadSettings();
     $('setting-preview-threads').value=settings.previewThreads; $('preview-thr-val').textContent=settings.previewThreads;
     $('setting-video-prefetch').value=settings.videoPrefetchChunks; $('video-prefetch-val').textContent=settings.videoPrefetchChunks;
-    $('setting-dlpath').value=settings.downloadPath||''; $('setting-tmppath').value=settings.tempPath||''; $('setting-datapath').value=settings.dataPath||'';
+    $('setting-dlpath').value=settings.downloadPath||''; $('setting-datapath').value=settings.dataPath||'';
     $('setting-preview').checked=settings.previewEnabled!==false;
     $('setting-generate-video-previews').checked=settings.generateVideoPreviews!==false;
     $('setting-animations').checked=settings.animationsEnabled!==false;
@@ -5886,7 +5884,7 @@ function saveSettings(showStatus = true) {
         settings.downloadThreads,
         settings.theme||'system',
         settings.downloadPath,
-        settings.tempPath,
+        '', // Reserved slot for the retired temporary-folder setting.
         settings.previewEnabled!==false,
         settings.language||'system',
         settings.animationsEnabled!==false,

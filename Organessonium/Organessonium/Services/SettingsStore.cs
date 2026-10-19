@@ -203,8 +203,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.ForceUploadParallelism = GetBool(values, "forceUploadParallelism", false);
             settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
             settings.VideoPrefetchChunks = Math.Clamp(GetInt(values, "videoPrefetchChunks", 1), 0, VideoStreamSession.MaximumPrefetchChunks);
-            settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
-            settings.TempPath = Get(values, "tempPath", settings.TempPath);
+            settings.DownloadPath = WindowsDownloadsFolder.Resolve(Get(values, "downloadPath", settings.DownloadPath));
             settings.DataPath = DataDirectory.FullName;
             settings.PreviewEnabled = GetBool(values, "previewEnabled", settings.PreviewEnabled);
             settings.GenerateVideoPreviews = GetBool(values, "generateVideoPreviews", settings.GenerateVideoPreviews);
@@ -255,8 +254,13 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "forceUploadParallelism", settings.ForceUploadParallelism.ToString());
             Upsert(connection, "previewThreads", Math.Clamp(settings.PreviewThreads, 1, 8).ToString());
             Upsert(connection, "videoPrefetchChunks", Math.Clamp(settings.VideoPrefetchChunks, 0, VideoStreamSession.MaximumPrefetchChunks).ToString());
+            settings.DownloadPath = WindowsDownloadsFolder.Resolve(settings.DownloadPath);
             Upsert(connection, "downloadPath", settings.DownloadPath);
-            Upsert(connection, "tempPath", settings.TempPath);
+            using (var retiredSetting = connection.CreateCommand())
+            {
+                retiredSetting.CommandText = "DELETE FROM settings WHERE key = 'tempPath'";
+                retiredSetting.ExecuteNonQuery();
+            }
             Upsert(connection, "dataPath", settings.DataPath);
             Upsert(connection, "previewEnabled", settings.PreviewEnabled ? "true" : "false");
             Upsert(connection, "generateVideoPreviews", settings.GenerateVideoPreviews ? "true" : "false");
@@ -677,8 +681,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.UploadThreads = Math.Clamp(GetInt(values, "uploadThreads", settings.UploadThreads), 1, 16);
         settings.ForceUploadParallelism = GetBool(values, "forceUploadParallelism", false);
         settings.PreviewThreads = Math.Clamp(GetInt(values, "previewThreads", settings.PreviewThreads), 1, 8);
-        settings.DownloadPath = Get(values, "downloadPath", settings.DownloadPath);
-        settings.TempPath = Get(values, "tempPath", settings.TempPath);
+        settings.DownloadPath = WindowsDownloadsFolder.Resolve(Get(values, "downloadPath", settings.DownloadPath));
         settings.DataPath = DataDirectory.FullName;
         settings.PreviewEnabled = GetBool(values, "previewEnabled", settings.PreviewEnabled);
         settings.GenerateVideoPreviews = GetBool(values, "generateVideoPreviews", settings.GenerateVideoPreviews);
