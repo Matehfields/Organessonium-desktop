@@ -169,7 +169,21 @@ internal static partial class Program
             RequireSync(await view.ExecuteScriptAsync("window.__errors.length===0&&window.__metrics.some(m=>m.args[1]==='upload'&&m.batch&&m.ready==='true'&&m.args[2]===2)&&window.__metrics.some(m=>m.args[1]==='download'&&m.ready==='true'&&m.args[2]===1)") == "true",
                 "a retomada não usou os cards e as métricas normais da interface");
             var downloader = new ForumDownloader(api, h.Settings, h.Encryption, () => new HttpClient(timeout, false), new StorageReadContext(registry.SharedStorage));
-            var recovered = await downloader.DownloadAndAssembleAsync(entry, h.Directory.CreateSubdirectory("timeout-download"), _ => { });
+            await bridge.CallAsync("_opsAdd", "download-format", "download", "formatted.bin");
+            await view.ExecuteScriptAsync("""
+                window.__byteTexts=[];window.__updateBeforeBytes=window._opsUpdate;
+                window._opsUpdate=(id,status,msg)=>{window.__updateBeforeBytes(id,status,msg);if(id==='download-format'&&msg.endsWith(' baixados'))window.__byteTexts.push(document.getElementById('op-msg-'+id).textContent)};
+                """);
+            var byteCallbacks = new System.Collections.Concurrent.ConcurrentQueue<Task>();
+            var formatter = typeof(AppController).GetMethod("FormatTransferBytes", BindingFlags.Static | BindingFlags.NonPublic)!;
+            string FormatDownloadBytes(long bytes) => (string)formatter.Invoke(null, [bytes])!;
+            var recovered = await downloader.DownloadAndAssembleAsync(entry, h.Directory.CreateSubdirectory("timeout-download"),
+                message => byteCallbacks.Enqueue(bridge.CallAsync("_opsUpdate", "download-format", "active", message)),
+                onDetailedProgress: progress => byteCallbacks.Enqueue(bridge.CallAsync("_opsProgress", "download-format", progress.Percent,
+                    progress.Assembling ? progress.Message : $"{FormatDownloadBytes(progress.DownloadedBytes)} / {FormatDownloadBytes(progress.TotalBytes)} baixados")));
+            await Task.WhenAll(byteCallbacks);
+            RequireSync(await view.ExecuteScriptAsync("window._opsUpdate=window.__updateBeforeBytes;window.__byteTexts.length>=2&&window.__byteTexts.every(text=>/^(?:\\d+ B|\\d+\\.\\d (?:KB|MB|GB|TB)) \\/ (?:\\d+ B|\\d+\\.\\d (?:KB|MB|GB|TB)) baixados$/.test(text))") == "true",
+                "o painel alternou separador ou quantidade de casas decimais entre callbacks de download");
             RequireSync(timeout.DownloadTimeouts == 1 && (await File.ReadAllBytesAsync(recovered.FullName)).SequenceEqual(downloadBytes),
                 "o timeout de download foi confundido com cancelamento ou corrompeu os bytes");
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();

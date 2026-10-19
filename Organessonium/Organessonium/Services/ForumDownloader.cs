@@ -960,20 +960,23 @@ public sealed partial class ForumDownloader
         var tasks = parts.Select(async part =>
         {
             await semaphore.WaitAsync(cancellationToken);
+            string digest;
             try
             {
-                var digest = await DownloadPartWithRetryAsync(part);
-                if (onPartCompleted != null)
-                {
-                    await onPartCompleted(part, digest);
-                }
-
-                onProgress($"{FormatBytes(Interlocked.Read(ref downloadedBytes))} / {FormatBytes(totalBytes)} baixados");
+                digest = await DownloadPartWithRetryAsync(part);
             }
             finally
             {
                 semaphore.Release();
             }
+
+            // The payload buffers are released. A durability checkpoint must not hold a network slot.
+            if (onPartCompleted != null)
+            {
+                await onPartCompleted(part, digest);
+            }
+
+            onProgress($"{FormatBytes(Interlocked.Read(ref downloadedBytes))} / {FormatBytes(totalBytes)} baixados");
         });
 
         await Task.WhenAll(tasks);
@@ -1283,7 +1286,7 @@ public sealed partial class ForumDownloader
             unit++;
         }
 
-        return unit == 0 ? $"{value:0} {units[unit]}" : $"{value:0.00} {units[unit]}";
+        return value.ToString(unit == 0 ? "0" : "0.0", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
     }
 
     private sealed record Part(int Index, string Url, string Name, long Size, string MessageId = "", string BatchId = "", string ProxyUrl = "", string AttachmentId = "");

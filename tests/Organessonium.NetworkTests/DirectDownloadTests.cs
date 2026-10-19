@@ -121,6 +121,40 @@ internal static partial class Program
         return TestOutcome.Pass();
     }
 
+    private static async Task<TestOutcome> DirectDownloadCheckpointSchedulingAsync()
+    {
+        using var h = new DirectDownloadFixture(lengths: Enumerable.Repeat(128 * 1024, 20).ToArray());
+        var state = await h.Transfers.CreateDownloadAsync(h.Entry, h.Destination);
+        var locks = (ConcurrentDictionary<string, SemaphoreSlim>)typeof(TransferStateRepository)
+            .GetField("_locks", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(h.Transfers.Repository)!;
+        var checkpoint = locks[state.TransferId];
+        var held = 0;
+        // Delay the real checkpoint write after the initial checkpoint, not the CDN or payload writes.
+        h.BeforeRead = async (_, token) =>
+        {
+            if (Interlocked.CompareExchange(ref held, 1, 0) == 0) await checkpoint.WaitAsync(token);
+        };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var running = h.Run(state, timeout.Token);
+        try
+        {
+            await WaitForVideoConditionAsync(() => h.Reads.Count == h.Plain.Length);
+            RequireSync(!running.IsCompleted, "o download concluiu antes de persistir o checkpoint");
+        }
+        finally
+        {
+            if (held != 0) checkpoint.Release();
+            await running;
+        }
+        var file = await running;
+        var saved = await h.Transfers.Repository.LoadActiveByIdAsync(state.TransferId);
+        RequireSync((await File.ReadAllBytesAsync(file.FullName)).SequenceEqual(h.Expected) &&
+            saved is { DownloadReadyToFinalize: true } && saved.Chunks.All(chunk => chunk.Downloaded && chunk.Sha256?.Length == 64),
+            "a sobreposição de rede/checkpoint perdeu integridade ou a confirmação durável");
+        return TestOutcome.Pass();
+    }
+
     private static async Task<TestOutcome> DirectDownloadLegacyLayoutsAsync()
     {
         foreach (var route in new[] { "thread", "batch", "preview" })

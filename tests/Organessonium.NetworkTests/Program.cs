@@ -20,6 +20,7 @@ internal static partial class Program
         ("setupAndEncryptedPreviewHidden", SetupAndEncryptedPreviewHiddenAsync),
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
+        ("directDownloadCheckpointScheduling", DirectDownloadCheckpointSchedulingAsync),
         ("directDownloadLegacyLayouts", DirectDownloadLegacyLayoutsAsync),
         ("directDownloadResumeCorruption", DirectDownloadResumeCorruptionAsync),
         ("directDownloadInterruptedWrite", DirectDownloadInterruptedWriteAsync),
