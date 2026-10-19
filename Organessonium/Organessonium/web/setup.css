@@ -58,9 +58,10 @@ h1{font-size:22px;font-weight:700;color:var(--setup-text);margin-bottom:6px;}
 .input-wrap input{flex:1;min-width:0;width:0;border:0!important;background:transparent;}
 .eye-btn{flex:0 0 36px;height:34px;margin-right:6px;
     display:flex;align-items:center;justify-content:center;background:none;border:none;border-radius:8px;
-    color:var(--setup-muted);cursor:pointer;opacity:0;pointer-events:none;transition:opacity .15s,background .15s,color .15s;padding:0;}
+    color:var(--setup-muted);cursor:pointer;opacity:1;transition:background .15s,color .15s;padding:0;}
 .input-wrap:hover .eye-btn,.eye-btn:focus-visible{opacity:1;pointer-events:auto;}
 .eye-btn:hover{opacity:1;background:var(--setup-border);color:var(--setup-secondary);}
+input::-ms-reveal{display:none;}
 
 input[type="text"],input[type="password"]{
     width:100%;background:var(--setup-input);border:1px solid var(--setup-input-border);

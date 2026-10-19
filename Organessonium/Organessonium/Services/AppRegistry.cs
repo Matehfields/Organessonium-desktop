@@ -1220,6 +1220,7 @@ public sealed partial class AppRegistry
         foreach (var mapping in mappings.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (mapping.FolderId.Equals(SerialIndexService.FavoritesSerialId, StringComparison.OrdinalIgnoreCase)) continue;
             if (trashedFolders.Contains(mapping.FolderId)) continue;
             var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
             if (serial == null)
@@ -1806,7 +1807,9 @@ public sealed partial class AppRegistry
             return new LibraryStatistics(fileCount, folderCount, totalBytes);
         }
 
-        var cachedEntries = _store.LoadCachedEntriesForFolder(folderId);
+        var cachedEntries = cachedOnly
+            ? _store.LoadCachedEntriesForFolder(folderId)
+            : await RefreshFolderAsync(folderId, ResolveKnownFolderPath(folderId), cancellationToken);
         if (cachedOnly && cachedEntries.Count == 0) return null;
         long cachedFileCount = cachedEntries.LongCount(entry => entry.Type != "folder");
         long cachedFolderCount = cachedEntries.LongCount(entry => entry.Type == "folder");

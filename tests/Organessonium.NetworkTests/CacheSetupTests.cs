@@ -135,7 +135,7 @@ internal static partial class Program
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
             await Navigate("setup.html");
             await view.ExecuteScriptAsync("window.__organessoniumSettings={language:'pt-BR',theme:'dark'};window.onBridgeReady();window._onNativeTitleBarMetrics({enabled:true,height:48});");
-            await Check("getComputedStyle(proxyPanel).display==='none'&&getComputedStyle(btnOpenProxy).display==='none'&&getComputedStyle(btnToggleToken).opacity==='0'", "proxy ou botão de token visível antes da interação/erro");
+            await Check("getComputedStyle(proxyPanel).display==='none'&&getComputedStyle(btnOpenProxy).display==='none'&&getComputedStyle(btnToggleToken).opacity==='1'", "proxy visível sem erro ou botão do token oculto");
             await view.ExecuteScriptAsync("inpToken.value='long-token-value-'.repeat(6);window._onSetupError('Falha de DNS',true);btnOpenProxy.click();document.querySelector('#sel-proxy-mode + .setup-select-trigger').click();");
             await Check("!proxyPanel.classList.contains('hidden')&&!document.querySelector('.setup-select-options').classList.contains('hidden')&&getComputedStyle(document.querySelector('.setup-select-options')).borderRadius==='10px'", "o erro de conexão não abriu proxy/seletor temático");
             await view.ExecuteScriptAsync("document.querySelectorAll('#sel-proxy-mode ~ .setup-select-options button')[2].click();");
@@ -174,7 +174,11 @@ internal static partial class Program
             for (var attempt = 0; attempt < 50 && await view.ExecuteScriptAsync(imageReady) != "true"; attempt++) await Task.Delay(100);
             await Check(imageReady, "o painel de prévia não exibiu a imagem do cache cifrado");
             await view.ExecuteScriptAsync("closePreview()");
-            await view.ExecuteScriptAsync("window._onLibraryStatistics({fileCount:2,folderCount:1,totalBytes:64424509440});window._onAppsLoaded([]);window._onServerReadState(true)");
+            using var dummyView = new WebView2();
+            var bridge = new WebMessageBridge(dummyView, script => view.ExecuteScriptAsync(script));
+            await using var controller = new AppController(new System.Windows.Window(), store, bridge, _ => Task.CompletedTask);
+            await (Task)typeof(AppController).GetMethod("SendLibraryStatisticsAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(controller, [new LibraryStatistics(2, 1, 64424509440)])!;
+            await view.ExecuteScriptAsync("window._onAppsLoaded([]);window._onServerReadState(true)");
             await Check("document.getElementById('storage-display').textContent.includes('60')&&document.getElementById('server-read-status').querySelector('.svg-icon').getAnimations()[0].effect.getKeyframes().at(-1).transform.includes('-360deg')", "totais locais ou sentido da animação incorretos");
             await Check("document.getElementById('server-item-count').textContent==='3'", "a quantidade anterior de itens não apareceu");
             await view.ExecuteScriptAsync("localStorage.setItem('private-account','old-bot');");
@@ -182,9 +186,6 @@ internal static partial class Program
             await Navigate("setup.html");
             await Check("localStorage.getItem('private-account')===null", "a limpeza da conta preservou dados no WebView");
             await Navigate("index.html");
-            using var dummyView = new WebView2();
-            var bridge = new WebMessageBridge(dummyView, script => view.ExecuteScriptAsync(script));
-            await using var controller = new AppController(new System.Windows.Window(), store, bridge, _ => Task.CompletedTask);
             var releaseWriter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
             var writing = (Task)typeof(AppController).GetMethod("RunAsync", flags)!.Invoke(controller, [(Func<Task>)(async () =>

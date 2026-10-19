@@ -298,6 +298,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "startDownload": return StartDownloadAsync(ArgString(args, 0), ArgString(args, 1));
             case "deleteApp": _ = RunAsync(() => DeleteAppAsync(ArgString(args, 0), ArgString(args, 1), ArgBool(args, 2, false))); return Task.CompletedTask;
             case "deleteItems": _ = RunAsync(() => DeleteItemsAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
+            case "emptyTrash": _ = RunAsync(EmptyTrashAsync); return Task.CompletedTask;
             case "restoreItems": _ = RunAsync(() => RelocateTrashItemsAsync(ArgString(args, 0), restore: true)); return Task.CompletedTask;
             case "saveMarkdown": _ = RunAsync(() => SaveMarkdownAsync(args)); return Task.CompletedTask;
             case "uploadMarkdownImage": _ = RunAsync(() => UploadMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -651,6 +652,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await _bridge.CallAsync("_onServerReadState", true);
             var registry = Registry();
+            await _bridge.CallAsync("_onFolderLoadState", "/", true);
             var previousStatistics = _store.LoadLibraryStatistics();
             if (previousStatistics != null) await SendLibraryStatisticsAsync(previousStatistics);
             else
@@ -666,19 +668,19 @@ public sealed partial class AppController : IAsyncDisposable
             {
                 await _bridge.CallAsync("_onCachedAppsLoaded", cached);
             }
-            await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+            if (hasCache) await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
 
             _ = RunAsync(async () =>
             {
                 try
                 {
                     await registry.RefreshMappingsAsync();
-                    await registry.ArchiveActiveFolderThreadsAsync();
-                    _ = CleanupSupersededRemoteSerialsAsync(registry);
                     var refreshed = await registry.RefreshFolderAsync(AppRegistry.RootFolderId, "/");
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
                     await PublishLibraryFileCountAsync(registry);
+                    _ = RunAsync(() => registry.ArchiveActiveFolderThreadsAsync());
+                    _ = CleanupSupersededRemoteSerialsAsync(registry);
                     _ = RunAsync(RecoverUnindexedPayloadPostsAsync);
                 }
                 catch (OperationCanceledException)
@@ -691,6 +693,7 @@ public sealed partial class AppController : IAsyncDisposable
                 }
                 finally
                 {
+                    await _bridge.CallAsync("_onFolderLoadState", "/", false);
                     await _bridge.CallAsync("_onServerReadState", false);
                 }
             });
@@ -700,6 +703,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             if (!readStateHandedToRefresh)
             {
+                await _bridge.CallAsync("_onFolderLoadState", "/", false);
                 await _bridge.CallAsync("_onServerReadState", false);
             }
             _registryLoadGate.Release();
@@ -1072,7 +1076,12 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task SendLibraryStatisticsAsync(LibraryStatistics statistics)
     {
-        await _bridge.CallAsync("_onLibraryStatistics", statistics);
+        await _bridge.CallAsync("_onLibraryStatistics", new
+        {
+            fileCount = statistics.FileCount,
+            folderCount = statistics.FolderCount,
+            totalBytes = statistics.TotalBytes
+        });
         await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
     }
 
@@ -3602,6 +3611,21 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await SetBackgroundActivityAsync("", false);
         }
+    }
+
+    private async Task EmptyTrashAsync()
+    {
+        await _bridge.CallAsync("_onTrashEmptying", true);
+        try
+        {
+            var entries = await Registry().RefreshFolderAsync(AppRegistry.TrashFolderId, AppRegistry.TrashPath);
+            ReplaceLoadedFolder(AppRegistry.TrashFolderId, entries);
+            if (entries.Count > 0)
+                await DeleteItemsAsync(JsonSerializer.Serialize(entries.Select(entry => entry.MetadataMessageId), JsonOptions.Web), permanently: true);
+            else
+                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+        }
+        finally { await _bridge.CallAsync("_onTrashEmptying", false); }
     }
 
     private async Task DeleteItemsAsync(string idsJson, bool permanently)

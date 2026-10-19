@@ -7,6 +7,7 @@ let currentFolderIds = ['root'];
 let activeLibraryView = 'files', specialItems = [], deviceItems = [];
 let favoritesLoaded = false, devicesLoaded = false;
 let serverReadDepth = 0;
+let trashEmptying = false;
 let ctxTarget = null;
 let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
@@ -123,6 +124,7 @@ const I18N = {
         trashConfirmTitle:'Mover para a lixeira?', trashConfirmMessage:v => v.count + ' item(ns) poderão ser restaurados pela Lixeira.',
         alreadyTrashed:'O item já está na lixeira. Use Shift+Delete para apagar permanentemente.',
         trashEmptyHelp:'Os itens enviados à lixeira aparecerão aqui.',
+        emptyTrash:'Esvaziar lixeira', emptyTrashTitle:'Esvaziar a lixeira?', emptyTrashMessage:'Todos os arquivos, pastas e versões da lixeira serão apagados permanentemente. Esta ação não pode ser desfeita.',
         deleteFilesTitle:'Apagar arquivos?', deleteFilesMessage:v => v.count + ' item(ns) serão removidos permanentemente.',
         deleteFolderTitle:'Apagar pasta?', deleteFolderMessage:v => '"' + v.name + '" e todos os arquivos dentro dela serão removidos permanentemente.',
         deleting:'Apagando...', options:'Opções', openFolder:v => 'Abrir pasta ' + v.name,
@@ -267,6 +269,7 @@ const I18N = {
         trashConfirmTitle:'Move to trash?', trashConfirmMessage:v => v.count + ' item(s) can be restored from Trash.',
         alreadyTrashed:'This item is already in Trash. Use Shift+Delete to delete permanently.',
         trashEmptyHelp:'Items moved to Trash will appear here.',
+        emptyTrash:'Empty trash', emptyTrashTitle:'Empty the trash?', emptyTrashMessage:'All files, folders and versions in Trash will be permanently deleted. This action cannot be undone.',
         deleteFilesTitle:'Delete files?', deleteFilesMessage:v => v.count + ' item(s) will be permanently removed.',
         deleteFolderTitle:'Delete folder?', deleteFolderMessage:v => '"' + v.name + '" and every file inside it will be permanently removed.',
         deleting:'Deleting...', options:'Options', openFolder:v => 'Open folder ' + v.name,
@@ -504,6 +507,7 @@ function applyI18n() {
     setText('sidebar-devices-text', 'sidebarDevices');
     setA11y('sidebar-devices', 'sidebarDevices');
     setText('sidebar-trash-text', 'sidebarTrash');
+    setText('empty-trash-label', 'emptyTrash');
     setA11y('sidebar-trash', 'sidebarTrash');
     setText('sel-restore-text', 'restore');
     setText('ctx-restore-text', 'restore');
@@ -904,6 +908,7 @@ let registryValidationUsesCache = false;
 
 window._onRegistryLoadStarted = hasCache => {
     registryValidationUsesCache = Boolean(hasCache);
+    if (!registryValidationUsesCache) folderLoadingPath = '/';
     if (!registryValidationUsesCache) allApps = [];
     setStatus(registryValidationUsesCache ? t('validatingServer') : t('loading'), true);
     render();
@@ -957,6 +962,7 @@ window._onAppsBatch = apps => {
 };
 
 window._onAppsLoaded = apps => {
+    if (folderLoadingPath === '/') folderLoadingPath = '';
     allApps = apps;
     syncOpenMarkdownApps();
     render();
@@ -964,6 +970,10 @@ window._onAppsLoaded = apps => {
     setStatus(t('loaded', { count:libraryFileCount ?? apps.length }), false);
     registryValidationUsesCache = false;
     scheduleVisibleThumbnails();
+};
+window._onTrashEmptying = active => {
+    trashEmptying = active === true;
+    $('btn-empty-trash').disabled = trashEmptying;
 };
 window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
@@ -2791,6 +2801,13 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sidebar-settings').addEventListener('click', () => { closeSidebarNewMenu(); openSettings(); });
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
+    $('btn-empty-trash').addEventListener('click', () => {
+        if (trashEmptying || activeLibraryView !== 'trash' || currentPath !== '/@trash') return;
+        askConfirm(t('emptyTrashTitle'), t('emptyTrashMessage'), () => {
+            window._onTrashEmptying(true);
+            window.bridge.emptyTrash();
+        }, 'emptyTrash');
+    });
     $('btn-grid').addEventListener('click', () => setView('grid'));
     $('btn-list').addEventListener('click', () => setView('list'));
     $('search-input').addEventListener('input', e => { searchQuery = e.target.value.toLowerCase(); render(); });
@@ -6241,6 +6258,7 @@ function syncRenderedItems(container, items, kind, create) {
 }
 
 function render() {
+    $('btn-empty-trash').classList.toggle('hidden', activeLibraryView !== 'trash' || currentPath !== '/@trash');
     resetThumbnailViewport();
     renderPathCrumbs();
     const viewApps = appsForActiveView();

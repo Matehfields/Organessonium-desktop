@@ -12,6 +12,8 @@ public sealed class DiscordSession : IAsyncDisposable
 {
     private DiscordRestClient? _restClient;
     private DiscordSocketClient? _socketClient;
+    private CancellationTokenSource? _presenceCancellation;
+    private Task? _presenceTask;
 
     public DiscordApiClient? Api { get; private set; }
     public AppSettings Settings { get; private set; } = new();
@@ -78,7 +80,19 @@ public sealed class DiscordSession : IAsyncDisposable
             throw new InvalidOperationException("Canal serial não encontrado ou não é um canal de texto.");
         }
 
-        await StartPresenceAsync(settings.BotToken.Trim(), proxy, cancellationToken);
+        StartPresenceInBackground(token => StartPresenceAsync(settings.BotToken.Trim(), proxy, token), cancellationToken);
+    }
+
+    internal void StartPresenceInBackground(Func<CancellationToken, Task> connect, CancellationToken cancellationToken = default)
+    {
+        _presenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var lifetime = _presenceCancellation.Token;
+        _presenceTask = Task.Run(async () =>
+        {
+            try { await connect(lifetime); }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+            catch (Exception ex) { AppLogger.Error("Discord.Presence", ex); }
+        });
     }
 
     private async Task StartPresenceAsync(string token, IWebProxy? proxy, CancellationToken cancellationToken)
@@ -104,7 +118,9 @@ public sealed class DiscordSession : IAsyncDisposable
             await socket.LoginAsync(TokenType.Bot, token);
             await socket.StartAsync();
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             await socket.SetStatusAsync(UserStatus.Online);
+            cancellationToken.ThrowIfCancellationRequested();
             _socketClient = socket;
         }
         catch
@@ -125,6 +141,11 @@ public sealed class DiscordSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _presenceCancellation?.Cancel();
+        if (_presenceTask != null) await _presenceTask;
+        _presenceCancellation?.Dispose();
+        _presenceCancellation = null;
+        _presenceTask = null;
         var socket = Interlocked.Exchange(ref _socketClient, null);
         if (socket != null)
         {

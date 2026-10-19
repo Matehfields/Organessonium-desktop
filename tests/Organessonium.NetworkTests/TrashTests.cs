@@ -219,6 +219,14 @@ internal static partial class Program
             var message = new DiscordMessageDto { Id = (++_nextId).ToString(), Content = content };
             _channels[channel][message.Id] = message; return message;
         }
+        public FolderIndexMapping AddFavoritesIndex(string serialMessageId)
+        {
+            _channels["favorites-index"] = [];
+            Add("favorites-index", _metadata.SerializeFolderIndexHeader("favorites", "root", "favorites"));
+            var mapping = new FolderIndexMapping("favorites", "favorites-index", "", serialMessageId,
+                Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Serials[serialMessageId])).ToLowerInvariant());
+            return mapping with { NamesMessageId = Add("names", _metadata.SerializeFolderIndex(mapping)).Id };
+        }
         public MetadataEntry? Entry(string channel, string id) => _channels.GetValueOrDefault(channel)?.Values
             .Select(m => _metadata.ReadEnvelopeAsync(m).GetAwaiter().GetResult()?.Entry)
             .FirstOrDefault(e => e is FileMetadata f && f.FileId == id || e is FolderMetadata d && d.FolderId == id);
@@ -233,9 +241,10 @@ internal static partial class Program
             var channel = parts[0];
             if (request.Method == HttpMethod.Get)
             {
+                if (parts.Length == 1 && _channels.ContainsKey(channel)) return Json(new { id = channel, type = 11, guild_id = "isolated-guild" });
                 if (parts.Length == 2 && parts[1] == "messages") return Json(_channels.GetValueOrDefault(channel)?.Values.ToArray() ?? []);
                 if (parts.Length == 3 && _channels.GetValueOrDefault(channel)?.TryGetValue(parts[2], out var message) == true) return Json(message);
-                return new(HttpStatusCode.NotFound);
+                return new(HttpStatusCode.NotFound) { Content = new StringContent(request.Method + " " + path) };
             }
             if (request.Method == HttpMethod.Delete)
             {
