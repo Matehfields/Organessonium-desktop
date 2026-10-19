@@ -12,17 +12,20 @@ public sealed class SettingsStore : IEncryptionSecretStore
     private const string LogsFolderName = "Logs";
     private const string PreferenceDefaultsVersion = "2";
     private readonly object _lock = new();
+    private readonly bool _cleanupDefaultData;
 
     public SettingsStore()
-        : this(ResolveDataDirectory(), migrateIni: true)
+        : this(ResolveDataDirectory(), migrateIni: true, cleanupDefaultData: true)
     {
     }
 
-    internal SettingsStore(DirectoryInfo dataDirectory, bool migrateIni = false)
+    internal SettingsStore(DirectoryInfo dataDirectory, bool migrateIni = false, bool cleanupDefaultData = false)
     {
+        _cleanupDefaultData = cleanupDefaultData;
         DataDirectory = dataDirectory;
         AppLogger.Configure(DataDirectory);
         PreviewCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Previews"));
+        RemovePlaintextPreviewCache();
         SerialCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Serials"));
         ThumbnailCache.Configure(PreviewCacheDirectory);
         WebViewDataDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, WebViewDataFolderName));
@@ -39,6 +42,28 @@ public sealed class SettingsStore : IEncryptionSecretStore
     public DirectoryInfo WebViewDataDirectory { get; }
     public DirectoryInfo TransfersDirectory { get; }
     public string DatabasePath { get; }
+
+    internal LibraryStatistics? LoadLibraryStatistics()
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT value FROM settings WHERE key = 'libraryStatistics'";
+            var value = command.ExecuteScalar() as string;
+            try { return value == null ? null : System.Text.Json.JsonSerializer.Deserialize<LibraryStatistics>(value); }
+            catch (System.Text.Json.JsonException) { return null; }
+        }
+    }
+
+    internal void SaveLibraryStatistics(LibraryStatistics statistics)
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            Upsert(connection, "libraryStatistics", System.Text.Json.JsonSerializer.Serialize(statistics));
+        }
+    }
 
     public string PrepareDataDirectoryForNextStartup(string selectedPath)
     {
@@ -74,6 +99,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
             using (var connection = Open()) ClearDatabaseContentsForLogout(connection);
             SqliteConnection.ClearAllPools();
             var failures = ClearDataDirectoryContents(DataDirectory);
+            var defaultDirectory = new DirectoryInfo(DefaultDataDirectoryPath());
+            if (_cleanupDefaultData && !SamePath(DataDirectory.FullName, defaultDirectory.FullName) && defaultDirectory.Exists)
+                failures = failures.Concat(ClearDataDirectoryContents(defaultDirectory)).ToList();
             if (failures.Count > 0)
             {
                 AppLogger.Error(
@@ -459,13 +487,22 @@ public sealed class SettingsStore : IEncryptionSecretStore
                 return null;
             }
 
-            if (IsEncryptedPreviewCache(file))
+            if (!EncryptedPreviewCache.IsEncrypted(file))
             {
                 TryDelete(file);
                 return null;
             }
 
             return file;
+        }
+    }
+
+    private void RemovePlaintextPreviewCache()
+    {
+        foreach (var file in PreviewCacheDirectory.EnumerateFiles())
+        {
+            if (file.Extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase) || !EncryptedPreviewCache.IsEncrypted(file))
+                file.Delete();
         }
     }
 
@@ -1284,21 +1321,6 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
-    private static bool IsEncryptedPreviewCache(FileInfo file)
-    {
-        try
-        {
-            using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            var header = new byte[8];
-            return stream.Read(header, 0, header.Length) == header.Length &&
-                   EncryptionService.LooksLikeEncryptedEnvelope(header);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static void TryDelete(DirectoryInfo dir)
     {
         try
@@ -1368,7 +1390,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
         var safeThread = SafeCachePart(threadId, "item");
         var safeSlot = SafeCachePart(slot, "preview");
-        var safeName = PathRules.CleanFileName(string.IsNullOrWhiteSpace(name) ? "preview.bin" : name);
+        var safeName = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(name ?? ""))).ToLowerInvariant() + ".cache";
         return new FileInfo(System.IO.Path.Combine(PreviewCacheDirectory.FullName, "file_" + safeThread + "_" + safeSlot + "_" + safeName));
     }
 

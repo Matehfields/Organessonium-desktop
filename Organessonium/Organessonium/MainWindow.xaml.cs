@@ -30,6 +30,7 @@ public partial class MainWindow : Window
     private WebView2PreviewAdapter? _previewAdapter;
     private Services.Diagnostics.DiagnosticWebView? _diagnosticWebView;
     private string? _pendingSetupError;
+    private bool _pendingSetupProxy;
     private bool _draggingFiles;
     private HwndSource? _windowSource;
     private string _lastDropSignature = "";
@@ -96,9 +97,11 @@ public partial class MainWindow : Window
     {
         ContentRendered -= OnContentRendered;
 
+        var startupStore = _store ?? await (Application.Current is App app
+            ? app.GetDesktopStoreAsync() : Task.Run(() => new SettingsStore()));
         var startupState = await Task.Run(() =>
         {
-            var store = _store ?? new SettingsStore();
+            var store = startupStore;
             return (Store: store, Settings: store.Load());
         });
         _store = startupState.Store;
@@ -419,7 +422,8 @@ public partial class MainWindow : Window
             {
                 var error = _pendingSetupError;
                 _pendingSetupError = null;
-                await _bridge.CallAsync("_onSetupError", error);
+                await _bridge.CallAsync("_onSetupError", error, _pendingSetupProxy);
+                _pendingSetupProxy = false;
             }
         }
         catch (Exception ex)
@@ -699,9 +703,16 @@ public partial class MainWindow : Window
     private void OpenStartupSetup()
     {
         _pendingSetupError = null;
+        _pendingSetupProxy = false;
         SetStartupSplashVisible(true);
         LoadLocalPage("setup.html");
     }
+
+    internal Task ClearAccountBrowserDataAsync() => Dispatcher.InvokeAsync(async () =>
+    {
+        if (WebView.CoreWebView2 != null)
+            await WebView.CoreWebView2.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.AllProfile);
+    }).Task.Unwrap();
     private async Task ConnectConfiguredAsync()
     {
         if (_controller == null || _bridge == null)
@@ -725,16 +736,20 @@ public partial class MainWindow : Window
             AppLogger.Error("ConnectConfigured", ex);
             await session.DisposeAsync();
             var message = ResolveConnectError(ex);
-            if (IsAuthError(ex))
+            var kind = ConnectionErrorClassifier.Classify(ex).Kind;
+            if (kind is ConnectionErrorKind.InvalidToken or ConnectionErrorKind.InvalidChannelConfiguration)
             {
-                settings.BotToken = "";
+                _pendingSetupProxy = false;
+                if (kind == ConnectionErrorKind.InvalidToken) settings.BotToken = "";
                 _store.Save(settings);
                 _pendingSetupError = message;
                 await Dispatcher.InvokeAsync(() => LoadLocalPage("setup.html"));
             }
             else
             {
-                WebView.CoreWebView2.NavigateToString(NetworkErrorHtml(message, settings.Theme));
+                _pendingSetupError = message;
+                _pendingSetupProxy = true;
+                await Dispatcher.InvokeAsync(() => LoadLocalPage("setup.html"));
             }
         }
     }

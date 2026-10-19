@@ -105,6 +105,8 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly ConcurrentDictionary<string, string> _previewUrls = new();
     private readonly ConcurrentDictionary<string, byte> _thumbnailLoads = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource> _thumbnailRequests = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _previewRequests = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _accountWork = new();
     private readonly object _thumbnailRequestSync = new();
     private readonly SemaphoreSlim _thumbnailDeliveryGate = new(1, 1);
     private CancellationTokenSource? _thumbnailRequestCts;
@@ -254,7 +256,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "syncNow": case "pauseSync": case "resolveSyncConflict": case "setSyncPreferences":
                 return SyncDispatchAsync(method, args);
             case "connect": return ConnectAsync(args);
-            case "logout": _ = RunAsync(LogoutWithSplashAsync); return Task.CompletedTask;
+            case "logout": _ = RunAsync(LogoutWithSplashAsync, accountWork: false); return Task.CompletedTask;
             case "openGuide": return OpenGuideAsync();
             case "setCurrentPath":
                 var requestedPath = PathRules.Normalize(ArgString(args, 0));
@@ -270,13 +272,13 @@ public sealed partial class AppController : IAsyncDisposable
             case "refreshServerIndex": _ = RunAsync(() => RefreshServerIndexAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "loadVisibleThumbnails": _ = RunAsync(() => RunTrackedThumbnailRequestAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "loadVisibleFolderStatistics": _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(ArgString(args, 0))); return Task.CompletedTask;
-            case "requestPreview": _ = RunAsync(() => Task.Run(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1)))); return Task.CompletedTask;
+            case "requestPreview": _ = RunAsync(() => RunTrackedPreviewAsync(() => RequestPreviewAsync(ArgString(args, 0), ArgString(args, 1)))); return Task.CompletedTask;
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
             case "videoPlayback": _ = RunAsync(() => UpdateVideoPlaybackAsync(args)); return Task.CompletedTask;
             case "clearPreviewCache": _ = RunAsync(ClearPreviewCacheAsync); return Task.CompletedTask;
             case "getPreviewCacheSize": _ = RunAsync(SendPreviewCacheSizeAsync); return Task.CompletedTask;
-            case "openPreviewMedia": _ = RunAsync(() => OpenPreviewMediaAsync(ArgString(args, 0))); return Task.CompletedTask;
+            case "openPreviewMedia": _ = RunAsync(() => RunTrackedPreviewAsync(() => OpenPreviewMediaAsync(ArgString(args, 0)))); return Task.CompletedTask;
             case "requestPdfPages": return Task.CompletedTask;
             case "createFolder": _ = RunAsync(() => CreateFolderAsync(ArgString(args, 0))); return Task.CompletedTask;
             case "moveItems": _ = RunAsync(() => MoveItemsAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -353,14 +355,14 @@ public sealed partial class AppController : IAsyncDisposable
             }
             catch
             {
-                await _bridge.CallAsync("_onSetupError", "Configuração de proxy inválida.");
+                await _bridge.CallAsync("_onSetupError", "Configuração de proxy inválida.", true);
                 return;
             }
         }
 
         if (settings.Proxy.Mode == ProxyMode.Manual && !settings.Proxy.IsValidManual(out var proxyError))
         {
-            await _bridge.CallAsync("_onSetupError", "Proxy manual inválido: " + proxyError);
+            await _bridge.CallAsync("_onSetupError", "Proxy manual inválido: " + proxyError, true);
             return;
         }
 
@@ -392,7 +394,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                await _bridge.CallAsync("_onSetupError", ClassifyConnectError(ex));
+                await ReportSetupConnectionErrorAsync(ex);
                 return;
             }
         }
@@ -410,7 +412,7 @@ public sealed partial class AppController : IAsyncDisposable
         catch (Exception ex)
         {
             await session.DisposeAsync();
-            await _bridge.CallAsync("_onSetupError", ClassifyConnectError(ex));
+            await ReportSetupConnectionErrorAsync(ex);
         }
     }
 
@@ -467,7 +469,10 @@ public sealed partial class AppController : IAsyncDisposable
 
         try
         {
-            _store.ClearLocalDataForLogout();
+            await Task.WhenAll(_previewRequests.Values.Select(completion => completion.Task)).WaitAsync(TimeSpan.FromSeconds(15));
+            await Task.WhenAll(_accountWork.Values.Select(completion => completion.Task)).WaitAsync(TimeSpan.FromSeconds(15));
+            if (_owner is MainWindow main) await main.ClearAccountBrowserDataAsync();
+            await Task.Run(_store.ClearLocalDataForLogout);
         }
         catch (Exception)
         {
@@ -646,6 +651,13 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await _bridge.CallAsync("_onServerReadState", true);
             var registry = Registry();
+            var previousStatistics = _store.LoadLibraryStatistics();
+            if (previousStatistics != null) await SendLibraryStatisticsAsync(previousStatistics);
+            else
+            {
+                var localStatistics = await registry.GetCachedLibraryStatisticsAsync();
+                if (localStatistics != null) await SendLibraryStatisticsAsync(localStatistics);
+            }
             var cached = await registry.LoadCachedFolderAsync(AppRegistry.RootFolderId, "/");
             _loadedApps = cached;
             var hasCache = cached.Count > 0;
@@ -1039,13 +1051,8 @@ public sealed partial class AppController : IAsyncDisposable
             var statistics = await registry.GetLibraryStatisticsAsync(AppRegistry.RootFolderId);
             if (statistics != null && !_loggingOut)
             {
-                await _bridge.CallAsync("_onLibraryStatistics", new
-                {
-                    fileCount = statistics.FileCount,
-                    folderCount = statistics.FolderCount,
-                    totalBytes = statistics.TotalBytes
-                });
-                await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
+                _store.SaveLibraryStatistics(statistics);
+                await SendLibraryStatisticsAsync(statistics);
             }
         }
         catch (OperationCanceledException) when (_loggingOut)
@@ -1061,6 +1068,12 @@ public sealed partial class AppController : IAsyncDisposable
     private Task SetBackgroundActivityAsync(string message, bool active)
     {
         return _bridge.CallAsync("_onBackgroundActivity", message, active);
+    }
+
+    private async Task SendLibraryStatisticsAsync(LibraryStatistics statistics)
+    {
+        await _bridge.CallAsync("_onLibraryStatistics", statistics);
+        await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
     }
 
     private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson, string? requestedPath = null)
@@ -1416,6 +1429,16 @@ public sealed partial class AppController : IAsyncDisposable
                (ThumbnailCache.IsImage(app.Name) || ThumbnailCache.IsVideo(app.Name));
     }
 
+    private async Task RunTrackedPreviewAsync(Func<Task> operation)
+    {
+        if (_loggingOut) return;
+        var id = NewId();
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _previewRequests[id] = completion;
+        try { if (!_loggingOut) await Task.Run(operation); }
+        finally { _previewRequests.TryRemove(id, out _); completion.TrySetResult(); }
+    }
+
     private async Task RequestPreviewAsync(string threadId, string name)
     {
         var settings = _store.Load();
@@ -1473,11 +1496,13 @@ public sealed partial class AppController : IAsyncDisposable
                         entry,
                         tempDir,
                         _ => { },
+                        cancellationToken: cancellation,
                         onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
                     : await Downloader().DownloadAndAssembleAsync(
                         threadId,
                         tempDir,
                         _ => { },
+                        cancellationToken: cancellation,
                         onDetailedProgress: progress => ReportPreviewProgress(progress, "generic"))
                 : await GetOrDownloadFullPreviewFileAsync(threadId, name, tempDir, "generic", cancellation);
 
@@ -1498,7 +1523,8 @@ public sealed partial class AppController : IAsyncDisposable
                     await SendPreviewReadyAsync("markdown", name, await File.ReadAllTextAsync(file.FullName, Encoding.UTF8));
                     break;
                 case "text":
-                    await SendPreviewReadyAsync("text", name, await File.ReadAllTextAsync(file.FullName));
+                    using (var textReader = new StreamReader(OpenPreviewRead(file)))
+                        await SendPreviewReadyAsync("text", name, await textReader.ReadToEndAsync(cancellation));
                     break;
                 case "document":
                     await SendPreviewReadyAsync("document", name, ExtractDocumentPreview(file, name));
@@ -1613,6 +1639,14 @@ public sealed partial class AppController : IAsyncDisposable
             TrackPreviewUrl(threadId, "full", fullUrl);
         }
 
+        if (EncryptedPreviewCache.IsEncrypted(file))
+        {
+            var dir = _previewDirs.GetOrAdd(threadId, _ => CreatePreviewTempDir(threadId));
+            var readable = new FileInfo(Path.Combine(dir.FullName, Path.GetFileName(FindLoadedEntry(threadId)?.Name ?? "preview")));
+            await using (var input = EncryptedPreviewCache.OpenRead(file))
+            await using (var output = readable.Create()) await input.CopyToAsync(output);
+            file = readable;
+        }
         Process.Start(new ProcessStartInfo(file.FullName) { UseShellExecute = true });
     }
 
@@ -1748,7 +1782,8 @@ public sealed partial class AppController : IAsyncDisposable
         var cached = _store.GetCachedPreviewFile(threadId, "full", name);
         if (cached != null)
         {
-            await _bridge.CallAsync("_onPreviewProgress", 100, "cache", cached.Length, cached.Length);
+            var length = EncryptedPreviewCache.PlaintextLength(cached);
+            await _bridge.CallAsync("_onPreviewProgress", 100, "cache", length, length);
             return cached;
         }
 
@@ -1780,7 +1815,8 @@ public sealed partial class AppController : IAsyncDisposable
         var cached = _store.GetCachedPreviewFile(threadId, "480p", VideoPreviewCacheName(name));
         if (cached != null)
         {
-            await _bridge.CallAsync("_onPreviewProgress", 100, "cache", cached.Length, cached.Length);
+            var length = EncryptedPreviewCache.PlaintextLength(cached);
+            await _bridge.CallAsync("_onPreviewProgress", 100, "cache", length, length);
             return cached;
         }
 
@@ -1825,20 +1861,13 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task<FileInfo> CopyToPreviewCacheAsync(FileInfo source, string threadId, string slot, string name, CancellationToken cancellationToken = default)
     {
+        if (_loggingOut) throw new OperationCanceledException();
         var target = _store.GetPreviewCacheFile(threadId, slot, name);
         target.Directory?.Create();
         if (!SamePath(source, target))
         {
-            var temporary = target.FullName + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                await using (var input = new FileStream(source.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, true))
-                await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 128 * 1024, true))
-                    await input.CopyToAsync(output, cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-                File.Move(temporary, target.FullName, true);
-            }
-            finally { try { File.Delete(temporary); } catch { } }
+            await using var input = source.OpenRead();
+            await EncryptedPreviewCache.StoreAsync(target, input, cancellationToken);
         }
 
         target.Refresh();
@@ -4484,8 +4513,12 @@ public sealed partial class AppController : IAsyncDisposable
         return _session?.RequireApi() ?? throw new InvalidOperationException("Discord ainda não conectado.");
     }
 
-    private async Task RunAsync(Func<Task> work)
+    private async Task RunAsync(Func<Task> work, bool accountWork = true)
     {
+        if (_loggingOut && accountWork) return;
+        var id = NewId();
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (accountWork) _accountWork[id] = completion;
         using var diagnosticOperation = Services.Diagnostics.DevelopmentDiagnostics.Begin("work");
         try
         {
@@ -4494,8 +4527,9 @@ public sealed partial class AppController : IAsyncDisposable
         catch (Exception ex)
         {
             AppLogger.Error("RunAsync", ex);
-            await ErrorAsync(ex.Message);
+            if (!_loggingOut) await ErrorAsync(ex.Message);
         }
+        finally { if (accountWork) _accountWork.TryRemove(id, out _); completion.TrySetResult(); }
     }
 
     private async Task ErrorAsync(string message)
@@ -5320,6 +5354,17 @@ public sealed partial class AppController : IAsyncDisposable
         };
     }
 
+    private static Stream OpenPreviewRead(FileInfo file) =>
+        EncryptedPreviewCache.IsEncrypted(file) ? EncryptedPreviewCache.OpenRead(file) : file.OpenRead();
+
+    private static ZipArchive OpenPreviewZip(FileInfo file) => new(OpenPreviewRead(file), ZipArchiveMode.Read);
+
+    private static string ReadPreviewText(FileInfo file)
+    {
+        using var reader = new StreamReader(OpenPreviewRead(file), Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
     private string ExtractDocumentPreview(FileInfo file, string name)
     {
         try
@@ -5332,9 +5377,9 @@ public sealed partial class AppController : IAsyncDisposable
                 "odp" => ExtractOdpPreview(file),
                 "xlsx" or "xlsm" => ExtractXlsxPreview(file, Path.GetExtension(name).TrimStart('.').ToUpperInvariant()),
                 "pptx" => ExtractPptxPreview(file),
-                "rtf" => StripRtf(File.ReadAllText(file.FullName, Encoding.UTF8)),
+                "rtf" => StripRtf(ReadPreviewText(file)),
                 "doc" => "Prévia indisponível para arquivos .doc legados. Converta para .docx ou baixe o arquivo para abrir no editor.",
-                _ => File.ReadAllText(file.FullName, Encoding.UTF8)
+                _ => ReadPreviewText(file)
             };
         }
         catch (Exception ex)
@@ -5345,7 +5390,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractDocxPreview(FileInfo file)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var entry = zip.GetEntry("word/document.xml");
         if (entry == null)
         {
@@ -5777,7 +5822,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractOdtPreview(FileInfo file)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var doc = ReadZipXml(zip, "content.xml");
         if (doc == null)
         {
@@ -5826,7 +5871,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractOdsPreview(FileInfo file)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var doc = ReadZipXml(zip, "content.xml");
         if (doc == null)
         {
@@ -5859,7 +5904,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractOdpPreview(FileInfo file)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var doc = ReadZipXml(zip, "content.xml");
         if (doc == null)
         {
@@ -5923,7 +5968,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractPptxPreview(FileInfo file)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var slidePaths = ReadPptxSlidePaths(zip);
         var pages = new List<string>();
         var index = 1;
@@ -6016,7 +6061,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private static string ExtractXlsxPreview(FileInfo file, string format)
     {
-        using var zip = ZipFile.OpenRead(file.FullName);
+        using var zip = OpenPreviewZip(file);
         var sharedStrings = ReadXlsxSharedStrings(zip);
         var sheets = ReadXlsxSheets(zip);
         var pages = new List<string>();
@@ -6168,14 +6213,15 @@ public sealed partial class AppController : IAsyncDisposable
     private static string RenderArchivePreview(FileInfo file, string name)
     {
         var ext = Path.GetExtension(name).TrimStart('.').ToLowerInvariant();
+        using var input = OpenPreviewRead(file);
         var model = new Dictionary<string, object?>
         {
-            ["sizeBytes"] = file.Length,
+            ["sizeBytes"] = input.Length,
             ["maxPreviewBytes"] = ArchivePreviewLimit,
             ["format"] = ext.ToUpperInvariant()
         };
 
-        if (file.Length > ArchivePreviewLimit)
+        if (input.Length > ArchivePreviewLimit)
         {
             model["tooLarge"] = true;
             model["entries"] = Array.Empty<object>();
@@ -6188,7 +6234,18 @@ public sealed partial class AppController : IAsyncDisposable
         }
         else
         {
-            ListSevenZipArchive(file, model, 5000);
+            if (EncryptedPreviewCache.IsEncrypted(file))
+            {
+                var directory = Directory.CreateTempSubdirectory("organessonium_archive_");
+                try
+                {
+                    var readable = new FileInfo(Path.Combine(directory.FullName, Path.GetFileName(name)));
+                    using (var output = readable.Create()) input.CopyTo(output);
+                    ListSevenZipArchive(readable, model, 5000);
+                }
+                finally { CleanDir(directory); }
+            }
+            else ListSevenZipArchive(file, model, 5000);
         }
 
         return JsonSerializer.Serialize(model, JsonOptions.Web);
@@ -6211,7 +6268,7 @@ public sealed partial class AppController : IAsyncDisposable
         var total = 0;
         try
         {
-            using var zip = ZipFile.OpenRead(file.FullName);
+            using var zip = OpenPreviewZip(file);
             foreach (var entry in zip.Entries)
             {
                 total++;
@@ -6867,6 +6924,13 @@ public sealed partial class AppController : IAsyncDisposable
     {
         var cleaned = new string(name.Where(ch => !char.IsControl(ch) && (ch == ' ' || !char.IsSeparator(ch))).ToArray()).Trim();
         return cleaned.Length > 0 ? cleaned : "arquivo";
+    }
+
+    private Task ReportSetupConnectionErrorAsync(Exception ex)
+    {
+        var kind = ConnectionErrorClassifier.Classify(ex).Kind;
+        return _bridge.CallAsync("_onSetupError", ClassifyConnectError(ex),
+            kind is not (ConnectionErrorKind.InvalidToken or ConnectionErrorKind.InvalidChannelConfiguration));
     }
 
 private static string ClassifyConnectError(Exception ex)

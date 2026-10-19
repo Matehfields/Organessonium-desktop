@@ -656,6 +656,16 @@ public sealed partial class AppRegistry
         return count;
     }
 
+    public async Task<LibraryStatistics?> GetCachedLibraryStatisticsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await ReadLibraryStatisticsAsync(RootFolderId, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cancellationToken, cachedOnly: true);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { AppLogger.Error("Registry.CachedStatistics", ex); return null; }
+    }
+
     public async Task<LibraryStatistics?> GetLibraryStatisticsAsync(
         string folderId,
         CancellationToken cancellationToken = default)
@@ -1750,15 +1760,17 @@ public sealed partial class AppRegistry
     private async Task<LibraryStatistics?> ReadLibraryStatisticsAsync(
         string folderId,
         HashSet<string> visitedFolderIds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool cachedOnly = false)
     {
         if (!visitedFolderIds.Add(folderId))
         {
             return null;
         }
 
-        var mapping = await GetMappingAsync(folderId, cancellationToken);
-        var serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
+        var serial = cachedOnly
+            ? await _serials.LoadCachedFolderAsync(folderId, cancellationToken)
+            : await _serials.LoadFolderAsync(await GetMappingAsync(folderId, cancellationToken), cancellationToken);
         if (serial != null)
         {
             long fileCount = serial.Children.LongCount(child => !child.IsFolder);
@@ -1771,20 +1783,16 @@ public sealed partial class AppRegistry
                     return null;
                 }
 
-                FolderIndexMapping childMapping;
-                try
+                var childFolderId = child.Id;
+                if (!cachedOnly)
                 {
-                    childMapping = await GetMappingAsync(child.Id, cancellationToken);
+                    try { childFolderId = (await GetMappingAsync(child.Id, cancellationToken)).FolderId; }
+                    catch (InvalidOperationException) { return null; }
                 }
-                catch (InvalidOperationException)
-                {
-                    return null;
-                }
-
                 var nested = await ReadLibraryStatisticsAsync(
-                    childMapping.FolderId,
+                    childFolderId,
                     visitedFolderIds,
-                    cancellationToken);
+                    cancellationToken, cachedOnly);
                 if (nested == null)
                 {
                     return null;
@@ -1799,6 +1807,7 @@ public sealed partial class AppRegistry
         }
 
         var cachedEntries = _store.LoadCachedEntriesForFolder(folderId);
+        if (cachedOnly && cachedEntries.Count == 0) return null;
         long cachedFileCount = cachedEntries.LongCount(entry => entry.Type != "folder");
         long cachedFolderCount = cachedEntries.LongCount(entry => entry.Type == "folder");
         long cachedTotalBytes = cachedEntries
@@ -1814,7 +1823,7 @@ public sealed partial class AppRegistry
             var nested = await ReadLibraryStatisticsAsync(
                 child.FolderId,
                 visitedFolderIds,
-                cancellationToken);
+                cancellationToken, cachedOnly);
             if (nested == null)
             {
                 return null;

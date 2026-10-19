@@ -49,25 +49,30 @@ public sealed class DiscordSession : IAsyncDisposable
         await _restClient.LoginAsync(TokenType.Bot, settings.BotToken.Trim());
 
         Api = new DiscordApiClient(settings.BotToken.Trim());
-        var names = await Api.GetChannelAsync(settings.NamesChannelId.Trim(), cancellationToken);
+        var channels = await Task.WhenAll(
+            Api.GetChannelAsync(settings.NamesChannelId.Trim(), cancellationToken),
+            Api.GetChannelAsync(settings.FoldersForumId.Trim(), cancellationToken),
+            Api.GetChannelAsync(settings.AppsForumId.Trim(), cancellationToken),
+            Api.GetChannelAsync(settings.SerialChannelId.Trim(), cancellationToken));
+        var names = channels[0];
         if (names.Type is not (0 or 5))
         {
             throw new InvalidOperationException("Canal names não encontrado ou não é um canal de texto.");
         }
 
-        var foldersForum = await Api.GetChannelAsync(settings.FoldersForumId.Trim(), cancellationToken);
+        var foldersForum = channels[1];
         if (foldersForum.Type is not (15 or 16))
         {
             throw new InvalidOperationException("Fórum folders não encontrado ou não é um canal de fórum.");
         }
 
-        var filesForum = await Api.GetChannelAsync(settings.AppsForumId.Trim(), cancellationToken);
+        var filesForum = channels[2];
         if (filesForum.Type is not (15 or 16))
         {
             throw new InvalidOperationException("Fórum files não encontrado ou não é um canal de fórum.");
         }
 
-        var serial = await Api.GetChannelAsync(settings.SerialChannelId.Trim(), cancellationToken);
+        var serial = channels[3];
         if (serial.Type is not (0 or 5))
         {
             throw new InvalidOperationException("Canal serial não encontrado ou não é um canal de texto.");

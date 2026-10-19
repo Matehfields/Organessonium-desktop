@@ -14,6 +14,9 @@ internal static partial class Program
 {
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
+        ("encryptedLocalPreviewsAndLogout", EncryptedLocalPreviewsAndLogoutAsync),
+        ("cachedSerialStatisticsAtStartup", CachedSerialStatisticsAtStartupAsync),
+        ("setupAndEncryptedPreviewHidden", SetupAndEncryptedPreviewHiddenAsync),
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
         ("directDownloadLegacyLayouts", DirectDownloadLegacyLayoutsAsync),

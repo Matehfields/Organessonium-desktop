@@ -35,7 +35,7 @@ public sealed class PreviewResourceRegistry : IDisposable
         var resource = Find(url);
         if (resource == null) return Empty(404, "Not Found");
         if (method is not ("GET" or "HEAD")) return Empty(405, "Method Not Allowed");
-        var length = resource.Video?.Length ?? resource.File?.Length ?? resource.Bytes?.LongLength ?? 0;
+        var length = resource.Video?.Length ?? resource.FileLength ?? resource.Bytes?.LongLength ?? 0;
         var parsed = ParseRange(range, length);
         if (parsed == null) return Empty(416, "Range Not Satisfiable", "Content-Range: bytes */" + length + "\r\n");
         var (start, end) = parsed.Value;
@@ -77,7 +77,9 @@ public sealed class PreviewResourceRegistry : IDisposable
                 }
             }
             else if (resource.File != null)
-                content = new VirtualFileStream(new DiskFile(resource.File), start, count);
+                content = resource.Encrypted
+                    ? EncryptedPreviewCache.OpenRead(resource.File, start, count, stream => { resource.Streams.TryRemove(stream, out _); })
+                    : new VirtualFileStream(new DiskFile(resource.File), start, count);
             else if (resource.Bytes != null)
                 content = new MemoryStream(resource.Bytes, checked((int)start), checked((int)count), false);
             if (content != null && !resource.Track(content))
@@ -128,6 +130,8 @@ public sealed class PreviewResourceRegistry : IDisposable
     private sealed class Resource(FileInfo? file, byte[]? bytes, VideoStreamSession? video, string mime) : IDisposable
     {
         public FileInfo? File { get; } = file;
+        public bool Encrypted { get; } = file != null && EncryptedPreviewCache.IsEncrypted(file);
+        public long? FileLength { get; } = file == null ? null : EncryptedPreviewCache.IsEncrypted(file) ? EncryptedPreviewCache.PlaintextLength(file) : file.Length;
         public byte[]? Bytes { get; } = bytes;
         public VideoStreamSession? Video { get; } = video;
         public string Mime { get; } = mime;

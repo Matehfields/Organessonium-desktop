@@ -26,6 +26,8 @@ const inpProxyUser   = document.getElementById('inp-proxy-user');
 const inpProxyPass   = document.getElementById('inp-proxy-pass');
 const btnTestProxy   = document.getElementById('btn-test-proxy');
 const proxyTestResult = document.getElementById('proxy-test-result');
+const btnOpenProxy = document.getElementById('btn-open-proxy');
+const proxyPanel = document.getElementById('proxy-details');
 
 const SETUP_I18N = {
     'pt-BR': {
@@ -224,8 +226,9 @@ function applySetupPreferences() {
 }
 
 function applyProxyLabels() {
-    const summary = document.querySelector('#proxy-details summary');
+    const summary = document.querySelector('#proxy-details h2');
     if (summary) summary.textContent = setupText('proxyTitle');
+    btnOpenProxy.textContent = setupLanguage === 'en' ? 'Configure proxy' : 'Configurar proxy';
     document.querySelector('#proxy-details .field label[for="sel-proxy-mode"]').textContent = setupText('proxyMode');
     document.querySelector('#proxy-details .hint').textContent = setupText('proxyHint');
     const modeOptions = document.querySelectorAll('#sel-proxy-mode option');
@@ -246,6 +249,66 @@ function applyProxyLabels() {
     document.querySelector('#proxy-auth-fields .field label[for="inp-proxy-user"]').textContent = setupText('proxyUser');
     document.querySelector('#proxy-auth-fields .field label[for="inp-proxy-pass"]').textContent = setupText('proxyPass');
     btnTestProxy.textContent = setupText('proxyTest');
+    document.querySelectorAll('.proxy-block select').forEach(enhanceSetupSelect);
+}
+
+function enhanceSetupSelect(select) {
+    let wrapper = select.closest('.setup-select');
+    if (!wrapper) {
+        wrapper = document.createElement('div');
+        wrapper.className = 'setup-select';
+        select.before(wrapper);
+        wrapper.append(select);
+        select.classList.add('hidden');
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'setup-select-trigger';
+        trigger.setAttribute('aria-haspopup', 'listbox');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.setAttribute('aria-labelledby', select.labels[0].id || (select.labels[0].id = select.id + '-label'));
+        const list = document.createElement('div');
+        list.className = 'setup-select-options hidden';
+        list.setAttribute('role', 'listbox');
+        trigger.setAttribute('aria-controls', list.id = select.id + '-options');
+        wrapper.append(trigger, list);
+        const close = () => { list.classList.add('hidden'); trigger.setAttribute('aria-expanded', 'false'); };
+        trigger.addEventListener('click', () => {
+            const open = list.classList.contains('hidden');
+            list.classList.toggle('hidden', !open);
+            trigger.setAttribute('aria-expanded', String(open));
+            if (open) list.querySelector('[aria-selected="true"]')?.focus();
+        });
+        wrapper.addEventListener('keydown', e => {
+            if (['Enter', ' ', 'ArrowDown', 'ArrowUp', 'Escape'].includes(e.key)) e.stopPropagation();
+            if (e.key === 'Escape') { close(); trigger.focus(); }
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                list.classList.remove('hidden'); trigger.setAttribute('aria-expanded', 'true');
+                const choices = Array.from(list.children);
+                const index = choices.indexOf(document.activeElement);
+                choices[(index + (e.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length]?.focus();
+            }
+        });
+        document.addEventListener('click', e => { if (!wrapper.contains(e.target)) close(); });
+        wrapper.addEventListener('focusout', e => { if (!wrapper.contains(e.relatedTarget)) close(); });
+        select.addEventListener('change', () => enhanceSetupSelect(select));
+    }
+    const trigger = wrapper.querySelector('.setup-select-trigger');
+    const list = wrapper.querySelector('.setup-select-options');
+    trigger.replaceChildren(document.createTextNode(select.selectedOptions[0].textContent));
+    const arrow = document.createElement('span'); arrow.innerHTML = setupIcon('expand_more', 18); trigger.append(arrow);
+    list.replaceChildren();
+    Array.from(select.options).forEach(option => {
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'setup-select-option'; button.textContent = option.textContent;
+        button.setAttribute('role', 'option'); button.setAttribute('aria-selected', String(option.selected));
+        button.addEventListener('click', () => {
+            select.value = option.value;
+            list.classList.add('hidden'); trigger.setAttribute('aria-expanded', 'false'); trigger.focus();
+            select.dispatchEvent(new Event('change', { bubbles:true }));
+        });
+        list.append(button);
+    });
 }
 
 function setupIcon(name, size) {
@@ -321,16 +384,21 @@ window._onSetupConnecting = function(msg) {
     loadMsg.textContent = msg || setupText('findingChannels');
 };
 
-window._onSetupError = function(msg) {
+window._onSetupError = function(msg, canConfigureProxy = false) {
     formArea.classList.remove('hidden');
     loadArea.classList.add('hidden');
     errorBox.textContent = msg;
     errorBox.classList.remove('hidden');
     channelActions.classList.add('hidden');
     btnConnect.disabled = false;
+    btnOpenProxy.classList.toggle('hidden', !canConfigureProxy);
+    if (!canConfigureProxy) { proxyPanel.classList.add('hidden'); btnOpenProxy.setAttribute('aria-expanded', 'false'); }
 };
 
 window._onSetupChannelsMissing = function(msg) {
+    btnOpenProxy.classList.add('hidden');
+    proxyPanel.classList.add('hidden');
+    btnOpenProxy.setAttribute('aria-expanded', 'false');
     formArea.classList.remove('hidden');
     loadArea.classList.add('hidden');
     errorBox.textContent = msg;
@@ -343,6 +411,16 @@ window._onSystemThemeChanged = function(theme) {
     if (setupThemeSetting !== 'system') return;
     document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
 };
+
+window._onNativeTitleBarMetrics = function(metrics) {
+    document.documentElement.style.setProperty('--native-titlebar-height', metrics?.enabled ? Math.max(0, Number(metrics.height) || 0) + 'px' : '0px');
+};
+
+btnOpenProxy.addEventListener('click', () => {
+    const open = proxyPanel.classList.contains('hidden');
+    proxyPanel.classList.toggle('hidden', !open);
+    btnOpenProxy.setAttribute('aria-expanded', String(open));
+});
 
 btnToggleToken.addEventListener('click', () => {
     inpToken.type = inpToken.type === 'password' ? 'text' : 'password';

@@ -54,8 +54,10 @@
                 <button id="btn-create-channels" class="btn-secondary" type="button">Criar canais automaticamente</button>
             </div>
 
-            <details id="proxy-details" class="proxy-block">
-                <summary>Rede e proxy</summary>
+            <div id="error-box" class="error-box hidden" role="alert"></div>
+            <button id="btn-open-proxy" class="btn-secondary hidden" type="button" aria-expanded="false" aria-controls="proxy-details">Configurar proxy</button>
+            <section id="proxy-details" class="proxy-block hidden" aria-label="Rede e proxy">
+                <h2>Rede e proxy</h2>
                 <div class="field">
                     <label for="sel-proxy-mode">Modo de conexão</label>
                     <select id="sel-proxy-mode">
@@ -102,9 +104,7 @@
                     <button id="btn-test-proxy" class="btn-secondary" type="button">Testar conexão com o proxy</button>
                     <div id="proxy-test-result" class="proxy-test-result hidden"></div>
                 </div>
-            </details>
-
-            <div id="error-box" class="error-box hidden"></div>
+            </section>
 
             <button id="btn-connect" class="btn-connect"><span class="btn-icon" data-icon="login" data-size="22"></span><span>Conectar</span></button>
 

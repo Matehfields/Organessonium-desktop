@@ -25,6 +25,10 @@ public partial class App
     }
     internal SyncBackgroundHost? SyncHost { get; private set; }
     internal bool Exiting => _exiting;
+    private Task<SettingsStore>? _desktopStoreInitialization;
+    internal Task<SettingsStore> GetDesktopStoreAsync() => _desktopStore != null
+        ? Task.FromResult(_desktopStore)
+        : _desktopStoreInitialization ??= Task.Run(() => new SettingsStore());
 
     internal async Task StartDesktopAsync(bool background, SettingsStore? store = null, string? identityPath = null)
     {
@@ -40,7 +44,7 @@ public partial class App
         _instance.OpenRequested += () => Dispatcher.BeginInvoke(OpenMainWindow);
         _instance.Listen();
         if (!background) OpenMainWindow();
-        _desktopStore ??= await Task.Run(() => new SettingsStore());
+        _desktopStore ??= await GetDesktopStoreAsync();
         SyncHost = await Task.Run(() => new SyncBackgroundHost(_desktopStore, identityPath));
         SyncHost.Changed += UpdateTray;
         SyncHost.Notification += message => Dispatcher.BeginInvoke(() =>

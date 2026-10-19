@@ -15,6 +15,7 @@ public static class ThumbnailCache
 
     public static void Configure(DirectoryInfo previewDirectory)
     {
+        Clear();
         CacheDirectory = Directory.CreateDirectory(previewDirectory.FullName);
     }
 
@@ -53,12 +54,15 @@ public static class ThumbnailCache
 
         try
         {
-            var bytes = File.ReadAllBytes(file.FullName);
-            if (EncryptionService.LooksLikeEncryptedEnvelope(bytes))
+            if (!EncryptedPreviewCache.IsEncrypted(file))
             {
                 TryDelete(file);
                 return null;
             }
+
+            using var input = EncryptedPreviewCache.OpenRead(file);
+            var bytes = new byte[checked((int)input.Length)];
+            input.ReadExactly(bytes);
 
             var dataUrl = "data:" + DetectImageMime(bytes) + ";base64," + Convert.ToBase64String(bytes);
             Remember(threadId, dataUrl);
@@ -175,7 +179,7 @@ public static class ThumbnailCache
             var file = ThumbnailFile(threadId, createDirectory: true);
             if (file != null)
             {
-                File.WriteAllBytes(file.FullName, imageBytes);
+                EncryptedPreviewCache.Store(file, imageBytes);
             }
 
             var dataUrl = "data:" + DetectImageMime(imageBytes) + ";base64," + Convert.ToBase64String(imageBytes);

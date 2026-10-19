@@ -1,6 +1,7 @@
 using Discord;
 using Discord.Net;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
 
@@ -40,6 +41,11 @@ public static class ConnectionErrorClassifier
         {
             return new ConnectionIssue(kind.Value, MessageFor(kind.Value));
         }
+
+        if (ContainsAny(text, "invalid token", "improper token", "token inválido"))
+            return new ConnectionIssue(ConnectionErrorKind.InvalidToken, MessageFor(ConnectionErrorKind.InvalidToken));
+        if (ContainsAny(text, "Configure os canais", "precisam ser diferentes", "não é um canal de", "não encontrado ou"))
+            return new ConnectionIssue(ConnectionErrorKind.InvalidChannelConfiguration, MessageFor(ConnectionErrorKind.InvalidChannelConfiguration));
 
         var proxyInPlay = NetworkConfig.Current.Settings.IsManualEnabled;
         var hasProxySignal =
@@ -98,6 +104,11 @@ public static class ConnectionErrorClassifier
         var current = (Exception?)ex;
         while (current != null)
         {
+            if (current is HttpRequestException request)
+            {
+                if (request.StatusCode == HttpStatusCode.Unauthorized) return ConnectionErrorKind.InvalidToken;
+                if (request.StatusCode == HttpStatusCode.NotFound) return ConnectionErrorKind.InvalidChannelConfiguration;
+            }
             if (current is DiscordApiException discord)
             {
                 if (discord.StatusCode == HttpStatusCode.Unauthorized)
