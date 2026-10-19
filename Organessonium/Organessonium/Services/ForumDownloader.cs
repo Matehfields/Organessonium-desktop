@@ -185,16 +185,19 @@ public sealed partial class ForumDownloader
             throw new InvalidDataException("O metadata criptografado não contém referências aos chunks.");
         var finalized = await RecoverFinalizedDownloadAsync(state, entry, onProgress, onDetailedProgress, cancellationToken);
         if (finalized != null) return finalized;
+        await using var discovery = entry.LogicalChunkCount == 0 ? null : new PartDiscovery(this, entry.ThreadId,
+            entry.ChunkMessageIds, entry.BatchId, entry.ChunkReferences, cancellationToken);
+        var useDiscovery = discovery != null;
         List<Part> parts;
         try
         {
             parts = entry.LogicalChunkCount == 0
                 ? await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId)
-                : await ResolveMessagePartsAsync(entry.ThreadId, entry.ChunkMessageIds, entry.BatchId, cancellationToken,
-                    (done, total) => onProgress($"Localizando partes {done}/{total}..."), entry.ChunkReferences);
+                : (await discovery!.NextAsync(cancellationToken))?.ToList() ?? [];
         }
         catch (Exception error) when (CanRecoverByBatch(entry, error))
         {
+            useDiscovery = false;
             parts = await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
         }
         if (parts.Count == 0) throw new InvalidDataException("O arquivo não contém chunks para baixar.");
@@ -207,10 +210,21 @@ public sealed partial class ForumDownloader
         state.Checksums = entry.Checksums;
         state.PayloadLayoutVersion = entry.Storage?.Shared == true ? TransferPayloadLayouts.SharedStorage :
             entry.ChunkReferences == null ? TransferPayloadLayouts.SingleAttachment : TransferPayloadLayouts.MultiAttachment;
-        return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name,
-            onProgress, cancellationToken, onDetailedProgress,
-            EncryptionContext(entry, EncryptedPayloadRoles.Original)?.WithChunkCount(parts.Count),
-            entry.SizeBytes, entry.Checksums, state, transferManager, identity);
+        try
+        {
+            return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(entry.Name) ? parts[0].Name : entry.Name,
+                onProgress, cancellationToken, onDetailedProgress,
+                EncryptionContext(entry, EncryptedPayloadRoles.Original)?.WithChunkCount(useDiscovery ? discovery!.References.Count : parts.Count),
+                entry.SizeBytes, entry.Checksums, state, transferManager, identity, useDiscovery ? discovery : null);
+        }
+        catch (PartDiscoveryException error) when (CanRecoverByBatch(entry, error))
+        {
+            var recovered = await CollectPartsAsync(entry.ThreadId, cancellationToken, entry.BatchId);
+            // A legacy batch recovery can change the locator list. Revalidate every region instead of trusting the old layout.
+            state.DownloadCheckpointVersion = 0;
+            return await DownloadDirectAsync(recovered, destDir, entry.Name, onProgress, cancellationToken,
+                onDetailedProgress, expectedLength: entry.SizeBytes, checkpoint: state, manager: transferManager, identity: identity);
+        }
     }
     public async Task<FileInfo?> DownloadVideoPreview480Async(
         AppEntry entry,
@@ -871,10 +885,15 @@ public sealed partial class ForumDownloader
         Action<DownloadProgress>? onDetailedProgress = null, EncryptedPayloadContext? encryption = null,
         long expectedPlaintextLength = -1, IReadOnlyList<ChunkReference>? chunkReferences = null, PayloadChecksums? checksums = null)
     {
-        var parts = await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken, chunkReferences: chunkReferences);
+        await using var discovery = expectedPlaintextLength < 0 ? null : new PartDiscovery(this, threadId,
+            messageIds, "", chunkReferences, cancellationToken);
+        var parts = discovery == null
+            ? await ResolveMessagePartsAsync(threadId, messageIds, "", cancellationToken, chunkReferences: chunkReferences)
+            : (await discovery.NextAsync(cancellationToken))?.ToList() ?? [];
         if (parts.Count == 0) throw new InvalidDataException("O arquivo não contém chunks para baixar.");
         return await DownloadDirectAsync(parts, destDir, string.IsNullOrWhiteSpace(outputName) ? parts[0].Name : outputName,
-            onProgress, cancellationToken, onDetailedProgress, encryption?.WithChunkCount(parts.Count), expectedPlaintextLength, checksums);
+            onProgress, cancellationToken, onDetailedProgress, encryption?.WithChunkCount(discovery?.References.Count ?? parts.Count),
+            expectedPlaintextLength, checksums, discovery: discovery);
     }
     private static bool IsPreviewMessage(string? content)
     {
@@ -934,7 +953,8 @@ public sealed partial class ForumDownloader
     }
 
     private async Task DownloadPartsAsync(
-        IReadOnlyList<Part> parts,
+        IAsyncEnumerable<Part> parts,
+        int partCount,
         PartialDownloadFile destination,
         Action<string> onProgress,
         CancellationToken cancellationToken,
@@ -942,9 +962,10 @@ public sealed partial class ForumDownloader
         Func<Part, string, Task>? onPartCompleted = null,
         long initialDownloadedBytes = 0,
         EncryptedPayloadContext? encryption = null,
-        PayloadChecksums? checksums = null)
+        PayloadChecksums? checksums = null,
+        long totalLength = -1)
     {
-        if (parts.Count == 0)
+        if (partCount == 0)
         {
             return;
         }
@@ -952,18 +973,42 @@ public sealed partial class ForumDownloader
         using var http = _downloadClientFactory();
         var downloadedBytes = initialDownloadedBytes;
         long receivedBytes = 0;
-        var totalBytes = destination.Layout.Length;
+        var totalBytes = totalLength >= 0 ? totalLength : destination.Layout.Length;
         var lastDetailedPercent = -1;
-        var parallelism = Math.Min(Math.Clamp(_settings.DownloadThreads, 1, 16), parts.Count);
+        var parallelism = Math.Min(Math.Clamp(_settings.DownloadThreads, 1, 16), partCount);
         using var semaphore = new SemaphoreSlim(parallelism);
-
-        var tasks = parts.Select(async part =>
+        var tasks = new HashSet<Task>();
+        try
         {
-            await semaphore.WaitAsync(cancellationToken);
+            await foreach (var part in parts.WithCancellation(cancellationToken))
+            {
+                // Checkpoint waiters retain only descriptors/digests, never payload buffers.
+                if (tasks.Count >= 64)
+                {
+                    await Task.WhenAny(tasks);
+                    foreach (var completed in tasks.Where(task => task.IsCompleted).ToArray())
+                    {
+                        await completed;
+                        tasks.Remove(completed);
+                    }
+                }
+                await semaphore.WaitAsync(cancellationToken);
+                tasks.Add(Task.Run(() => DownloadPartAsync(part)));
+            }
+        }
+        finally { await Task.WhenAll(tasks); }
+
+        async Task DownloadPartAsync(Part part)
+        {
             string digest;
             try
             {
-                digest = await DownloadPartWithRetryAsync(part);
+                if (part.VerifiedDigest != null)
+                {
+                    digest = part.VerifiedDigest;
+                    ReportParallelProgress(Interlocked.Add(ref downloadedBytes, destination.Layout.Regions[part.Index].Length), part);
+                }
+                else digest = await DownloadPartWithRetryAsync(part);
             }
             finally
             {
@@ -977,9 +1022,7 @@ public sealed partial class ForumDownloader
             }
 
             onProgress($"{FormatBytes(Interlocked.Read(ref downloadedBytes))} / {FormatBytes(totalBytes)} baixados");
-        });
-
-        await Task.WhenAll(tasks);
+        }
 
         async Task<string> DownloadPartWithRetryAsync(Part part)
         {
@@ -1128,7 +1171,7 @@ public sealed partial class ForumDownloader
                 throw new EncryptedPayloadIntegrityException(encryption.Encryption.Mode, last);
             }
 
-            throw new IOException($"NÃ£o foi possÃ­vel baixar a parte {part.Index + 1}/{parts.Count}.", last);
+            throw new IOException($"NÃ£o foi possÃ­vel baixar a parte {part.Index + 1}/{partCount}.", last);
         }
 
         void ReportParallelProgress(long currentBytes, Part part)
@@ -1289,7 +1332,7 @@ public sealed partial class ForumDownloader
         return value.ToString(unit == 0 ? "0" : "0.0", System.Globalization.CultureInfo.InvariantCulture) + " " + units[unit];
     }
 
-    private sealed record Part(int Index, string Url, string Name, long Size, string MessageId = "", string BatchId = "", string ProxyUrl = "", string AttachmentId = "");
+    private sealed record Part(int Index, string Url, string Name, long Size, string MessageId = "", string BatchId = "", string ProxyUrl = "", string AttachmentId = "", string? VerifiedDigest = null);
     private sealed class PartBatch
     {
         public PartBatch(int totalParts)

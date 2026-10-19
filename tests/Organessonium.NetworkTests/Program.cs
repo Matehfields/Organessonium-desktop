@@ -21,6 +21,7 @@ internal static partial class Program
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
         ("directDownloadCheckpointScheduling", DirectDownloadCheckpointSchedulingAsync),
+        ("directDownloadIncrementalDiscovery", DirectDownloadIncrementalDiscoveryAsync),
         ("directDownloadLegacyLayouts", DirectDownloadLegacyLayoutsAsync),
         ("directDownloadResumeCorruption", DirectDownloadResumeCorruptionAsync),
         ("directDownloadInterruptedWrite", DirectDownloadInterruptedWriteAsync),

@@ -20,6 +20,7 @@ internal static partial class Program
         internal readonly TransferManager Transfers;
         internal readonly ConcurrentDictionary<int, int> Reads = new();
         internal Func<int, CancellationToken, Task>? BeforeRead;
+        internal Func<int, CancellationToken, Task>? BeforeMessage;
         internal Func<int, Stream>? Body;
         internal string? Batch;
         internal string? PreviewKind;
@@ -50,6 +51,9 @@ internal static partial class Program
                 if (request.RequestUri!.Host == "discord.com")
                 {
                     var last = request.RequestUri.AbsolutePath.Split('/').Last();
+                    var around = System.Text.RegularExpressions.Regex.Match(request.RequestUri.Query, @"[?&]around=(\d+)");
+                    var anchor = int.TryParse(last, out var id) ? id - 100 : around.Success ? int.Parse(around.Groups[1].Value) - 100 : Wire.Length - 1;
+                    if (BeforeMessage != null) await BeforeMessage(anchor, token);
                     if (int.TryParse(last, out var message)) return message - 100 < 0 || message - 100 >= Wire.Length
                         ? new HttpResponseMessage(HttpStatusCode.NotFound) : VideoJsonResponse(JsonSerializer.Serialize(Message(message - 100)));
                     return VideoJsonResponse(JsonSerializer.Serialize(Enumerable.Range(0, Wire.Length).Select(Message)));
@@ -152,6 +156,42 @@ internal static partial class Program
         RequireSync((await File.ReadAllBytesAsync(file.FullName)).SequenceEqual(h.Expected) &&
             saved is { DownloadReadyToFinalize: true } && saved.Chunks.All(chunk => chunk.Downloaded && chunk.Sha256?.Length == 64),
             "a sobreposição de rede/checkpoint perdeu integridade ou a confirmação durável");
+        return TestOutcome.Pass();
+    }
+
+    private static async Task<TestOutcome> DirectDownloadIncrementalDiscoveryAsync()
+    {
+        foreach (var mode in new[] { "manifest", "variable-legacy", "plain" })
+        {
+            var lengths = Enumerable.Range(0, 120).Select(index => mode == "manifest" ? (index == 119 ? 317 : 1024) : 1024 + index % 19 * 13).ToArray();
+            using var h = new DirectDownloadFixture(encrypted: mode != "plain", references: mode == "manifest",
+                hashes: mode == "manifest", lengths: lengths);
+            var tail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            h.BeforeMessage = (index, token) => index < 10 ? Task.CompletedTask : tail.Task.WaitAsync(token);
+            var state = await h.Transfers.CreateDownloadAsync(h.Entry, h.Destination);
+            using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var running = h.Run(state, cancel.Token);
+            try
+            {
+                await WaitForVideoConditionAsync(() => state.Chunks.Count == 120 && state.Chunks.Take(10).All(chunk => chunk.Downloaded));
+                RequireSync(h.Reads.Count == 10 && new FileInfo(state.PartialFilePath!).Length > 0 && !running.IsCompleted,
+                    "o download esperou a lista completa, adivinhou offsets ou concluiu sem as partes restantes: " + mode);
+                if (mode == "variable-legacy")
+                {
+                    cancel.Cancel();
+                    try { await running; return TestOutcome.Fail("a descoberta ignorou o cancelamento"); } catch (OperationCanceledException) { }
+                    state = (await h.Transfers.Repository.LoadActiveByIdAsync(state.TransferId))!;
+                    RequireSync(state.Chunks.Take(10).All(chunk => chunk.Downloaded) && state.Chunks.Skip(10).All(chunk => !chunk.Downloaded),
+                        "a descoberta incompleta perdeu o checkpoint ou confirmou regiões desconhecidas");
+                }
+            }
+            finally { tail.TrySetResult(); }
+            h.BeforeMessage = null;
+            var file = mode == "variable-legacy" ? await h.Run(state) : await running;
+            RequireSync(h.Reads.Count == 120 && h.Reads.All(pair => pair.Value == 1) &&
+                (await File.ReadAllBytesAsync(file.FullName)).SequenceEqual(h.Expected),
+                "a descoberta incremental perdeu bytes, refez partes válidas ou quebrou o contexto criptográfico: " + mode);
+        }
         return TestOutcome.Pass();
     }
 

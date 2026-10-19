@@ -1,4 +1,6 @@
 using System.IO;
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using Organessonium.Models;
 
@@ -33,9 +35,17 @@ public sealed partial class ForumDownloader
     private async Task<FileInfo> DownloadDirectAsync(IReadOnlyList<Part> parts, DirectoryInfo destination, string name,
         Action<string> status, CancellationToken token, Action<DownloadProgress>? progress,
         EncryptedPayloadContext? encryption = null, long expectedLength = -1, PayloadChecksums? checksums = null,
-        TransferState? checkpoint = null, TransferManager? manager = null, string? identity = null)
+        TransferState? checkpoint = null, TransferManager? manager = null, string? identity = null,
+        PartDiscovery? discovery = null)
     {
-        var layout = new DownloadFileLayout(parts.Select(part => (part.Index, part.Size)), encryption != null, checksums);
+        var knownParts = new ConcurrentDictionary<int, Part>(parts.ToDictionary(part => part.Index));
+        var references = discovery?.References ?? parts;
+        var layout = new DownloadFileLayout(parts.Select(part => (part.Index, part.Size)), encryption != null,
+            discovery == null ? checksums : null);
+        if (discovery != null && checksums != null && layout.Regions.Any(region => region.Length !=
+                Math.Min(checksums.ChunkSizeBytes, checked(expectedLength - (long)region.Index * checksums.ChunkSizeBytes))))
+            throw new InvalidDataException("Os tamanhos dos chunks divergem do manifesto de checksums.");
+        var totalLength = discovery != null && expectedLength >= 0 ? expectedLength : layout.Length;
         var state = checkpoint ?? new TransferState { TransferType = TransferTypes.Download, FileName = name, DestinationPath = destination.FullName };
         var finalPath = PartialDownloadFile.Destination(destination, name);
         var partialPath = PartialDownloadFile.PartialPath(finalPath, state.TransferId);
@@ -45,9 +55,9 @@ public sealed partial class ForumDownloader
             throw new InvalidDataException("O checkpoint não corresponde ao arquivo, versão ou destino solicitado.");
         if (PartialDownloadFile.IsActive(finalPath)) throw new DownloadAlreadyActiveException();
         destination.Create();
-        if (!modern && string.IsNullOrWhiteSpace(state.TempPath)) ValidateDestination(destination, layout.Length);
+        if (!modern && string.IsNullOrWhiteSpace(state.TempPath)) ValidateDestination(destination, totalLength);
 
-        if (modern && state.DownloadReadyToFinalize && !File.Exists(partialPath) && File.Exists(finalPath) &&
+        if (discovery == null && modern && state.DownloadReadyToFinalize && !File.Exists(partialPath) && File.Exists(finalPath) &&
             new FileInfo(finalPath).Length == layout.Length && PartialDownloadFile.IsDigest(state.DownloadSha256) &&
             (checksums == null || state.DownloadSha256 == checksums.Sha256) &&
             state.Chunks.Count == parts.Count && state.Chunks.All(chunk => chunk.Downloaded) &&
@@ -60,22 +70,29 @@ public sealed partial class ForumDownloader
         }
 
         var previous = state.Chunks.ToDictionary(chunk => chunk.Index);
-        state.Chunks = parts.OrderBy(part => part.Index).Select(part =>
+        var initialParts = parts.ToDictionary(part => part.Index);
+        state.Chunks = references.OrderBy(part => part.Index).Select(reference =>
         {
-            var region = layout.Regions[part.Index];
+            var part = initialParts.GetValueOrDefault(reference.Index) ?? reference;
+            var region = part.Index < layout.Regions.Count ? layout.Regions[part.Index] : null;
             previous.TryGetValue(part.Index, out var old);
-            if (modern && (old == null || old.Offset != region.Offset || old.LogicalSizeBytes != region.Length ||
+            if (modern && (old == null || (region != null && old.Offset.HasValue &&
+                    (old.Offset != region.Offset || old.LogicalSizeBytes != region.Length)) ||
                 old.MessageId != part.MessageId || (old.AttachmentId ?? "") != part.AttachmentId))
                 throw new InvalidDataException("Os intervalos ou referências do checkpoint foram alterados.");
-            var chunk = old != null && old.MessageId == part.MessageId && (old.AttachmentId ?? "") == part.AttachmentId
-                ? old : new TransferChunkState { Index = part.Index, MessageId = part.MessageId, AttachmentId = part.AttachmentId };
-            chunk.Offset = region.Offset; chunk.LogicalSizeBytes = region.Length; chunk.SizeBytes = part.Size;
+            var chunk = new TransferChunkState
+            {
+                Index = part.Index, MessageId = part.MessageId, AttachmentId = part.AttachmentId,
+                Offset = old?.Offset, LogicalSizeBytes = old?.LogicalSizeBytes ?? -1, SizeBytes = old?.SizeBytes ?? 0,
+                Downloaded = old?.Downloaded ?? false, Sha256 = old?.Sha256, TempChunkPath = old?.TempChunkPath
+            };
+            if (region != null) { chunk.Offset = region.Offset; chunk.LogicalSizeBytes = region.Length; chunk.SizeBytes = part.Size; }
             return chunk;
         }).ToList();
         state.FileName = name; state.DestinationPath = destination.FullName;
         state.PartialFilePath = partialPath; state.FinalFilePath = finalPath;
         state.DownloadIdentity = identity; state.DownloadCheckpointVersion = TransferState.DirectDownloadVersion;
-        state.TotalChunks = parts.Count; state.Status = TransferStatuses.Downloading;
+        state.TotalChunks = references.Count; state.Status = TransferStatuses.Downloading;
         state.DownloadReadyToFinalize = false;
         var existed = modern && File.Exists(partialPath);
         using var file = new PartialDownloadFile(partialPath, finalPath, layout, modern || (checkpoint != null && File.Exists(partialPath)));
@@ -83,62 +100,25 @@ public sealed partial class ForumDownloader
         var completedSinceSave = 0;
         var dirty = false;
         var awaitingFlush = new HashSet<int>();
+        var confirmedThisRun = new HashSet<int>();
         long receivedBytes = 0;
         try
         {
             status("Verificando partes já gravadas...");
-            var claimed = state.Chunks.ToDictionary(chunk => chunk.Index, chunk => chunk.Downloaded);
-            foreach (var chunk in state.Chunks) chunk.Downloaded = false;
-            foreach (var chunk in state.Chunks)
-            {
-                var region = layout.Regions[chunk.Index];
-                var digest = checksums?.Chunks[chunk.Index] ?? chunk.Sha256;
-                var valid = existed && claimed[chunk.Index] && await file.MatchesAsync(region, digest, token);
-                var migrated = false;
-                // Old plaintext files are reusable only with independently verifiable hashes.
-                if (!valid && !string.IsNullOrWhiteSpace(chunk.TempChunkPath) &&
-                    PartialDownloadFile.IsDigest(digest) && File.Exists(chunk.TempChunkPath) &&
-                    new FileInfo(chunk.TempChunkPath).Length == region.Length)
-                {
-                    using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                    var buffer = new byte[DownloadBufferSize];
-                    try
-                    {
-                        await using var input = new FileStream(chunk.TempChunkPath, FileMode.Open, FileAccess.Read, FileShare.Read,
-                            DownloadBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                        await using var output = file.OpenRegion(chunk.Index);
-                        int read;
-                        while ((read = await input.ReadAsync(buffer, token)) > 0)
-                        { hash.AppendData(buffer, 0, read); await output.WriteAsync(buffer.AsMemory(0, read), token); }
-                        valid = output.Position == region.Length && Convert.ToHexStringLower(hash.GetHashAndReset()) == digest;
-                        migrated = valid;
-                    }
-                    finally { CryptographicOperations.ZeroMemory(buffer); }
-                }
-                chunk.Downloaded = valid;
-                if (valid) chunk.Sha256 = digest;
-                else chunk.Sha256 = null;
-                if (migrated)
-                {
-                    awaitingFlush.Add(chunk.Index);
-                    dirty = true;
-                    if (++completedSinceSave >= 4) await SaveCheckpointAsync(token);
-                }
-            }
+            var initial = await PreparePartsAsync(parts);
             dirty = true;
             await SaveCheckpointAsync(token);
-            ValidateDestination(destination, layout.Length, Math.Min(layout.Length, PartialDownloadFile.AllocatedBytes(partialPath)));
+            ValidateDestination(destination, totalLength, Math.Min(totalLength, PartialDownloadFile.AllocatedBytes(partialPath)));
             var attempts = encryption == null ? MaxChunkDownloadAttempts : MaxEncryptedPayloadDownloadAttempts;
             for (var pass = 0; pass < attempts; pass++)
             {
-                var completed = state.Chunks.Where(chunk => chunk.Downloaded).Sum(chunk => chunk.LogicalSizeBytes);
-                var pending = parts.Where(part => !state.Chunks[part.Index].Downloaded).ToList();
+                var completed = pass == 0 ? 0 : state.Chunks.Where(chunk => chunk.Downloaded).Sum(chunk => chunk.LogicalSizeBytes);
                 var receivedBeforePass = receivedBytes;
-                progress?.Invoke(new DownloadProgress(layout.Length == 0 ? 0 : Math.Min(99, (int)(completed * 99d / layout.Length)),
-                    $"{FormatBytes(completed)} / {FormatBytes(layout.Length)} baixados", completed, layout.Length, RateBytes: receivedBytes));
+                progress?.Invoke(new DownloadProgress(totalLength == 0 ? 0 : Math.Min(99, (int)(completed * 99d / totalLength)),
+                    $"{FormatBytes(completed)} / {FormatBytes(totalLength)} baixados", completed, totalLength, RateBytes: receivedBytes));
                 try
                 {
-                    await DownloadPartsAsync(pending, file, status, token, item =>
+                    await DownloadPartsAsync(PendingPartsAsync(pass, initial, token), references.Count, file, status, token, item =>
                     {
                         Interlocked.Exchange(ref receivedBytes, receivedBeforePass + (item.RateBytes ?? 0));
                         progress?.Invoke(item with { RateBytes = Interlocked.Read(ref receivedBytes) });
@@ -148,21 +128,26 @@ public sealed partial class ForumDownloader
                         try
                         {
                             var chunk = state.Chunks[part.Index];
+                            var region = layout.Regions[part.Index];
+                            chunk.Offset = region.Offset; chunk.LogicalSizeBytes = region.Length;
                             chunk.Sha256 = digest; chunk.Downloaded = true; chunk.SizeBytes = part.Size;
+                            confirmedThisRun.Add(chunk.Index);
                             awaitingFlush.Add(chunk.Index);
                             dirty = true;
                             if (++completedSinceSave >= 4) await SaveCheckpointAsync(token);
                         }
                         finally { checkpointGate.Release(); }
-                    }, completed, encryption, checksums);
+                    }, completed, encryption, checksums, totalLength);
                 }
                 finally
                 {
-                    // All workers are drained by Task.WhenAll before this durability barrier.
                     await checkpointGate.WaitAsync(CancellationToken.None);
                     try { if (dirty) await SaveCheckpointAsync(CancellationToken.None); }
                     finally { checkpointGate.Release(); }
                 }
+                discovery = null;
+                if (layout.Regions.Count != references.Count) throw new InvalidDataException("A descoberta de partes ficou incompleta.");
+                layout.Validate(checksums);
 
                 ReportVerification(0);
                 var verified = await file.VerifyAsync(state.Chunks, checksums, null, token);
@@ -199,6 +184,62 @@ public sealed partial class ForumDownloader
             if (checkpoint == null && !state.DownloadReadyToFinalize && File.Exists(partialPath)) File.Delete(partialPath);
         }
 
+        async IAsyncEnumerable<Part> PendingPartsAsync(int pass, IReadOnlyList<Part> initial,
+            [EnumeratorCancellation] CancellationToken cancellation)
+        {
+            if (pass > 0)
+            {
+                foreach (var part in knownParts.Values.OrderBy(part => part.Index))
+                    if (!state.Chunks[part.Index].Downloaded) yield return part;
+                yield break;
+            }
+            var batch = initial;
+            while (true)
+            {
+                foreach (var part in batch) yield return part;
+                var next = discovery == null ? null : await discovery.NextAsync(cancellation);
+                if (next == null) yield break;
+                layout.Append(next.Select(part => (part.Index, part.Size)), encryption != null, checksums, expectedLength);
+                foreach (var part in next) knownParts[part.Index] = part;
+                batch = await PreparePartsAsync(next);
+            }
+        }
+
+        async Task<IReadOnlyList<Part>> PreparePartsAsync(IReadOnlyList<Part> batch)
+        {
+            var prepared = new List<Part>(batch.Count);
+            foreach (var part in batch)
+            {
+                var region = layout.Regions[part.Index];
+                previous.TryGetValue(part.Index, out var old);
+                if (modern && old?.Offset is not null &&
+                    (old.Offset != region.Offset || old.LogicalSizeBytes != region.Length))
+                    throw new InvalidDataException("Os intervalos do checkpoint foram alterados.");
+                var digest = checksums?.Chunks[part.Index] ?? old?.Sha256;
+                var valid = existed && old?.Downloaded == true && await file.MatchesAsync(region, digest, token);
+                if (!valid && !string.IsNullOrWhiteSpace(old?.TempChunkPath) &&
+                    PartialDownloadFile.IsDigest(digest) && File.Exists(old.TempChunkPath) &&
+                    new FileInfo(old.TempChunkPath).Length == region.Length)
+                {
+                    using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                    var buffer = new byte[DownloadBufferSize];
+                    try
+                    {
+                        await using var input = new FileStream(old.TempChunkPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                            DownloadBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                        await using var output = file.OpenRegion(part.Index);
+                        int read;
+                        while ((read = await input.ReadAsync(buffer, token)) > 0)
+                        { hash.AppendData(buffer, 0, read); await output.WriteAsync(buffer.AsMemory(0, read), token); }
+                        valid = output.Position == region.Length && Convert.ToHexStringLower(hash.GetHashAndReset()) == digest;
+                    }
+                    finally { CryptographicOperations.ZeroMemory(buffer); }
+                }
+                prepared.Add(part with { VerifiedDigest = valid ? digest : null });
+            }
+            return prepared;
+        }
+
         async Task SaveCheckpointAsync(CancellationToken cancellation)
         {
             try { file.Flush(); }
@@ -215,7 +256,7 @@ public sealed partial class ForumDownloader
             }
             if (manager != null) await manager.SaveAsync(state, cancellation);
             dirty = false; completedSinceSave = 0;
-            CleanupLegacyParts(state, parts);
+            CleanupLegacyParts(state, knownParts, confirmedThisRun);
         }
         void ReportVerification(long verified)
         {
@@ -225,15 +266,16 @@ public sealed partial class ForumDownloader
         }
     }
 
-    private static void CleanupLegacyParts(TransferState state, IReadOnlyList<Part> parts)
+    private static void CleanupLegacyParts(TransferState state, IReadOnlyDictionary<int, Part> parts, IReadOnlySet<int> confirmed)
     {
         if (string.IsNullOrWhiteSpace(state.TempPath)) return;
         var directory = new DirectoryInfo(state.TempPath);
         if (!directory.Name.Equals(".organessonium_parts_" + state.TransferId[..Math.Min(12, state.TransferId.Length)], StringComparison.Ordinal) ||
             !directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0) return;
-        foreach (var chunk in state.Chunks.Where(chunk => chunk.Downloaded && !string.IsNullOrWhiteSpace(chunk.TempChunkPath)))
+        foreach (var chunk in state.Chunks.Where(chunk => chunk.Downloaded && confirmed.Contains(chunk.Index) && !string.IsNullOrWhiteSpace(chunk.TempChunkPath)))
         {
-            var expected = Path.Combine(directory.FullName, TempPartFileName(parts.Single(part => part.Index == chunk.Index)));
+            if (!parts.TryGetValue(chunk.Index, out var part)) continue;
+            var expected = Path.Combine(directory.FullName, TempPartFileName(part));
             if (!SameFilePath(expected, chunk.TempChunkPath!) || !File.Exists(expected) ||
                 (File.GetAttributes(expected) & FileAttributes.ReparsePoint) != 0) continue;
             TryDelete(new FileInfo(expected));

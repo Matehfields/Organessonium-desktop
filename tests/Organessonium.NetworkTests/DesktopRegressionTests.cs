@@ -186,6 +186,26 @@ internal static partial class Program
                 "o painel alternou separador ou quantidade de casas decimais entre callbacks de download");
             RequireSync(timeout.DownloadTimeouts == 1 && (await File.ReadAllBytesAsync(recovered.FullName)).SequenceEqual(downloadBytes),
                 "o timeout de download foi confundido com cancelamento ou corrompeu os bytes");
+            using (var incremental = new DirectDownloadFixture(lengths: Enumerable.Repeat(1024, 120).ToArray()))
+            {
+                var tail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                incremental.BeforeMessage = (index, token) => index < 10 ? Task.CompletedTask : tail.Task.WaitAsync(token);
+                var callbacks = new System.Collections.Concurrent.ConcurrentQueue<Task>();
+                await bridge.CallAsync("_opsAdd", "incremental-ui", "download", incremental.Entry.Name);
+                var running = incremental.Run(progress: progress => callbacks.Enqueue(bridge.CallAsync("_opsProgress",
+                    "incremental-ui", progress.Percent, progress.Assembling ? progress.Message :
+                    $"{FormatDownloadBytes(progress.DownloadedBytes)} / {FormatDownloadBytes(progress.TotalBytes)} baixados")));
+                try
+                {
+                    await WaitForVideoConditionAsync(() => incremental.Reads.Count == 10);
+                    await Task.WhenAll(callbacks.ToArray());
+                    RequireSync(!running.IsCompleted && await view.ExecuteScriptAsync(
+                        "document.getElementById('op-incremental-ui').dataset.opStatus==='active'&&document.getElementById('op-msg-incremental-ui').textContent.endsWith(' baixados')&&parseFloat(document.getElementById('op-progress-incremental-ui').style.width)>0") == "true",
+                        "o painel não mostrou o download em andamento enquanto as referências restantes estavam pendentes");
+                }
+                finally { tail.TrySetResult(); await running; }
+                await Task.WhenAll(callbacks);
+            }
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             try
             {
