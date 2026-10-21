@@ -3771,24 +3771,67 @@ public sealed partial class AppController : IAsyncDisposable
         var deletedFolders = 0;
         var failed = 0;
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < plan.Files.Count; i++)
+        var pendingCleanup = false;
+        if (fileTotal > 0)
         {
-            var file = plan.Files[i];
-            await OpsProgressAsync(opId, Percent(i, progressTotal), DeleteProgressMessage("arquivo", i, fileTotal, file.Name));
+            var cleanups = new List<StorageCleanupRecord>();
+            using var progressGate = new SemaphoreSlim(1, 1);
+            var completed = 0;
+            var mappings = _store.LoadFolderIndexMappings();
+            var indices = plan.Files.Select(file => mappings.GetValueOrDefault(file.ParentFolderId ?? AppRegistry.RootFolderId)?.ThreadId)
+                .Where(thread => !string.IsNullOrWhiteSpace(thread)).Cast<string>();
+            var journal = await registry.GetStorageJournalIndexAsync(CancellationToken.None);
+            await using var writes = await registry.SharedStorage.HoldWritesAsync(indices.Append(journal.ThreadId), CancellationToken.None);
+            await Parallel.ForEachAsync(plan.Files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, _) =>
+            {
+                StorageCleanupRecord? cleanup = null;
+                try
+                {
+                    var details = await registry.LoadFileDetailsAsync(file, forceRefresh: true, cacheDetails: false);
+                    cleanup = await registry.SharedStorage.BeginCleanupAsync(details, CancellationToken.None);
+                    await registry.DeleteEntryAsync(details, synchronizeSerials: false);
+                    ThumbnailCache.Remove(details.ThumbnailCacheKey);
+                    _videoProgress.Delete(details.FileId);
+                }
+                catch (Exception ex)
+                {
+                    cleanup = null;
+                    Interlocked.Increment(ref failed);
+                    Debug.WriteLine("[Delete] " + ex.Message);
+                }
+
+                await progressGate.WaitAsync();
+                try
+                {
+                    if (cleanup != null)
+                    {
+                        cleanups.Add(cleanup);
+                        TrackFolderSerial(serialFolderIds, file.ParentFolderId);
+                        deletedFiles++;
+                        all.Remove(file);
+                    }
+                    await OpsProgressAsync(opId, 80 * ++completed / fileTotal,
+                        $"Removendo metadados ({completed}/{fileTotal}): {file.Name}");
+                }
+                finally { progressGate.Release(); }
+            });
+
+            completed = 0;
+            await OpsProgressAsync(opId, 80, "Conferindo referências e limpando payloads...");
             try
             {
-                await DeleteStoredEntryAsync(registry, file, synchronizeSerials: false);
-                TrackFolderSerial(serialFolderIds, file.ParentFolderId);
-                deletedFiles++;
-                all.Remove(file);
+                await registry.SharedStorage.CompleteCleanupBatchAsync(cleanups, async (_, cleaned) =>
+                {
+                    pendingCleanup |= !cleaned;
+                    await OpsProgressAsync(opId, 80 + 19 * ++completed / Math.Max(1, cleanups.Count),
+                        $"Limpando payloads ({completed}/{cleanups.Count})");
+                }, CancellationToken.None);
             }
             catch (Exception ex)
             {
-                failed++;
-                Debug.WriteLine("[Delete] " + ex.Message);
+                pendingCleanup = true;
+                AppLogger.Error("Delete.BatchCleanup", ex);
             }
-
-            await OpsProgressAsync(opId, Percent(i + 1, progressTotal), DeleteProgressMessage("arquivo", i + 1, fileTotal, file.Name));
         }
 
         var foldersToDelete = plan.Folders;
@@ -3834,8 +3877,9 @@ public sealed partial class AppController : IAsyncDisposable
         var visibleDeleted = fileTotal > 0 ? deletedFiles : deletedFolders;
         var visibleKind = fileTotal > 0 ? "arquivo(s)" : "pasta(s)";
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
+        if (failed == 0) await OpsProgressAsync(opId, 100, $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)");
         await OpsUpdateAsync(opId, status, failed == 0
-            ? $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)"
+            ? $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)" + (pendingCleanup ? "; limpeza segura dos payloads pendente" : "")
             : $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s), {failed} falharam");
         return new DeleteResult(visibleTotal, visibleDeleted, failed);
     }

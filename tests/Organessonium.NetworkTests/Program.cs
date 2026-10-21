@@ -15,6 +15,7 @@ internal static partial class Program
     private static readonly List<(string Name, Func<Task<TestOutcome>> Run)> Tests = new()
     {
         ("startupFavoritesTrashHidden", StartupFavoritesTrashHiddenAsync),
+        ("permanentDeletionBatchHidden", PermanentDeletionBatchHiddenAsync),
         ("encryptedLocalPreviewsAndLogout", EncryptedLocalPreviewsAndLogoutAsync),
         ("cachedSerialStatisticsAtStartup", CachedSerialStatisticsAtStartupAsync),
         ("setupAndEncryptedPreviewHidden", SetupAndEncryptedPreviewHiddenAsync),

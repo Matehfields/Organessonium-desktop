@@ -75,11 +75,12 @@ internal sealed partial class SharedStorageManager
     }
 
     private async Task<List<(StorageBatchPart Part, ChunkReference Reference)>> RecoverPayloadReferencesAsync(
-        string fileId, string versionId, string threadId, CancellationToken token)
+        string fileId, string versionId, string threadId, CancellationToken token,
+        IReadOnlyList<DiscordMessageDto>? journalMessages = null, IReadOnlyList<DiscordMessageDto>? payloadMessages = null)
     {
         // Plans are durable remotely; the bounded in-memory cache is never the recovery authority.
         var plans = new Dictionary<string, StorageBatchPlan>(StringComparer.Ordinal);
-        foreach (var message in await ReadJournalMessagesAsync(null, token))
+        foreach (var message in journalMessages ?? await ReadJournalMessagesAsync(null, token))
         {
             using var json = await _metadata.ReadJsonAsync(message, token);
             if (json?.RootElement.TryGetProperty("entryType", out var kind) != true || kind.GetString() != "storageBatchPlan") continue;
@@ -91,7 +92,7 @@ internal sealed partial class SharedStorageManager
         }
         var result = new List<(StorageBatchPart, ChunkReference)>();
         if (plans.Count == 0) return result;
-        foreach (var message in await _api.GetMessagesAsync(threadId, null, token))
+        foreach (var message in payloadMessages ?? await _api.GetMessagesAsync(threadId, null, token))
         {
             if (message.Attachments.Count == 0) continue;
             var label = _metadata.DecodePayloadReference(message.Content);

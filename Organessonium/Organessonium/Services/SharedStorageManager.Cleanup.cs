@@ -33,6 +33,42 @@ internal sealed partial class SharedStorageManager
         finally { _gate.Release(); }
     }
 
+    internal async Task CompleteCleanupBatchAsync(IReadOnlyList<StorageCleanupRecord> requests,
+        Func<StorageCleanupRecord, bool, Task> onCompleted, CancellationToken token)
+    {
+        if (requests.Count == 0) return;
+        await Parallel.ForEachAsync(requests,
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token },
+            async (request, cancellation) => await ReleaseReferenceAsync(request.Scope, request.FileId, cancellation));
+        await _gate.WaitAsync(token);
+        try
+        {
+            await RefreshJournalAsync(token);
+            // All metadata removals and durable releases precede this fresh, batch-local proof.
+            // Keep the owner gate until cleanup ends so local readers/mutations cannot enter it.
+            var live = await ReadCleanupReferencesAsync(token);
+            var journal = requests.Any(request => request.Payloads.Any(payload => payload.Storage?.Shared == true))
+                ? await ReadJournalMessagesAsync(null, token) : null;
+            var pools = new Dictionary<string, IReadOnlyList<DiscordMessageDto>>(StringComparer.Ordinal);
+            async Task<IReadOnlyList<DiscordMessageDto>> ReadPool(string thread)
+            {
+                if (pools.TryGetValue(thread, out var messages)) return messages;
+                messages = await _api.GetMessagesAsync(thread, null, token);
+                if (pools.Count == 4) pools.Remove(pools.Keys.First());
+                return pools[thread] = messages;
+            }
+            foreach (var request in requests)
+            {
+                var cleaned = false;
+                try { cleaned = await CleanAsync(request, token, live, journal, ReadPool); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception error) { AppLogger.Error("SharedStorage.BatchCleanup", error); }
+                await onCompleted(request, cleaned);
+            }
+        }
+        finally { _gate.Release(); }
+    }
+
     internal async Task ReconcileAsync(CancellationToken token = default)
     {
         await _gate.WaitAsync(token);
@@ -47,7 +83,10 @@ internal sealed partial class SharedStorageManager
         finally { _gate.Release(); }
     }
 
-    private async Task<bool> CleanAsync(StorageCleanupRecord request, CancellationToken token)
+    private async Task<bool> CleanAsync(StorageCleanupRecord request, CancellationToken token,
+        StoragePayloadVersion[]? batchReferences = null,
+        IReadOnlyList<DiscordMessageDto>? batchJournal = null,
+        Func<string, Task<IReadOnlyList<DiscordMessageDto>>>? readPool = null)
     {
         if (_appliedCleanups.Contains(request.OperationId)) return true;
         if (_mutations.Values.Any(mutation => mutation.Pending && mutation.FileId == request.FileId)) return false;
@@ -65,23 +104,14 @@ internal sealed partial class SharedStorageManager
         }
         foreach (var payload in request.Payloads.Where(payload => payload.Storage?.Shared == true && payload.VersionId.Length > 0))
         {
-            var recovered = await RecoverPayloadReferencesAsync(payload.FileId, payload.VersionId, payload.ThreadId, token);
+            var recovered = await RecoverPayloadReferencesAsync(payload.FileId, payload.VersionId, payload.ThreadId, token,
+                batchJournal, readPool != null ? await readPool(payload.ThreadId) : null);
             payload.Attachments = payload.Attachments.Concat(recovered.Select(item => new AttachmentReference
             { MessageId = item.Reference.MessageId, AttachmentId = item.Reference.AttachmentId })).Distinct().ToList();
         }
-        var live = (await ReadRemoteReferencesAsync(token)).Concat(_references.Values
-            .Where(reference => reference.State == "live" && (reference.Scope.StartsWith("upload:", StringComparison.Ordinal) ||
-                reference.Scope.StartsWith("download:", StringComparison.Ordinal) || reference.Scope.StartsWith("preview:", StringComparison.Ordinal)))
-            .SelectMany(reference => reference.Payloads)).ToArray();
+        var live = batchReferences ?? await ReadCleanupReferencesAsync(token);
         var protectedAttachments = live.SelectMany(payload => payload.Attachments.Select(attachment =>
             (payload.ThreadId, attachment.MessageId, attachment.AttachmentId))).ToHashSet();
-        foreach (var active in await new TransferStateRepository(_store.TransfersDirectory).LoadRecoverableAsync(token))
-            if (active.TransferType == TransferTypes.Download && active.DownloadMetadata != null)
-            {
-                live = live.Concat(Payloads(active.DownloadMetadata)).ToArray();
-                foreach (var payload in Payloads(active.DownloadMetadata))
-                    foreach (var reference in payload.Attachments) protectedAttachments.Add((payload.ThreadId, reference.MessageId, reference.AttachmentId));
-            }
         foreach (var threadGroup in request.Payloads.GroupBy(payload => payload.ThreadId, StringComparer.Ordinal))
         {
             var shared = _catalog.Values.FirstOrDefault(row => row.ThreadId == threadGroup.Key);
@@ -139,6 +169,18 @@ internal sealed partial class SharedStorageManager
         await WriteRecordAsync(new { schemaVersion = 1, entryType = "storageCleanupApplied", operationId = request.OperationId }, null, token);
         _appliedCleanups.Add(request.OperationId);
         return true;
+    }
+
+    private async Task<StoragePayloadVersion[]> ReadCleanupReferencesAsync(CancellationToken token)
+    {
+        var live = (await ReadRemoteReferencesAsync(token)).Concat(_references.Values
+            .Where(reference => reference.State == "live" && (reference.Scope.StartsWith("upload:", StringComparison.Ordinal) ||
+                reference.Scope.StartsWith("download:", StringComparison.Ordinal) || reference.Scope.StartsWith("preview:", StringComparison.Ordinal)))
+            .SelectMany(reference => reference.Payloads)).ToList();
+        foreach (var active in await new TransferStateRepository(_store.TransfersDirectory).LoadRecoverableAsync(token))
+            if (active.TransferType == TransferTypes.Download && active.DownloadMetadata != null)
+                live.AddRange(Payloads(active.DownloadMetadata));
+        return live.ToArray();
     }
 
     internal async Task CancelReservationAsync(TransferState transfer, CancellationToken token)

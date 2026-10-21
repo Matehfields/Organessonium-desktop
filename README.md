@@ -366,6 +366,8 @@ A barra lateral abre essa árvore isolada de Arquivos, Favoritos, Dispositivos e
 
 A seção Lixeira concentra o comportamento e os contratos dessa funcionalidade.
 
+A exclusão permanente em lote usa quatro workers para ler os detalhes, registrar o intent durável e remover os metadados de cada arquivo. Os índices e o journal permanecem abertos durante essa fase, sem alternar arquivamento por item. Após confirmar as remoções e os releases, a limpeza faz uma única conferência remota das referências para o lote, consultando até quatro índices simultaneamente. Essa prova existe somente durante a operação, sob o gate do owner; não é um cache persistente nem substitui os checks de versões, referências compartilhadas, leituras ativas e downloads pausados. A edição dos attachments compartilhados continua serializada e revalidada para preservar outros arquivos da mesma mensagem. Uma falha na conferência conserva os payloads e o intent para recuperação. O painel distingue remoção dos metadados (0–80%) e limpeza (80–99%), chegando a 100% após pastas e seriais; pastas continuam sendo removidas depois dos descendentes e os seriais são publicados ao final.
+
 ## Persistência local
 
 O `README.md` é a documentação técnica geral do projeto. Documentos avulsos de desenvolvimento de features não integram o código-fonte distribuído; licenças, avisos legais e receitas de reconstrução das dependências continuam incluídos.

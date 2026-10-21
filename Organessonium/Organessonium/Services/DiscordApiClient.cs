@@ -353,7 +353,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
 
     public async Task DeleteMessageAsync(string channelId, string messageId, CancellationToken cancellationToken = default)
     {
-        using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}/messages/{messageId}"), cancellationToken);
+        using var _ = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, $"channels/{channelId}/messages/{messageId}"),
+            cancellationToken, serializeRoute: false);
         InvalidatePayloadMessage(channelId, messageId);
     }
 

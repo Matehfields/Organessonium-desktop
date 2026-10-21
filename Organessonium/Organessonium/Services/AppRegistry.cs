@@ -186,7 +186,8 @@ public sealed partial class AppRegistry
         }
     }
 
-    public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default, bool forceRefresh = false)
+    public async Task<AppEntry> LoadFileDetailsAsync(AppEntry entry, CancellationToken cancellationToken = default,
+        bool forceRefresh = false, bool cacheDetails = true)
     {
         if (entry.Type != "file" || (!forceRefresh && entry.LogicalChunkCount > 0) ||
             string.IsNullOrWhiteSpace(entry.MetadataMessageId))
@@ -223,9 +224,12 @@ public sealed partial class AppRegistry
                 {
                     detailed.Path = entry.Path;
                     detailed.ParentFolderId = entry.ParentFolderId;
-                    var siblings = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId));
-                    ReplaceEntry(siblings, detailed);
-                    _store.CacheFolderEntries(NormalizeFolderId(entry.ParentFolderId), siblings);
+                    if (cacheDetails)
+                    {
+                        var siblings = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId));
+                        ReplaceEntry(siblings, detailed);
+                        _store.CacheFolderEntries(NormalizeFolderId(entry.ParentFolderId), siblings);
+                    }
                     return detailed;
                 }
             }
@@ -1154,21 +1158,22 @@ public sealed partial class AppRegistry
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         var parent = await GetFolderMappingForDeletionAsync(parentFolderId, null, cancellationToken);
         var metadataChannel = entry.Type == "file" ? await SharedStorage.LocateMetadataAsync(entry, cancellationToken) : parent.ThreadId;
-        await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken);
-        try
+        await using (await _discord.AcquireThreadWriteAsync(parent.ThreadId, cancellationToken))
         {
             await _metadata.DeleteEntryAsync(_discord, metadataChannel, entry, cancellationToken);
-            var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
-            RemoveEntry(siblings, entry);
-            _store.CacheFolderEntries(parentFolderId, siblings);
+            List<AppEntry> siblings;
+            await _entryMutationGate.WaitAsync(cancellationToken);
+            try
+            {
+                siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
+                RemoveEntry(siblings, entry);
+                _store.CacheFolderEntries(parentFolderId, siblings);
+            }
+            finally { _entryMutationGate.Release(); }
             if (synchronizeSerials)
             {
                 await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
             }
-        }
-        finally
-        {
-            await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
 
         if (entry.Type != "folder" || string.IsNullOrWhiteSpace(entry.FolderId))
