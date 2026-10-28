@@ -40,6 +40,7 @@ internal static partial class Program
         ("fileChecksumsTransferAndResume", FileChecksumsTransferAndResumeAsync),
         ("uploadChecksumOverlapsNetworkAndResumes", UploadChecksumOverlapsNetworkAndResumesAsync),
         ("uploadPreemptsBackgroundCleanup", UploadPreemptsBackgroundCleanupAsync),
+        ("maintenanceYieldsToMutations", MaintenanceYieldsToMutationsAsync),
         ("coldUploadJournalReadsInParallel", ColdUploadJournalReadsInParallelAsync),
         ("fileChecksumsRejectCorruption", FileChecksumsRejectCorruptionAsync),
         ("loggingPersistsOnlyErrors", LoggingPersistsOnlyErrorsAsync),

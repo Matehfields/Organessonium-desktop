@@ -221,6 +221,7 @@ internal static partial class Program
             foreach (var theme in new[] { "dark", "light" })
             {
                 await view.ExecuteScriptAsync($"applyTheme('{theme}')");
+                await Task.Delay(50); // Let the reduced-motion theme transition settle before measuring hover.
                 foreach (var selected in new[] { false, true })
                 {
                     await view.ExecuteScriptAsync($"document.querySelectorAll('.file-card').forEach(card=>card.classList.toggle('selected',{selected.ToString().ToLowerInvariant()}))");
@@ -233,7 +234,8 @@ internal static partial class Program
                         var point = await view.ExecuteScriptAsync("(()=>{const r=window.__more.getBoundingClientRect();return {type:'mouseMoved',x:r.x+r.width/2,y:r.y+r.height/2}})()");
                         await view.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", point);
                         await Task.Delay(150);
-                        await Check("window.__more.matches(':hover')&&getComputedStyle(window.__more).backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(window.__more).color===window.__moreColor", $"hover dos três pontos mudou de cor em {theme}, selecionado={selected}");
+                        var hoverState = await view.ExecuteScriptAsync("JSON.stringify({hover:window.__more.matches(':hover'),background:getComputedStyle(window.__more).backgroundColor,color:getComputedStyle(window.__more).color,previous:window.__moreColor,rect:window.__more.getBoundingClientRect().toJSON()})");
+                        await Check("window.__more.matches(':hover')&&getComputedStyle(window.__more).backgroundColor==='rgba(0, 0, 0, 0)'&&getComputedStyle(window.__more).color===window.__moreColor", $"hover dos três pontos mudou de cor em {theme}, selecionado={selected}: {hoverState}");
                     }
                 }
             }

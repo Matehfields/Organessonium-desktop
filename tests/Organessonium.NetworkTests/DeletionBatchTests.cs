@@ -73,6 +73,17 @@ internal static partial class Program
             var task = (Task)delete.Invoke(controller, [JsonSerializer.Serialize(entries.Take(8).Select(entry => entry.MetadataMessageId)), true])!;
             await transport.FourDeletes.Task.WaitAsync(TimeSpan.FromSeconds(15));
             RequireSync(transport.MaximumDeletes == 4 && !task.IsCompleted, "não houve quatro exclusões de metadados simultâneas");
+            var browsing = Enumerable.Range(0, 2305).Select(index => new AppEntry { Type = "file", Name = $"photo-{index:D4}.jpg",
+                FileId = "browse-" + index, ThreadId = "browse-thread-" + index, MetadataMessageId = "browse-meta-" + index,
+                ParentFolderId = "browse", Path = "/Browse", SizeBytes = 1024 }).ToArray();
+            var navigated = entries.Concat(browsing).ToList();
+            typeof(AppController).GetField("_loadedApps", flags)!.SetValue(controller, navigated);
+            typeof(AppController).GetField("_currentPath", flags)!.SetValue(controller, "/Browse");
+            await view.ExecuteScriptAsync("navigate('/Browse',false,'browse')");
+            await bridge.CallAsync("_onAppsLoaded", navigated);
+            await view.ExecuteScriptAsync("window.__browsingCard=document.querySelector('.cards-grid .file-card');window.__browsingCard.click()");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
+                "a pasta navegada criou mais de cem cards inicialmente");
             transport.ReleaseDeletes.TrySetResult();
             phase = "fresh reference proof";
             await transport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
@@ -81,6 +92,26 @@ internal static partial class Program
             transport.ReleaseProof.TrySetResult();
             phase = "batch completion";
             await task.WaitAsync(TimeSpan.FromSeconds(30));
+            RequireSync(await view.ExecuteScriptAsync("window.__browsingCard===document.querySelector('.cards-grid .file-card')&&window.__browsingCard.classList.contains('selected')&&document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
+                "uma exclusão em outra pasta apagou/recriou os cards ou perdeu a seleção durante a navegação");
+            RequireSync(((IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!).Count(entry => entry.ParentFolderId == "browse") == 2305,
+                "a publicação da exclusão sobrescreveu a coleção carregada após a navegação");
+            await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=document.getElementById('main-area').scrollHeight");
+            for (var attempt = 0; attempt < 30 && await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===200") != "true"; attempt++)
+                await Task.Delay(100);
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===200&&window.__browsingCard===document.querySelector('.cards-grid .file-card')") == "true",
+                "a rolagem não acrescentou cem cards preservando os anteriores");
+            await view.ExecuteScriptAsync("setView('list')");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.file-list-files .file-row').length===200") == "true",
+                "a lista ignorou o limite já carregado");
+            await view.ExecuteScriptAsync("setView('grid');document.getElementById('search-input').value='photo-2304';document.getElementById('search-input').dispatchEvent(new Event('input'))");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===1&&document.querySelector('.cards-grid .file-card').textContent.includes('2304')") == "true",
+                "a busca considerou somente os primeiros cem arquivos");
+            await view.ExecuteScriptAsync("document.getElementById('search-input').value='';document.getElementById('search-input').dispatchEvent(new Event('input'));clearSelection();selectAllCurrentView()");
+            RequireSync(await view.ExecuteScriptAsync("selectedKeys.size===2305&&document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
+                "a seleção de todos perdeu itens ainda não renderizados ou a busca não reiniciou a página");
+            await view.ExecuteScriptAsync("clearSelection();navigate('/',false,'root')");
+            typeof(AppController).GetField("_currentPath", flags)!.SetValue(controller, "/");
             RequireSync(transport.RootProofReads == 1 && transport.RootArchiveChanges <= 2,
                 $"a exclusão repetiu a varredura/arquivamento por arquivo: leituras={transport.RootProofReads}, archives={transport.RootArchiveChanges}");
             RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===2&&document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'") == "true",
@@ -105,6 +136,11 @@ internal static partial class Program
             RequireSync(h.Server.Messages(entries[9].ThreadId).Sum(message => message.Attachments.Count) == 1 &&
                 h.Store.LoadCachedEntriesForFolder("root").Single(entry => entry.Type == "file").FileId == entries[9].FileId,
                 "a recuperação do intent perdeu o arquivo restante");
+            phase = "folder creation UI";
+            await ((Task)typeof(AppController).GetMethod("CreateFolderAsync", flags)!.Invoke(controller, ["Created after cleanup"])!)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            RequireSync(await view.ExecuteScriptAsync("Array.from(document.querySelectorAll('#files-grid .folder-card')).some(card=>card.textContent.includes('Created after cleanup'))&&document.querySelectorAll('.cards-grid .file-card').length===1") == "true",
+                "a pasta criada não apareceu na interface ou substituiu o arquivo preservado");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

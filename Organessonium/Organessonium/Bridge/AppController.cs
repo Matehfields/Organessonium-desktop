@@ -1914,8 +1914,9 @@ public sealed partial class AppController : IAsyncDisposable
             folder.ParentFolderId = FolderIdForPath(all, _currentPath);
             var requestedFolderId = folder.FolderId;
             await registry.AddEntryAsync(folder);
-            ReplaceLocalEntry(all, folder);
-            await PublishLocalRegistryAsync(registry, all);
+            var latest = CurrentLocalEntries();
+            ReplaceLocalEntry(latest, folder);
+            await PublishLocalRegistryAsync(registry, latest, incremental: true, changedEntry: folder);
             await _bridge.CallAsync(
                 "_onStatus",
                 folder.FolderId.Equals(requestedFolderId, StringComparison.OrdinalIgnoreCase)
@@ -3601,8 +3602,7 @@ public sealed partial class AppController : IAsyncDisposable
             if (entry != null)
             {
                 var result = await DeleteEntriesWithProgressAsync(registry, all, [entry]);
-                await PublishLocalRegistryAsync(registry, all);
-                await RemoveDeletedSpecialItemsAsync(all);
+                _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
                 if (result.Failed > 0)
                 {
                     await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
@@ -3670,8 +3670,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
 
             var result = await DeleteEntriesWithProgressAsync(registry, all, selected);
-            await PublishLocalRegistryAsync(registry, all);
-            await RemoveDeletedSpecialItemsAsync(all);
+            _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
             if (result.Failed == 0)
             {
                 await _bridge.CallAsync("_onStatus", $"OK {result.Deleted} item(ns) apagado(s).", false);
@@ -3687,15 +3686,15 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private async Task RemoveDeletedSpecialItemsAsync(List<AppEntry> remaining)
+    private async Task PublishDeletedEntriesAsync(IReadOnlyList<AppEntry> deleted)
     {
         Interlocked.Increment(ref _favoriteLoadVersion);
         Interlocked.Increment(ref _deviceLoadVersion);
-        var keys = remaining.Select(EntryCacheKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _favoriteApps = _favoriteApps.Where(entry => keys.Contains(EntryCacheKey(entry))).ToList();
-        _deviceApps = _deviceApps.Where(entry => keys.Contains(EntryCacheKey(entry))).ToList();
-        await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
-        await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
+        var keys = deleted.Select(EntryCacheKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _loadedApps = _loadedApps.Where(entry => !keys.Contains(EntryCacheKey(entry))).ToList();
+        _favoriteApps = _favoriteApps.Where(entry => !keys.Contains(EntryCacheKey(entry))).ToList();
+        _deviceApps = _deviceApps.Where(entry => !keys.Contains(EntryCacheKey(entry))).ToList();
+        await _bridge.CallAsync("_onAppsRemoved", deleted);
     }
 
     private async Task RelocateTrashItemsAsync(string idsJson, bool restore)
@@ -3711,12 +3710,14 @@ public sealed partial class AppController : IAsyncDisposable
         var opId = NewId();
         await OpsAddAsync(opId, "move", restore ? "Restaurando da lixeira" : "Enviando à lixeira");
         await SetBackgroundActivityAsync("Em andamento...", true);
+        await using var priority = registry.SharedStorage.PrioritizeMutations();
         var devicesChanged = false;
         try
         {
             for (var i = 0; i < selected.Count; i++)
             {
                 var entry = selected[i];
+                var changed = new List<AppEntry>();
                 var oldFolderPath = IsFolderEntry(entry) ? PathRules.ChildPath(entry) : "";
                 var moved = restore
                     ? await registry.RestoreFromTrashAsync(entry)
@@ -3728,10 +3729,17 @@ public sealed partial class AppController : IAsyncDisposable
                     var newFolderPath = PathRules.ChildPath(moved);
                     foreach (var child in all.Where(child => child != entry && IsDescendantOfFolder(child, entry, all) &&
                                                            IsInsideFolder(child, oldFolderPath)))
+                    {
                         child.Path = MovedChildPath(oldFolderPath, newFolderPath, PathRules.Normalize(child.Path));
+                        changed.Add(child);
+                    }
                 }
                 ReplaceLocalEntry(all, moved);
-                await PublishLocalRegistryAsync(registry, all);
+                changed.Add(moved);
+                var latest = CurrentLocalEntries();
+                foreach (var item in changed) ReplaceLocalEntry(latest, item);
+                _loadedApps = latest;
+                await _bridge.CallAsync("_onAppsBatch", changed);
                 await OpsProgressAsync(opId, Percent(i + 1, selected.Count), moved.Name);
             }
             Interlocked.Increment(ref _favoriteLoadVersion);
@@ -3744,6 +3752,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
             }
             var status = restore ? "OK Item(ns) restaurado(s)." : "OK Item(ns) enviado(s) à lixeira.";
+            _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
             await OpsUpdateAsync(opId, "done", status);
             await _bridge.CallAsync("_onStatus", status, false);
         }
@@ -3757,6 +3766,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
     {
+        await using var priority = registry.SharedStorage.PrioritizeMutations();
         foreach (var folder in selected.Where(IsFolderEntry).ToList())
         {
             var descendants = await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true);
@@ -3820,6 +3830,7 @@ public sealed partial class AppController : IAsyncDisposable
                         TrackFolderSerial(serialFolderIds, file.ParentFolderId);
                         deletedFiles++;
                         all.Remove(file);
+                        await PublishDeletedEntriesAsync([file]);
                     }
                     await OpsProgressAsync(opId, 80 * ++completed / fileTotal,
                         $"Removendo metadados ({completed}/{fileTotal}): {file.Name}");
@@ -3870,6 +3881,7 @@ public sealed partial class AppController : IAsyncDisposable
                 TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
                 deletedFolders++;
                 all.Remove(folder);
+                await PublishDeletedEntriesAsync([folder]);
             }
             catch (Exception ex)
             {

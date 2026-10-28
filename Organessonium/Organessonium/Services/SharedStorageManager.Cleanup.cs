@@ -44,29 +44,36 @@ internal sealed partial class SharedStorageManager
         try
         {
             await RefreshJournalAsync(token);
-            // All metadata removals and durable releases precede this fresh, batch-local proof.
-            // Keep the owner gate until cleanup ends so local readers/mutations cannot enter it.
-            var live = await ReadCleanupReferencesAsync(token);
-            var journal = requests.Any(request => request.Payloads.Any(payload => payload.Storage?.Shared == true))
-                ? await ReadJournalMessagesAsync(null, token) : null;
-            var pools = new Dictionary<string, IReadOnlyList<DiscordMessageDto>>(StringComparer.Ordinal);
-            async Task<IReadOnlyList<DiscordMessageDto>> ReadPool(string thread)
-            {
-                if (pools.TryGetValue(thread, out var messages)) return messages;
-                messages = await _api.GetMessagesAsync(thread, null, token);
-                if (pools.Count == 4) pools.Remove(pools.Keys.First());
-                return pools[thread] = messages;
-            }
-            foreach (var request in requests)
-            {
-                var cleaned = false;
-                try { cleaned = await CleanAsync(request, token, live, journal, ReadPool); }
-                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                catch (Exception error) { AppLogger.Error("SharedStorage.BatchCleanup", error); }
-                await onCompleted(request, cleaned);
-            }
+            await CleanBatchAsync(requests, onCompleted, token);
         }
         finally { _gate.Release(); }
+    }
+
+    private async Task CleanBatchAsync(IReadOnlyList<StorageCleanupRecord> requests,
+        Func<StorageCleanupRecord, bool, Task> onCompleted, CancellationToken token, bool continueOnFailure = true)
+    {
+        if (requests.Count == 0) return;
+        // Keep the owner gate for one fresh reference proof shared by this batch.
+        // CleanAsync still requires a durable release (or verifies that metadata was removed).
+        var live = await ReadCleanupReferencesAsync(token);
+        var journal = requests.Any(request => request.Payloads.Any(payload => payload.Storage?.Shared == true))
+            ? await ReadJournalMessagesAsync(null, token) : null;
+        var pools = new Dictionary<string, IReadOnlyList<DiscordMessageDto>>(StringComparer.Ordinal);
+        async Task<IReadOnlyList<DiscordMessageDto>> ReadPool(string thread)
+        {
+            if (pools.TryGetValue(thread, out var messages)) return messages;
+            messages = await _api.GetMessagesAsync(thread, null, token);
+            if (pools.Count == 4) pools.Remove(pools.Keys.First());
+            return pools[thread] = messages;
+        }
+        foreach (var request in requests)
+        {
+            var cleaned = false;
+            try { cleaned = await CleanAsync(request, token, live, journal, ReadPool); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) when (continueOnFailure) { AppLogger.Error("SharedStorage.BatchCleanup", error); }
+            await onCompleted(request, cleaned);
+        }
     }
 
     internal async Task ReconcileAsync(CancellationToken token = default)
@@ -90,8 +97,8 @@ internal sealed partial class SharedStorageManager
                 await RefreshJournalAsync(lifetime.Token);
                 await RecoverOwnedMutationsAsync(lifetime.Token);
                 await RecoverOwnedReadsAsync(lifetime.Token);
-                foreach (var request in _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray())
-                    await CleanAsync(request, lifetime.Token);
+                await CleanBatchAsync(_cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray(),
+                    (_, _) => Task.CompletedTask, lifetime.Token, continueOnFailure: false);
             }
             finally { _gate.Release(); }
         }

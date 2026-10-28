@@ -53,11 +53,22 @@ internal static partial class Program
             for (var attempt = 0; attempt < 80 && await view.ExecuteScriptAsync("document.querySelectorAll('[data-thumb] img').length>0").WaitAsync(TimeSpan.FromSeconds(5)) != "true"; attempt++)
                 await Task.Delay(100);
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
+            await Check("document.querySelectorAll('.cards-grid .file-card').length===100", "a pasta não começou com apenas cem cards");
             await Check("document.querySelectorAll('[data-thumb] img').length>0", "as miniaturas iniciais não apareceram");
             await view.ExecuteScriptAsync("window.__firstCard=document.querySelector('.cards-grid .file-card');window.__firstImage=window.__firstCard.querySelector('img');window._onThumb(window.__firstCard.querySelector('[data-thumb]').dataset.thumb);render()");
             await Task.Delay(100);
             await Check("window.__firstCard===document.querySelector('.cards-grid .file-card')&&window.__firstImage===window.__firstCard.querySelector('img')",
                 "uma resposta repetida/renderização recriou o card ou a imagem visível");
+            await view.ExecuteScriptAsync("window.__outside={name:'other.png',fileId:'outside',threadId:'outside-thread',metadataMessageId:'outside-meta',type:'file',path:'/Other',parentFolderId:'other'};window._onAppsBatch([window.__outside]);window._onAppsRemoved([window.__outside]);");
+            await Check("window.__firstCard===document.querySelector('.cards-grid .file-card')&&window.__firstImage===window.__firstCard.querySelector('img')",
+                "uma alteração em outra pasta recriou a imagem da pasta aberta");
+            for (var shown = 100; shown < fileCount; shown += 100)
+            {
+                await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=document.getElementById('main-area').scrollHeight");
+                await Task.Delay(160);
+                await Check("document.querySelectorAll('.cards-grid .file-card').length===" + Math.Min(shown + 100, fileCount),
+                    "a rolagem não acrescentou o próximo lote de cem cards");
+            }
             for (var step = 0; step <= 24; step++)
             {
                 await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=(document.getElementById('main-area').scrollHeight-innerHeight)*" + step + "/24");

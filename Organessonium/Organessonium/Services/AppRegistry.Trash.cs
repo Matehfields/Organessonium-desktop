@@ -6,6 +6,7 @@ public sealed partial class AppRegistry
 {
     public async Task EnsureTrashIndexAsync(CancellationToken cancellationToken = default)
     {
+        await using var priority = SharedStorage.PrioritizeMutations();
         await _entryMutationGate.WaitAsync(cancellationToken);
         try { await EnsureTrashIndexCoreAsync(cancellationToken); }
         finally { _entryMutationGate.Release(); }
@@ -30,6 +31,7 @@ public sealed partial class AppRegistry
 
     private async Task<AppEntry> RelocateTrashEntryAsync(AppEntry entry, bool restore, CancellationToken cancellationToken)
     {
+        await using var priority = SharedStorage.PrioritizeMutations();
         await _entryMutationGate.WaitAsync(cancellationToken);
         try
         {

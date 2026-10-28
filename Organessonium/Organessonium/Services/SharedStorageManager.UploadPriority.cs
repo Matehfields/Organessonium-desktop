@@ -23,6 +23,9 @@ internal sealed partial class SharedStorageManager
         return new UploadPriorityLease(this);
     }
 
+    // Interactive metadata writes share the same preemption and deferred-cleanup contract.
+    internal IAsyncDisposable PrioritizeMutations() => PrioritizeUploads();
+
     private void ResumeDeferredMaintenance()
     {
         lock (_maintenance)

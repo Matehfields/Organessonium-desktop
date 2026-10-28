@@ -848,11 +848,12 @@ public sealed partial class AppRegistry
         Func<TimeSpan, Task>? onRateLimitWait = null,
         bool synchronizeSerials = true)
     {
+        await using var priority = SharedStorage.PrioritizeMutations();
+        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
         await _entryMutationGate.WaitAsync(cancellationToken);
         string messageId;
         try
         {
-            await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
             messageId = await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials);
         }
         finally
@@ -1004,6 +1005,7 @@ public sealed partial class AppRegistry
         Func<TimeSpan, Task>? onRateLimitWait = null,
         FileMetadata? expectedPayload = null)
     {
+        await using var priority = SharedStorage.PrioritizeMutations();
         if (entry.Type == "file" && entry.LogicalChunkCount == 0)
         {
             var details = await LoadFileDetailsAsync(entry, cancellationToken);
@@ -1151,6 +1153,7 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken = default,
         bool synchronizeSerials = true)
     {
+        await using var priority = SharedStorage.PrioritizeMutations();
         var folderMapping = entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)
             ? await GetFolderMappingForDeletionAsync(entry.FolderId, entry, cancellationToken)
             : null;

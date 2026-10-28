@@ -371,6 +371,9 @@ const I18N = {
 };
 
 const $ = id => document.getElementById(id);
+const libraryPageSize = 100;
+let libraryPageKey = '', libraryVisibleLimit = libraryPageSize, libraryItemCount = 0;
+let libraryRenderSignature = '', libraryPagingFrame = 0;
 const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     emptyState  = $('empty-state'),  statusText     = $('status-text'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
@@ -958,6 +961,17 @@ window._onAppsBatch = apps => {
     syncOpenMarkdownApps();
     render();
     scheduleVisibleThumbnails();
+    refreshSidebarSummary();
+};
+
+window._onAppsRemoved = apps => {
+    if (!Array.isArray(apps) || !apps.length) return;
+    const removed = new Set(apps.map(appIdentityKey));
+    allApps = allApps.filter(app => !removed.has(appIdentityKey(app)));
+    specialItems = specialItems.filter(app => !removed.has(appIdentityKey(app)));
+    deviceItems = deviceItems.filter(app => !removed.has(appIdentityKey(app)));
+    syncOpenMarkdownApps();
+    render();
     refreshSidebarSummary();
 };
 
@@ -3534,6 +3548,23 @@ function closePreviewFromBackdrop(e) {
 
 function setupSmoothScroll() {
     // Native Chromium/WebView2 scrolling gives the same cadence as Chrome.
+    const main = $('main-area');
+    const requestNextPage = () => {
+        if (libraryPagingFrame || libraryVisibleLimit >= libraryItemCount || main.classList.contains('hidden')) return;
+        const pageKey = libraryPageKey;
+        libraryPagingFrame = requestAnimationFrame(() => {
+            libraryPagingFrame = 0;
+            if (pageKey !== libraryPageKey) return;
+            if (main.scrollHeight - main.scrollTop - main.clientHeight > 400) return;
+            libraryVisibleLimit += libraryPageSize;
+            render();
+        });
+    };
+    main.addEventListener('scroll', () => { if (main.scrollTop > 0) requestNextPage(); }, { passive:true });
+    main.addEventListener('wheel', event => { if (event.deltaY > 0) requestNextPage(); }, { passive:true });
+    main.addEventListener('keydown', event => {
+        if (['PageDown','End','ArrowDown'].includes(event.key) && canUseGlobalShortcut(event)) requestNextPage();
+    });
 }
 
 function stepSmoothScroll() {
@@ -6257,8 +6288,6 @@ function syncRenderedItems(container, items, kind, create) {
 
 function render() {
     $('btn-empty-trash').classList.toggle('hidden', activeLibraryView !== 'trash' || currentPath !== '/@trash');
-    resetThumbnailViewport();
-    renderPathCrumbs();
     const viewApps = appsForActiveView();
     const favoritesView = activeLibraryView === 'favorites';
     const devicesRootView = activeLibraryView === 'devices' && currentPath === '/@synchronized';
@@ -6270,7 +6299,7 @@ function render() {
         ? deviceItems.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
         : trashRootView ? viewApps.filter(app => (app.path || '/') === currentPath && (!searchQuery || (app.name || '').toLowerCase().includes(searchQuery))) : favoriteSource;
     const specialRootView = favoritesView || devicesRootView || trashRootView;
-    const folders = specialRootView
+    let folders = specialRootView
         ? (typeFilter === 'all' || typeFilter === 'folders' ? sorted(specialSource.filter(app => app.type === 'folder')) : [])
         : (typeFilter === 'all' || typeFilter === 'folders' ? childFolders(viewApps, currentPath) : []);
     let files = typeFilter === 'folders' ? [] : sorted(specialRootView ? specialSource.filter(app => app.type !== 'folder') : filesAt(viewApps, currentPath));
@@ -6278,11 +6307,27 @@ function render() {
     files = files.filter(app => matchesTypeFilter(app) && matchesDateFilter(app));
 
     const total=folders.length+files.length;
+    const pageKey = JSON.stringify([activeLibraryView, currentPath, currentFolderIds, searchQuery, typeFilter, dateFilter, sortMode]);
+    if (libraryPageKey !== pageKey) {
+        libraryPageKey = pageKey;
+        libraryVisibleLimit = libraryPageSize;
+        $('main-area').scrollTop = 0;
+    }
+    libraryItemCount = total;
+    folders = folders.slice(0, libraryVisibleLimit);
+    files = files.slice(0, Math.max(0, libraryVisibleLimit - folders.length));
+    const loadingFolder = !searchQuery && (favoritesView
+        ? folderLoadingPath === '/@favorites' : folderLoadingPath === currentPath);
+    const signature = JSON.stringify([pageKey, viewMode, resolveLanguage(), settings.previewEnabled,
+        !total && loadingFolder,
+        folders.map(folder => typeof folder === 'string'
+            ? [folder, allApps.filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.name === folder)] : folder), files]);
+    if (signature === libraryRenderSignature) { updateSelectionUI(); return; }
+    libraryRenderSignature = signature;
+    resetThumbnailViewport();
+    renderPathCrumbs();
     if (!total) {
         filesGrid.replaceChildren(); filesList.replaceChildren();
-        const loadingFolder = !searchQuery && (favoritesView
-            ? folderLoadingPath === '/@favorites'
-            : folderLoadingPath === currentPath);
         emptyState.classList.remove('hidden');
         emptyState.classList.toggle('folder-loading', loadingFolder);
         $('empty-title').textContent = loadingFolder ? t('loading') : t('emptyTitle');
