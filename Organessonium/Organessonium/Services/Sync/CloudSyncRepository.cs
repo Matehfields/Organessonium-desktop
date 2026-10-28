@@ -207,6 +207,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
     public async Task<FileMetadata> UploadAsync(SyncFolderBinding folder, SyncLocalFile local, string fileId,
         CancellationToken token, Action<SyncTransferProgress> progress)
     {
+        await using var uploadPriority = _registry.SharedStorage.PrioritizeUploads();
         var sourcePath = SyncPaths.Resolve(folder.LocalPath, local.RelativePath);
         var staging = Directory.CreateDirectory(Path.Combine(_store.DataDirectory.FullName, "SyncStaging", SafeKey(folder.SyncFolderId)));
         var safeFile = SafeKey(fileId);
@@ -267,14 +268,13 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
         count = ArchiveSplitter.GetPartCount(local.Size, chunkBytes);
         if (count != transfer.TotalChunks || chunkBytes > EncryptionService.MaximumPlaintextPayloadBytes)
             throw new InvalidDataException("O layout do checkpoint não corresponde ao conteúdo sincronizado.");
-        if (transfer.Checksums == null && transfer.UploadedChunks.Count == 0)
-        {
-            transfer.Checksums = await FileChecksums.CalculateAsync(() => PreparedVideoUpload.OpenFile(snapshot), local.Size, chunkBytes, token);
-            await _transfers.SaveAsync(transfer, token);
-        }
-        transfer.Checksums?.Validate(local.Size, count);
+        await using var streamingChecksums = await StreamingUploadChecksums.StartAsync(transfer, _transfers,
+            () => PreparedVideoUpload.OpenFile(snapshot), local.Size, chunkBytes, token);
         var encryption = new EncryptedPayloadContext(fileId, transfer.Encryption!, EncryptedPayloadRoles.Original, 0, count)
-            { Checksums = transfer.Checksums };
+        {
+            Checksums = transfer.UploadChecksumPending ? null : transfer.Checksums,
+            UploadPlaintextObserved = streamingChecksums == null ? null : streamingChecksums.ObserveAsync
+        };
         var uploader = new ForumUploader(_api, _settings.AppsForumId, MetadataCodec.ForStore(_store));
         using var memory = new UploadMemoryCoordinator(_settings.EffectiveUploadThreads);
         try
@@ -302,6 +302,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
                 maxPreparedPartBytes: checked(chunkBytes + EncryptionService.EnvelopeOverheadBytes), sharedUpload: shared);
             if (result.ChunkCount != count || (result.ChunkReferences == null && result.ChunkMessageIds.Any(string.IsNullOrWhiteSpace)))
                 throw new InvalidDataException("O upload não confirmou todos os chunks.");
+            if (streamingChecksums != null) await streamingChecksums.CompleteAsync(token);
             var payload = new FileMetadata
             {
                 FileId = fileId, ThreadId = result.ThreadId, Name = transfer.FileName, SizeBytes = local.Size,

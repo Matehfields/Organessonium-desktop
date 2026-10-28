@@ -58,6 +58,9 @@ public sealed class TransferState
     [JsonPropertyName("checksums")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PayloadChecksums? Checksums { get; set; }
+    [JsonPropertyName("uploadChecksumPending")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool UploadChecksumPending { get; set; }
     [JsonPropertyName("sharedAllocationPending")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool SharedAllocationPending { get; set; }
@@ -191,7 +194,18 @@ public sealed class TransferState
         if (PayloadLayoutVersion is not (TransferPayloadLayouts.SingleAttachment or TransferPayloadLayouts.MultiAttachment or TransferPayloadLayouts.SharedStorage))
             throw new InvalidDataException("O layout desta transferência ainda não é suportado.");
         Storage?.Validate();
-        Checksums?.Validate(SizeBytes, TotalChunks);
+        if (UploadChecksumPending)
+        {
+            if (TransferType != TransferTypes.Upload || Checksums == null || Checksums.Version != 1 ||
+                Checksums.Algorithm != "SHA-256" || Checksums.Sha256 != "" ||
+                Checksums.ChunkSizeBytes <= 0 || Checksums.ChunkSizeBytes > 64 * 1024 * 1024 ||
+                Checksums.Chunks == null || Checksums.Chunks.Count != TotalChunks ||
+                Math.Max(1, (SizeBytes + Checksums.ChunkSizeBytes - 1) / Checksums.ChunkSizeBytes) != TotalChunks ||
+                Checksums.Chunks.Any(hash => hash != "" && !PayloadChecksums.IsHash(hash)) ||
+                (UploadedChunks ?? []).Any(chunk => chunk.Index < 0 || chunk.Index >= TotalChunks || Checksums.Chunks[chunk.Index] == ""))
+                throw new InvalidDataException("O checkpoint dos checksums de upload está incompleto ou inválido.");
+        }
+        else Checksums?.Validate(SizeBytes, TotalChunks);
         ThumbnailRef?.Validate();
         if (PayloadLayoutVersion == TransferPayloadLayouts.SharedStorage && Storage?.Shared != true)
             throw new InvalidDataException("O checkpoint compartilhado não contém a identidade do armazenamento.");

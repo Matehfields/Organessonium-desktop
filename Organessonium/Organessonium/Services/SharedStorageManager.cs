@@ -13,18 +13,20 @@ namespace Organessonium.Services;
 internal sealed partial class SharedStorageManager
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> OwnerGates = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, MaintenancePriority> OwnerMaintenance = new(StringComparer.Ordinal);
     private static readonly object OwnerIdentityGate = new();
     private readonly DiscordApiClient _api;
     private readonly SettingsStore _store;
     private readonly AppSettings _settings;
     private readonly MetadataService _metadata;
     private readonly SemaphoreSlim _gate;
+    private readonly MaintenancePriority _maintenance;
     private readonly Dictionary<string, StorageThreadRecord> _catalog = new(StringComparer.Ordinal);
     private readonly Dictionary<string, StorageReferenceRecord> _references = new(StringComparer.Ordinal);
     private readonly Dictionary<string, StorageCleanupRecord> _cleanups = new(StringComparer.Ordinal);
     private readonly HashSet<string> _appliedCleanups = new(StringComparer.Ordinal);
     private readonly Dictionary<string, StorageBatchPlan> _plans = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _legacyCatalogIds = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _legacyCatalogIds = new(StringComparer.Ordinal);
     private readonly Func<CancellationToken, Task<FolderIndexMapping>> _journalIndex;
     private readonly SemaphoreSlim _journalIndexGate = new(1, 1);
     private string? _journalThreadId;
@@ -40,7 +42,9 @@ internal sealed partial class SharedStorageManager
         _metadata = new MetadataService(MetadataCodec.ForStore(store), api.DownloadAttachmentBytesAsync);
         _journalIndex = journalIndex ?? (token => new AppRegistry(api, store, settings).GetStorageJournalIndexAsync(token));
         OwnerId = ownerId ?? ResolveOwner(store);
-        _gate = OwnerGates.GetOrAdd(OwnerId + ":" + settings.NamesChannelId + ":" + settings.AppsForumId, _ => new SemaphoreSlim(1, 1));
+        var ownerKey = OwnerId + ":" + settings.NamesChannelId + ":" + settings.AppsForumId;
+        _gate = OwnerGates.GetOrAdd(ownerKey, _ => new SemaphoreSlim(1, 1));
+        _maintenance = OwnerMaintenance.GetOrAdd(ownerKey, _ => new MaintenancePriority());
         Batcher = new SharedPayloadBatcher(this, api, _metadata);
     }
 
@@ -67,10 +71,11 @@ internal sealed partial class SharedStorageManager
     internal async Task<IReadOnlyDictionary<string, SharedStorageReservation>> ReserveManyAsync(
         IReadOnlyList<(string FileId, string VersionId)> files, CancellationToken token)
     {
+        if (files.Count == 0) return new Dictionary<string, SharedStorageReservation>();
         await _gate.WaitAsync(token);
         try
         {
-            await RefreshJournalAsync(token);
+            if (!UseReservationHints()) await RefreshJournalAsync(token);
             var result = new Dictionary<string, SharedStorageReservation>(StringComparer.Ordinal);
             var remaining = files.Distinct().ToList();
             while (remaining.Count > 0)
@@ -109,6 +114,7 @@ internal sealed partial class SharedStorageManager
                 await SaveCatalogAsync(selected, token);
                 foreach (var assignedFile in assigned) remaining.Remove(assignedFile);
             }
+            WarmReservationJournal(token);
             return result;
         }
         finally { _gate.Release(); }
@@ -122,11 +128,12 @@ internal sealed partial class SharedStorageManager
         await _gate.WaitAsync(token);
         try
         {
-            await RefreshJournalAsync(token);
+            if (!UseReservationHints() || !_catalog.ContainsKey(reservation.Layout.StorageId!)) await RefreshJournalAsync(token);
             if (!_catalog.TryGetValue(reservation.Layout.StorageId!, out var record)) throw new IOException("Armazenamento compartilhado ausente do catálogo.");
             record = await ReloadCatalogAsync(record, token);
             if (record.OwnerId != OwnerId || !record.Members.Any(member => member.FileId == reservation.FileId))
                 throw new IOException("Essa transferência deve ser retomada pela instalação que reservou o armazenamento.");
+            WarmReservationJournal(token);
         }
         finally { _gate.Release(); }
     }
@@ -168,6 +175,7 @@ internal sealed partial class SharedStorageManager
         var updated = await WriteRecordAsync(row,
             row.CatalogChannelId == _settings.NamesChannelId ? null : row.CatalogMessageId, token);
         row.CatalogMessageId = updated.Id; row.CatalogChannelId = await GetJournalThreadAsync(token); _catalog[row.StorageId] = row;
+        SaveCatalogHints();
     }
 
     private static void ValidateCatalog(StorageThreadRecord row)
@@ -191,6 +199,12 @@ internal sealed partial class SharedStorageManager
 
     private async Task RefreshJournalAsync(CancellationToken token)
     {
+        if (!_initialized && _reservationWarmup != null)
+        {
+            var warmup = _reservationWarmup;
+            try { await ApplyJournalMessagesAsync(await warmup.WaitAsync(token), token); }
+            finally { _reservationWarmup = null; }
+        }
         var messages = await ReadJournalMessagesAsync(_initialized ? 100 : null, token);
         if (_initialized && messages.Any(message => Snowflake(message.Id) > _frontier && JournalOrder(message) <= _frontier))
         {
@@ -198,6 +212,16 @@ internal sealed partial class SharedStorageManager
             messages = await ReadJournalMessagesAsync(null, token);
             _catalog.Clear(); _references.Clear(); _cleanups.Clear(); _appliedCleanups.Clear(); _plans.Clear();
             _mutations.Clear(); _deletionFences.Clear(); _initialized = false; _frontier = 0;
+        }
+        await ApplyJournalMessagesAsync(messages, token);
+    }
+
+    private async Task ApplyJournalMessagesAsync(List<DiscordMessageDto> messages, CancellationToken token)
+    {
+        if (!_initialized)
+        {
+            _catalog.Clear(); _references.Clear(); _cleanups.Clear(); _appliedCleanups.Clear(); _plans.Clear();
+            _mutations.Clear(); _deletionFences.Clear(); _frontier = 0;
         }
         foreach (var message in messages.Where(message => !_initialized || Snowflake(message.Id) > _frontier)
                      .OrderBy(JournalOrder).ThenBy(message => Snowflake(message.Id)))
@@ -214,7 +238,7 @@ internal sealed partial class SharedStorageManager
                 case "storageThread":
                     var row = root.Deserialize<StorageThreadRecord>(JsonOptions.Web)!; ValidateCatalog(row);
                     row.CatalogMessageId = message.Id;
-                    row.CatalogChannelId = _legacyCatalogIds.Contains(message.Id) ? _settings.NamesChannelId : await GetJournalThreadAsync(token);
+                    row.CatalogChannelId = _legacyCatalogIds.ContainsKey(message.Id) ? _settings.NamesChannelId : await GetJournalThreadAsync(token);
                     _catalog[row.StorageId] = row; _api.RegisterSharedThread(row.ThreadId); break;
                 case "storageReference":
                     var reference = root.Deserialize<StorageReferenceRecord>(JsonOptions.Web)!;
@@ -244,6 +268,7 @@ internal sealed partial class SharedStorageManager
         }
         if (messages.Count > 0) _frontier = Math.Max(_frontier, messages.Max(message => Snowflake(message.Id)));
         _initialized = true;
+        SaveCatalogHints();
         await RecoverCreationsAsync(token);
     }
 

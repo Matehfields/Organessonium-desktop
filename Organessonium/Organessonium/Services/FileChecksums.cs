@@ -16,7 +16,9 @@ internal static class FileChecksums
         using var whole = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var chunk = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var result = new PayloadChecksums { ChunkSizeBytes = chunkBytes };
-        var buffer = new byte[Math.Min(chunkBytes, 1024 * 1024)];
+        var bufferBytes = Math.Min(chunkBytes, 1024 * 1024);
+        using var reservation = await RamUploadBudget.ReserveBytesAsync(bufferBytes, token).ConfigureAwait(false);
+        var buffer = new byte[bufferBytes];
         try
         {
             long consumed = 0;

@@ -71,16 +71,39 @@ internal sealed partial class SharedStorageManager
 
     internal async Task ReconcileAsync(CancellationToken token = default)
     {
-        await _gate.WaitAsync(token);
+        CancellationTokenSource lifetime;
+        lock (_maintenance)
+        {
+            if (_maintenance.Uploads > 0 || _maintenance.Cleanup != null)
+            {
+                _maintenance.Pending = true;
+                return;
+            }
+            lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _maintenance.Cleanup = lifetime;
+        }
         try
         {
-            await RefreshJournalAsync(token);
-            await RecoverOwnedMutationsAsync(token);
-            await RecoverOwnedReadsAsync(token);
-            foreach (var request in _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray())
-                await CleanAsync(request, token);
+            await _gate.WaitAsync(lifetime.Token);
+            try
+            {
+                await RefreshJournalAsync(lifetime.Token);
+                await RecoverOwnedMutationsAsync(lifetime.Token);
+                await RecoverOwnedReadsAsync(lifetime.Token);
+                foreach (var request in _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray())
+                    await CleanAsync(request, lifetime.Token);
+            }
+            finally { _gate.Release(); }
         }
-        finally { _gate.Release(); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested && lifetime.IsCancellationRequested)
+        {
+            lock (_maintenance) _maintenance.Pending = true;
+        }
+        finally
+        {
+            lock (_maintenance) { _maintenance.Cleanup = null; lifetime.Dispose(); }
+            if (!token.IsCancellationRequested) ResumeDeferredMaintenance();
+        }
     }
 
     private async Task<bool> CleanAsync(StorageCleanupRecord request, CancellationToken token,

@@ -99,6 +99,7 @@ public sealed record EncryptedPayloadContext(
     int ChunkCount = 1)
 {
     public PayloadChecksums? Checksums { get; init; }
+    internal Func<int, ReadOnlyMemory<byte>, CancellationToken, Task>? UploadPlaintextObserved { get; init; }
     public EncryptedPayloadContext WithChunkIndex(int chunkIndex)
     {
         return this with { ChunkIndex = chunkIndex };

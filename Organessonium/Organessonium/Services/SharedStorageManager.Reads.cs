@@ -16,6 +16,7 @@ internal sealed partial class SharedStorageManager
 
     internal async Task<StorageReadLease> BeginReadAsync(string scope, string fileId, List<StoragePayloadVersion> payloads, CancellationToken token)
     {
+        await AwaitReservationJournalAsync(token);
         ActiveReads[scope] = 0;
         await _gate.WaitAsync(token);
         try

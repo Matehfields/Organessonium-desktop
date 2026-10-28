@@ -2184,6 +2184,7 @@ public sealed partial class AppController : IAsyncDisposable
         var cancellationToken = BeginTransferOperation(opId);
         try
         {
+            await using var uploadPriority = registry.SharedStorage.PrioritizeUploads();
             tasks = await PlanSharedUploadsAsync(tasks, all, registry, cancellationToken);
             await RunUploadQueueAsync(opId, tasks, all, serialFolderIds, cancellationToken);
         }
@@ -2385,6 +2386,7 @@ public sealed partial class AppController : IAsyncDisposable
         var uploader = new ForumUploader(RequireApi(), settings.AppsForumId, Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
         var registry = Registry();
         var entrySnapshot = allEntries.ToList();
+        await using var uploadPriority = registry.SharedStorage.PrioritizeUploads();
         var uploadedEntries = new ConcurrentDictionary<int, AppEntry>();
         var done = 0;
         var failed = 0;
@@ -2629,6 +2631,7 @@ public sealed partial class AppController : IAsyncDisposable
         Action? onOriginalUploaded = null,
         Action? onPublishingMetadata = null)
     {
+        await using var uploadPriority = registry.SharedStorage.PrioritizeUploads();
         using var networkWait = NetworkRetryPolicy.TransferScope(cancellationToken);
         using var ownedGate = adaptiveUploadGate == null ? new AdaptiveUploadGate(settings.EffectiveUploadThreads, !settings.ForceUploadParallelism) : null;
         using var liveOwnedGate = ownedGate == null ? null : UploadConcurrencyRegistry.Register(ownedGate);
@@ -2673,10 +2676,15 @@ public sealed partial class AppController : IAsyncDisposable
 
         var threadId = "";
         TransferState? transferState = existingTransferState;
+        var hadSharedAllocation = existingTransferState?.Storage?.Shared == true;
         IAsyncDisposable? payloadLease = null;
         SharedUploadContext? sharedUpload = null;
         try
         {
+            var plannedReplacement = transferState?.Replacement ?? replacement;
+            if (plannedReplacement != null && (sourceLength <= DiscordLimits.DedicatedThreadThresholdBytes ||
+                SharedStorageManager.Payloads(plannedReplacement.Metadata).Any(payload => payload.Storage?.Shared == true)))
+                await registry.SharedStorage.EnsureMetadataAvailableAsync(plannedReplacement.Metadata.FileId, cancellationToken);
             var parentFolderId = string.IsNullOrWhiteSpace(transferState?.TargetFolderId)
                 ? FolderIdForPath(allEntries, targetPath)
                 : transferState.TargetFolderId;
@@ -2721,15 +2729,7 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
 
-            if (transferState.Checksums == null && transferState.UploadedChunks.Count == 0)
-            {
-                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, progressTracker.Preparing(0),
-                    "Calculando checksums...", throttle, true, useBatchUi, progressTracker: progressTracker);
-                transferState.Checksums = await FileChecksums.CalculateAsync(preparedVideo.OpenRead, sourceLength,
-                    checked((int)chunkSizeBytes), cancellationToken);
-                await _transferManager.SaveAsync(transferState, cancellationToken);
-            }
-            transferState.Checksums?.Validate(sourceLength, totalChunks);
+            if (!transferState.UploadChecksumPending) transferState.Checksums?.Validate(sourceLength, totalChunks);
             if (transferState.SharedAllocationPending)
             {
                 await _transferManager.SaveAsync(transferState, cancellationToken);
@@ -2800,8 +2800,11 @@ public sealed partial class AppController : IAsyncDisposable
                 await ReportRateLimitWaitAsync(remaining);
             }
 
-            if (sharedUpload != null && existingTransferState != null && !scheduledTransfer)
+            if (sharedUpload != null && existingTransferState != null && !scheduledTransfer && hadSharedAllocation &&
+                transferState.UploadedChunks.Count < totalChunks)
             {
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, -1,
+                    "Verificando partes do upload anterior...", throttle, true, useBatchUi, progressTracker: progressTracker);
                 var recovered = await sharedUpload.Manager.RecoverChunksAsync(sharedUpload.Reservation,
                     EncryptedPayloadRoles.Original, totalChunks, cancellationToken);
                 foreach (var reference in recovered.Where(reference => !transferState.UploadedChunks.Any(chunk => chunk.Index == reference.Index)))
@@ -2882,6 +2885,9 @@ public sealed partial class AppController : IAsyncDisposable
                 finally { checkpointGate.Release(); }
             }
 
+            await using var streamingChecksums = transferState.Encryption == null ? null :
+                await StreamingUploadChecksums.StartAsync(transferState, _transferManager, preparedVideo.OpenRead,
+                    sourceLength, checked((int)chunkSizeBytes), cancellationToken);
             ForumUploadResult upload;
             if (transferState.Encryption != null)
             {
@@ -2890,7 +2896,11 @@ public sealed partial class AppController : IAsyncDisposable
                     transferState.Encryption,
                     EncryptedPayloadRoles.Original,
                     0,
-                    totalChunks) { Checksums = transferState.Checksums };
+                    totalChunks)
+                {
+                    Checksums = transferState.UploadChecksumPending ? null : transferState.Checksums,
+                    UploadPlaintextObserved = streamingChecksums == null ? null : streamingChecksums.ObserveAsync
+                };
 
                 async Task<PreparedUploadPart> PrepareOriginalPartAsync(int index)
                 {
@@ -2951,6 +2961,7 @@ public sealed partial class AppController : IAsyncDisposable
                     onPartTransferProgress: (index, wire) => { byteProgress.Report(index, wire); ReportUploadedParts(Volatile.Read(ref confirmedParts)); });
             }
             threadId = upload.ThreadId;
+            if (streamingChecksums != null) await streamingChecksums.CompleteAsync(cancellationToken);
             // All original bodies/ACKs/checkpoints have completed. Do not retain their admission or MP4 index during finalization.
             preparedVideo.Dispose();
             onOriginalUploaded?.Invoke();

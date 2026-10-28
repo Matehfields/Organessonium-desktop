@@ -53,6 +53,8 @@ internal static partial class Program
     private static async Task<TestOutcome> SharedStorageCreationAckAndMetadataFencesAsync()
     {
         using var h = new SharedHarness();
+        await h.Storage.ReserveManyAsync(Enumerable.Range(0, DiscordLimits.MaxFilesPerSharedThread)
+            .Select(_ => (Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"))).ToArray(), default);
         using var lostReply = new LostStorageCreationReplyHandler(h.Server);
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(lostReply, false));
         var storage = new SharedStorageManager(api, h.Store, h.Settings);
@@ -61,13 +63,17 @@ internal static partial class Program
         catch (DiscordApiException error) when (error.StatusCode == HttpStatusCode.ServiceUnavailable) { }
         var restarted = new SharedStorageManager(api, h.Store, h.Settings);
         var recovered = await restarted.ReserveAsync(state.FileId, state.TransferId, default);
-        RequireSync(h.Server.FileThreads().Count == 1 && recovered.ThreadId == h.Server.FileThreads().Single() &&
-            (await h.CatalogAsync()).Single().Members.Single().FileId == state.FileId, "recuperar a criação duplicou a thread ou perdeu a vaga");
+        RequireSync(h.Server.FileThreads().Count == 2 && h.Server.FileThreads().Contains(recovered.ThreadId) &&
+            (await h.CatalogAsync()).Single(row => row.ThreadId == recovered.ThreadId).Members.Single().FileId == state.FileId,
+            "recuperar a criação com um catálogo cheio em cache duplicou a thread ou perdeu a vaga");
+        await h.Storage.VerifyReservationAsync(recovered, default);
         var entry = (await h.UploadAsync([state])).Single();
         await using (var firstWriter = await h.Storage.AcquireMetadataMutationAsync(entry, default))
         {
             var peerStore = new SettingsStore(h.Directory.CreateSubdirectory("peer-data")); peerStore.Save(h.Settings);
             var peer = new AppRegistry(h.Api, peerStore, h.Settings); await peer.RefreshMappingsAsync();
+            try { await peer.SharedStorage.EnsureMetadataAvailableAsync(entry.FileId, default); return TestOutcome.Fail("a preparação ignorou uma edição remota ativa"); }
+            catch (IOException) { }
             entry.Name = "forbidden-rename.bin";
             try { await peer.UpdateEntryAsync(entry); return TestOutcome.Fail("dois escritores alteraram o mesmo metadata simultaneamente"); }
             catch (IOException) { }

@@ -213,6 +213,8 @@ public sealed class EncryptionService
                 readTotal += read;
             }
 
+            if (context.UploadPlaintextObserved != null)
+                await context.UploadPlaintextObserved(context.ChunkIndex, plaintextBuffer[..length], cancellationToken).ConfigureAwait(false);
             return EncryptBytesInto(plaintextBuffer.Span[..length], encryptedBuffer.Span, context, replay);
         }
         finally

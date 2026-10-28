@@ -33,7 +33,7 @@ public sealed class PayloadChecksums
             throw new InvalidDataException("Metadados de checksum incompletos ou inválidos.");
     }
 
-    private static bool IsHash(string? hash) => hash is { Length: 64 } &&
+    internal static bool IsHash(string? hash) => hash is { Length: 64 } &&
         hash.All(value => value is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     public void VerifyChunk(int index, ReadOnlySpan<byte> bytes)

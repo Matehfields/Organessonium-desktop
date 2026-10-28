@@ -117,29 +117,56 @@ public sealed partial class TransferManager
         long sizeBytes,
         CancellationToken cancellationToken = default)
     {
-        state.Status = TransferStatuses.Uploading;
-        var existing = state.UploadedChunks.FirstOrDefault(chunk => chunk.Index == index);
-        if (existing == null)
+        await _uploadCheckpointGate.WaitAsync(cancellationToken);
+        try
         {
-            state.UploadedChunks.Add(new TransferChunkState
+            state.Status = TransferStatuses.Uploading;
+            var existing = state.UploadedChunks.FirstOrDefault(chunk => chunk.Index == index);
+            if (existing == null)
             {
-                Index = index,
-                MessageId = messageId,
-                SizeBytes = sizeBytes,
-            });
-        }
-        else
-        {
-            existing.MessageId = messageId;
-            existing.SizeBytes = sizeBytes;
-        }
+                state.UploadedChunks.Add(new TransferChunkState
+                {
+                    Index = index,
+                    MessageId = messageId,
+                    SizeBytes = sizeBytes,
+                });
+            }
+            else
+            {
+                existing.MessageId = messageId;
+                existing.SizeBytes = sizeBytes;
+            }
 
-        state.UploadedChunks = state.UploadedChunks.OrderBy(chunk => chunk.Index).ToList();
-        state.PendingChunks = Enumerable.Range(0, Math.Max(0, state.TotalChunks))
-            .Except(state.UploadedChunks.Select(chunk => chunk.Index))
-            .OrderBy(index => index)
-            .ToList();
-        await SaveAsync(state, cancellationToken);
+            state.UploadedChunks = state.UploadedChunks.OrderBy(chunk => chunk.Index).ToList();
+            state.PendingChunks = Enumerable.Range(0, Math.Max(0, state.TotalChunks))
+                .Except(state.UploadedChunks.Select(chunk => chunk.Index))
+                .OrderBy(index => index)
+                .ToList();
+            await SaveAsync(state, cancellationToken);
+        }
+        finally { _uploadCheckpointGate.Release(); }
+    }
+
+    internal async Task RecordUploadChecksumAsync(TransferState state, int index, string hash, CancellationToken token)
+    {
+        await _uploadCheckpointGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var checksums = state.Checksums ?? throw new InvalidDataException("Checksum de upload ausente.");
+            if (!state.UploadChecksumPending || index < 0 || index >= checksums.Chunks.Count || !PayloadChecksums.IsHash(hash))
+                throw new InvalidDataException("Checksum de upload inválido.");
+            var expected = checksums.Chunks[index];
+            if (expected.Length > 0)
+            {
+                if (expected != hash) throw new PayloadChecksumException("A origem mudou desde a preparação desta parte do upload.");
+                return;
+            }
+            var chunks = checksums.Chunks.ToList();
+            chunks[index] = hash;
+            state.Checksums = new PayloadChecksums { ChunkSizeBytes = checksums.ChunkSizeBytes, Chunks = chunks };
+            await SaveAsync(state, token).ConfigureAwait(false);
+        }
+        finally { _uploadCheckpointGate.Release(); }
     }
 
     public async Task MarkUploadChunksAsync(TransferState state, ForumUploadedBatch batch,
