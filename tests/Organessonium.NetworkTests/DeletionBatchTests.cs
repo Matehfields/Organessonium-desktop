@@ -68,6 +68,8 @@ internal static partial class Program
             RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===10") == "true",
                 "a biblioteca inicial não apareceu");
             var delete = typeof(AppController).GetMethod("DeleteItemsAsync", flags)!;
+            var journalThread = (await registry.GetStorageJournalIndexAsync(default)).ThreadId;
+            var journalReadsBefore = h.Server.MessagePages.GetValueOrDefault(journalThread);
             transport.Enabled = true;
             phase = "four concurrent metadata deletes";
             var task = (Task)delete.Invoke(controller, [JsonSerializer.Serialize(entries.Take(8).Select(entry => entry.MetadataMessageId)), true])!;
@@ -87,11 +89,19 @@ internal static partial class Program
             transport.ReleaseDeletes.TrySetResult();
             phase = "fresh reference proof";
             await transport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
-            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='80%'&&document.querySelector('.op-item[data-op-type=delete] .op-msg').textContent.includes('referências')") == "true",
-                "a interface não mostrou a etapa de conferência antes de concluir");
+            await task.WaitAsync(TimeSpan.FromSeconds(5));
+            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'&&!!document.querySelector('.op-item[data-op-type=cleanup].op-cleanup-indeterminate')") == "true",
+                "a remoção do índice aguardou a limpeza física ou não exibiu a operação de segundo plano");
+            RequireSync(h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 10,
+                "a limpeza física ocorreu antes da conferência bloqueada");
             transport.ReleaseProof.TrySetResult();
             phase = "batch completion";
-            await task.WaitAsync(TimeSpan.FromSeconds(30));
+            for (var attempt = 0; attempt < 150 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") != "true"; attempt++)
+                await Task.Delay(50);
+            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") == "true",
+                "a limpeza física não chegou à conclusão visível no painel");
+            RequireSync(h.Server.MessagePages.GetValueOrDefault(journalThread) - journalReadsBefore == 2,
+                "a conferência de arquivos releu o journal técnico como uma pasta da biblioteca");
             RequireSync(await view.ExecuteScriptAsync("window.__browsingCard===document.querySelector('.cards-grid .file-card')&&window.__browsingCard.classList.contains('selected')&&document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
                 "uma exclusão em outra pasta apagou/recriou os cards ou perdeu a seleção durante a navegação");
             RequireSync(((IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!).Count(entry => entry.ParentFolderId == "browse") == 2305,
@@ -127,12 +137,40 @@ internal static partial class Program
             phase = "failed reference proof";
             await ((Task)delete.Invoke(controller, [JsonSerializer.Serialize(new[] { entries[8].MetadataMessageId }), true])!)
                 .WaitAsync(TimeSpan.FromSeconds(20));
+            for (var attempt = 0; attempt < 100 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup][data-op-status=waiting]')!==null") != "true"; attempt++)
+                await Task.Delay(50);
             RequireSync(h.Server.Messages(entries[8].ThreadId).Sum(message => message.Attachments.Count) == 2 &&
                 await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===1&&document.getElementById('ops-list').textContent.includes('pendente')") == "true",
                 "falha de conferência não preservou os payloads ou não apareceu no painel");
-            transport.Enabled = false;
-            phase = "durable cleanup recovery";
-            await h.Storage.ReconcileAsync();
+            phase = "close and reopen with pending cleanup";
+            await controller.DisposeAsync(); controller = null;
+            api.Dispose();
+            using var reopenedTransport = new DeletionBatchTransport(h.Server, []);
+            using var reopenedApi = new DiscordApiClient(h.Settings.BotToken, new HttpClient(reopenedTransport, false));
+            var reopenedStore = new SettingsStore(h.Store.DataDirectory);
+            var reopenedRegistry = new AppRegistry(reopenedApi, reopenedStore, reopenedStore.Load());
+            using var observeRestart = reopenedRegistry.SharedStorage.ObserveCleanup(update =>
+            { if (update.Pending?.Count > 0) reopenedTransport.Enabled = true; return false; }, reopenedApi.PayloadLifetime);
+            var reloaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.NavigationCompleted += (_, _) => reloaded.TrySetResult();
+            view.Navigate("https://organessonium.local/index.html?restart=1");
+            await reloaded.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            controller = new AppController(new System.Windows.Window(), reopenedStore, bridge, _ => Task.CompletedTask);
+            var reopenedSession = new DiscordSession();
+            typeof(DiscordSession).GetProperty("Api")!.SetValue(reopenedSession, reopenedApi);
+            typeof(DiscordSession).GetProperty("Settings")!.SetValue(reopenedSession, reopenedStore.Load());
+            controller.SetSession(reopenedSession);
+            typeof(AppController).GetField("_registry", flags)!.SetValue(controller, reopenedRegistry);
+            await bridge.SetSettingsAsync(reopenedStore.Load()); await bridge.NotifyReadyAsync();
+            await ((Task)typeof(AppController).GetMethod("LoadAppsAsync", flags)!.Invoke(controller, [])!).WaitAsync(TimeSpan.FromSeconds(15));
+            await reopenedTransport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            RequireSync(await view.ExecuteScriptAsync("!!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "reabrir o app perdeu a operação pendente no painel");
+            reopenedTransport.ReleaseProof.TrySetResult();
+            for (var attempt = 0; attempt < 150 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") != "true"; attempt++)
+                await Task.Delay(50);
+            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") == "true",
+                "a operação pendente não retomou após reabrir o app");
             RequireSync(h.Server.Messages(entries[9].ThreadId).Sum(message => message.Attachments.Count) == 1 &&
                 h.Store.LoadCachedEntriesForFolder("root").Single(entry => entry.Type == "file").FileId == entries[9].FileId,
                 "a recuperação do intent perdeu o arquivo restante");

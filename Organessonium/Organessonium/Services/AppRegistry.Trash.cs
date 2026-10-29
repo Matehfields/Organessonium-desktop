@@ -29,9 +29,22 @@ public sealed partial class AppRegistry
     public Task<AppEntry> RestoreFromTrashAsync(AppEntry entry, CancellationToken cancellationToken = default) =>
         RelocateTrashEntryAsync(entry, restore: true, cancellationToken);
 
+    internal async Task<IAsyncDisposable> BeginTrashWriteBatchAsync(IReadOnlyList<AppEntry> entries, bool restore,
+        CancellationToken token = default)
+    {
+        if (!restore) await EnsureTrashIndexAsync(token);
+        await GetMappingAsync(RootFolderId, token);
+        var folderIds = entries.Select(entry => NormalizeFolderId(entry.ParentFolderId))
+            .Concat(entries.Where(entry => entry.Trash != null).Select(entry => NormalizeFolderId(entry.Trash!.OriginalParentFolderId)))
+            .Append(RootFolderId).Append(TrashFolderId).Distinct(StringComparer.Ordinal);
+        return await SharedStorage.HoldWritesAsync(folderIds.Where(_mappings.ContainsKey)
+            .Select(folderId => _mappings[folderId].ThreadId), token);
+    }
+
     private async Task<AppEntry> RelocateTrashEntryAsync(AppEntry entry, bool restore, CancellationToken cancellationToken)
     {
         await using var priority = SharedStorage.PrioritizeMutations();
+        await using var writes = await BeginTrashWriteBatchAsync([entry], restore, cancellationToken);
         await _entryMutationGate.WaitAsync(cancellationToken);
         try
         {
@@ -85,15 +98,15 @@ public sealed partial class AppRegistry
             detailed.Path = destinationPath;
             detailed.MetadataMessageId = "";
 
-            await _discord.UnarchiveThreadAsync(destination.ThreadId, cancellationToken);
+            await using var sourceWrite = sourceChannelId == _settings.NamesChannelId
+                ? null : await _discord.AcquireThreadWriteAsync(sourceChannelId, cancellationToken);
+            await using var destinationWrite = await _discord.AcquireThreadWriteAsync(destination.ThreadId, cancellationToken);
             try
             {
                 // Publish first. A failed destination must leave the original metadata and payloads intact.
                 await _metadata.SendEntryAsync(_discord, destination.ThreadId, detailed, cancellationToken);
                 try
                 {
-                    if (sourceChannelId != _settings.NamesChannelId)
-                        await _discord.UnarchiveThreadAsync(sourceChannelId, cancellationToken);
                     await _metadata.DeleteEntryAsync(_discord, sourceChannelId, entry, cancellationToken);
                 }
                 catch

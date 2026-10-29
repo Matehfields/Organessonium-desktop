@@ -7,6 +7,7 @@ internal sealed partial class SharedStorageManager
         internal int Uploads;
         internal bool Pending;
         internal CancellationTokenSource? Cleanup;
+        internal Func<CleanupUpdate, bool>? CleanupProgress;
     }
 
     internal IAsyncDisposable PrioritizeUploads()
@@ -41,8 +42,10 @@ internal sealed partial class SharedStorageManager
                 var current = _store.Load();
                 if (current.BotToken != _settings.BotToken || current.NamesChannelId != _settings.NamesChannelId ||
                     current.AppsForumId != _settings.AppsForumId) return;
-                await ReconcileAsync();
+                using var operation = Diagnostics.DevelopmentDiagnostics.Begin("cleanup-background");
+                await ReconcileAsync(_api.PayloadLifetime);
             }
+            catch (OperationCanceledException) when (_api.PayloadLifetime.IsCancellationRequested) { }
             catch (Exception error) { AppLogger.Error("SharedStorage.DeferredCleanup", error); }
         });
     }

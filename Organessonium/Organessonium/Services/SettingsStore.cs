@@ -96,12 +96,28 @@ public sealed class SettingsStore : IEncryptionSecretStore
         lock (_lock)
         {
             ThumbnailCache.Clear();
-            using (var connection = Open()) ClearDatabaseContentsForLogout(connection);
+            var writerIdentities = new Dictionary<string, string>(StringComparer.Ordinal);
+            using (var connection = Open())
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT key, value FROM settings WHERE key LIKE 'sharedStorageWriter:%'";
+                using (var reader = command.ExecuteReader())
+                    while (reader.Read())
+                        if (Guid.TryParseExact(reader.GetString(1), "N", out _))
+                            writerIdentities[reader.GetString(0)] = reader.GetString(1);
+                ClearDatabaseContentsForLogout(connection);
+            }
             SqliteConnection.ClearAllPools();
             var failures = ClearDataDirectoryContents(DataDirectory);
             var defaultDirectory = new DirectoryInfo(DefaultDataDirectoryPath());
             if (_cleanupDefaultData && !SamePath(DataDirectory.FullName, defaultDirectory.FullName) && defaultDirectory.Exists)
                 failures = failures.Concat(ClearDataDirectoryContents(defaultDirectory)).ToList();
+            // Installation identity is operational state, independent of the account, token and caches.
+            if (writerIdentities.Count > 0)
+            {
+                using var connection = Open();
+                foreach (var identity in writerIdentities) Upsert(connection, identity.Key, identity.Value);
+            }
             if (failures.Count > 0)
             {
                 AppLogger.Error(

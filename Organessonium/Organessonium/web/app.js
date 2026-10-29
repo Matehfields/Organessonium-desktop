@@ -92,7 +92,7 @@ const I18N = {
         sortSizeAsc:'Menor tamanho', sortDateDesc:'Mais recente', sortDateAsc:'Mais antigo',
         loading:'Carregando...', validatingServer:'Verificando alterações no servidor...', backgroundInProgress:'Em andamento...', creatingFolder:'Criando pasta...', waiting:'Aguardando...', transfers:'Transferências',
         filesFound:v => v.count + ' arquivo(s) encontrado(s)...',
-        uploadProgress:'Enviando', downloadProgress:'Baixando', deleteProgress:'Apagando', moveProgress:'Movendo',
+        uploadProgress:'Enviando', downloadProgress:'Baixando', deleteProgress:'Apagando', moveProgress:'Movendo', cleanupProgress:'Limpando',
         cancelTransfersTitle:'Cancelar transferência?',
         cancelTransfersMessage:v => v.count === 1
             ? 'A transferência em andamento será cancelada.'
@@ -237,7 +237,7 @@ const I18N = {
         sortSizeAsc:'Smallest', sortDateDesc:'Newest', sortDateAsc:'Oldest',
         loading:'Loading...', validatingServer:'Checking for server changes...', backgroundInProgress:'In progress...', creatingFolder:'Creating folder...', waiting:'Waiting...', transfers:'Transfers',
         filesFound:v => v.count + ' file(s) found...',
-        uploadProgress:'Uploading', downloadProgress:'Downloading', deleteProgress:'Deleting', moveProgress:'Moving',
+        uploadProgress:'Uploading', downloadProgress:'Downloading', deleteProgress:'Deleting', moveProgress:'Moving', cleanupProgress:'Cleaning',
         cancelTransfersTitle:'Cancel transfer?',
         cancelTransfersMessage:v => v.count === 1
             ? 'The running transfer will be canceled.'
@@ -2416,7 +2416,8 @@ window._opsAdd = (id, type, name) => {
     item.dataset.operationId = id;
     item.dataset.opType = type || 'download';
     item.dataset.opStatus = 'active';
-    const opIcon = type === 'upload' ? 'upload' : (type === 'delete' ? 'delete' : (type === 'move' ? 'drive_file_move' : 'download'));
+    item.classList.toggle('op-cleanup-indeterminate', type === 'cleanup');
+    const opIcon = type === 'upload' ? 'upload' : (['delete','cleanup'].includes(type) ? 'delete' : (type === 'move' ? 'drive_file_move' : 'download'));
     item.innerHTML = `<span class="op-icon ${type}">${icon(opIcon,17)}</span>
         <div class="op-info">
             <div class="op-name">${esc(truncate(name,34))}</div>
@@ -2425,6 +2426,7 @@ window._opsAdd = (id, type, name) => {
             <div class="op-progress-line"><div class="op-progress"><div class="op-progress-bar" id="op-progress-${id}" style="width:0%"></div></div><span class="op-percent" id="op-percent-${id}">0%</span></div>
         </div>`;
     opsList.appendChild(item);
+    if (type === 'cleanup') { item.setAttribute('aria-busy', 'true'); $('op-percent-' + id).textContent = '…'; }
     opsList.scrollTop = opsList.scrollHeight;
     refreshOpsTitle();
 };
@@ -2516,6 +2518,14 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
 window._opsUpdate = (id, status, msg) => {
     const item = $('op-'+id); if (!item) return;
     item.dataset.opStatus = status || 'active';
+    if (item.dataset.opType === 'cleanup') {
+        item.setAttribute('aria-busy', status === 'active' ? 'true' : 'false');
+        if (status === 'done') item.classList.remove('op-cleanup-indeterminate');
+        if (status === 'active') {
+            const cleanupIcon = item.querySelector('.op-icon');
+            if (cleanupIcon) { cleanupIcon.className = 'op-icon cleanup'; cleanupIcon.innerHTML = icon('delete',17); }
+        }
+    }
     if (['done', 'cancelled', 'error', 'waiting'].includes(status)) {
         const etaEl = $('op-eta-' + id);
         if (etaEl) { etaEl.textContent = ''; etaEl.classList.add('hidden'); }
@@ -2722,6 +2732,7 @@ function formatTransferEta(seconds) {
 }
 
 function opTypeTitle(type) {
+    if (type === 'cleanup') return t('cleanupProgress');
     return type === 'upload'
         ? t('uploadProgress')
         : (type === 'delete' ? t('deleteProgress') : (type === 'move' ? t('moveProgress') : t('downloadProgress')));

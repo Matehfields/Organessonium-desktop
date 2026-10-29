@@ -2530,6 +2530,12 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 .op-status.err{color:var(--danger);}
 .op-progress{height:3px;background:var(--surface3);border-radius:2px;overflow:hidden;}
 .op-progress-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .2s;}
+.op-item[data-op-type="cleanup"] .op-progress-bar{background:var(--text-secondary);}
+.op-icon.cleanup{color:var(--text-secondary);background:var(--surface3);}
+.op-cleanup-indeterminate .op-progress-bar{width:35%!important;animation:cleanup-progress 1.4s ease-in-out infinite;}
+.op-cleanup-indeterminate[data-op-status="waiting"] .op-progress-bar{animation-play-state:paused;}
+@keyframes cleanup-progress{from{transform:translateX(-100%);}to{transform:translateX(300%);}}
+html[data-motion="reduced"] .op-cleanup-indeterminate .op-progress-bar{animation:none;opacity:.65;}
 .op-item[data-op-type="upload"] .op-progress-bar{background:var(--text-secondary);}
 .op-item[data-op-type="upload"] .op-icon.upload{color:var(--text-secondary);background:var(--surface3);}
 .op-progress-line{display:grid;grid-template-columns:minmax(0,1fr) 38px;gap:8px;align-items:center;}

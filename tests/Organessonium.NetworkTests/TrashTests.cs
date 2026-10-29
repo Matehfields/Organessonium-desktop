@@ -255,6 +255,7 @@ internal static partial class Program
             if (request.Method == HttpMethod.Patch && parts.Length == 1) return Json(new { id = channel });
             if (request.Method == HttpMethod.Post && channel == "trash-thread" && RejectTrashWrites) return new(HttpStatusCode.Forbidden);
             string content;
+            string? threadName = null;
             byte[]? bytes = null;
             if (request.Content is MultipartFormDataContent multipart)
             {
@@ -266,12 +267,14 @@ internal static partial class Program
             {
                 using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
                 content = (channel == "folders" ? payload.RootElement.GetProperty("message") : payload.RootElement).GetProperty("content").GetString()!;
+                if (channel == "folders") threadName = payload.RootElement.GetProperty("name").GetString();
             }
             if (channel == "folders")
             {
-                _channels["trash-thread"] = [];
-                var header = Add("trash-thread", content);
-                return Json(new { id = "trash-thread", message = header });
+                var thread = threadName?.Contains("storage-v2", StringComparison.Ordinal) == true ? "storage-journal-thread" : "trash-thread";
+                _channels[thread] = [];
+                var header = Add(thread, content);
+                return Json(new { id = thread, message = header });
             }
             var result = request.Method == HttpMethod.Post ? Add(channel, content) : new DiscordMessageDto { Id = parts[2], Content = content };
             if (bytes != null)

@@ -31,10 +31,11 @@ internal sealed partial class SharedStorageManager
         if (entry.Type != "file" || !Payloads(MetadataService.CreateFileMetadata(entry)).Any(payload => payload.Storage?.Shared == true)) return null;
         await AwaitReservationJournalAsync(token);
         var operation = Guid.NewGuid().ToString("N");
-        ActiveMetadataMutations[operation] = 0;
-        await WriteMutationAsync(operation, entry.FileId, true, token);
+        var journalWrite = await _api.AcquireThreadWriteAsync(await GetJournalThreadAsync(token), token);
         try
         {
+            ActiveMetadataMutations[operation] = 0;
+            await WriteMutationAsync(operation, entry.FileId, true, token);
             await _gate.WaitAsync(token);
             try
             {
@@ -48,9 +49,15 @@ internal sealed partial class SharedStorageManager
                     throw new IOException(MutationConflictMessage);
             }
             finally { _gate.Release(); }
-            return new MetadataMutationLease(this, operation, entry.FileId);
+            return new MetadataMutationLease(this, operation, entry.FileId, journalWrite);
         }
-        catch { await CompleteMutationAsync(operation, entry.FileId); throw; }
+        catch
+        {
+            try { await CompleteMutationAsync(operation, entry.FileId); }
+            catch (Exception error) { AppLogger.Error("SharedStorage.ReleaseMutation", error); }
+            finally { await journalWrite.DisposeAsync(); }
+            throw;
+        }
     }
 
     private Task WriteMutationAsync(string operationId, string fileId, bool pending, CancellationToken token) =>
@@ -66,22 +73,30 @@ internal sealed partial class SharedStorageManager
 
     private async Task CompleteMutationAsync(string operationId, string fileId)
     {
-        await WriteMutationAsync(operationId, fileId, false, CancellationToken.None);
-        ActiveMetadataMutations.TryRemove(operationId, out _);
+        try { await WriteMutationAsync(operationId, fileId, false, CancellationToken.None); }
+        finally { ActiveMetadataMutations.TryRemove(operationId, out _); }
     }
 
     private async Task RecoverOwnedMutationsAsync(CancellationToken token, string? fileId = null)
     {
-        foreach (var (id, mutation) in _mutations.Where(pair => pair.Value.Pending && pair.Value.OwnerId == OwnerId &&
-            (fileId == null || pair.Value.FileId == fileId) && !ActiveMetadataMutations.ContainsKey(pair.Key)).ToArray())
+        var abandoned = _mutations.Where(pair => pair.Value.Pending && pair.Value.OwnerId == OwnerId &&
+            (fileId == null || pair.Value.FileId == fileId) && !ActiveMetadataMutations.ContainsKey(pair.Key)).ToArray();
+        if (abandoned.Length == 0) return;
+        await using var journalWrite = await _api.AcquireThreadWriteAsync(await GetJournalThreadAsync(token), token);
+        foreach (var (id, mutation) in abandoned)
         {
             await WriteMutationAsync(id, mutation.FileId, false, token);
             _mutations.Remove(id);
         }
     }
 
-    private sealed class MetadataMutationLease(SharedStorageManager manager, string operationId, string fileId) : IAsyncDisposable
+    private sealed class MetadataMutationLease(SharedStorageManager manager, string operationId, string fileId,
+        IAsyncDisposable journalWrite) : IAsyncDisposable
     {
-        public ValueTask DisposeAsync() => new(manager.CompleteMutationAsync(operationId, fileId));
+        public async ValueTask DisposeAsync()
+        {
+            try { await manager.CompleteMutationAsync(operationId, fileId); }
+            finally { await journalWrite.DisposeAsync(); }
+        }
     }
 }

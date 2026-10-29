@@ -659,6 +659,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null)
     {
+        if (HasThreadWriter(threadId)) return;
         await SetThreadArchivedAsync(threadId, archived: false, cancellationToken, onRateLimitWait);
     }
 

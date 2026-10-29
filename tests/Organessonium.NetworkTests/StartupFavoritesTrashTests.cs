@@ -132,6 +132,7 @@ internal static partial class Program
             RequireSync(server.DeletedChannels.Count == 0, "cancelar a confirmação apagou dados");
             await view.ExecuteScriptAsync("document.getElementById('btn-empty-trash').click();document.getElementById('confirm-ok').click()");
             await Wait("!trashEmptying&&document.querySelectorAll('#files-grid .file-card').length===0&&!document.getElementById('empty-state').classList.contains('folder-loading')", "esvaziar não atualizou a lixeira na interface");
+            await Wait("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'", "a limpeza física da lixeira não concluiu em segundo plano");
             RequireSync(server.Entry("trash-thread", "file-a") == null && server.DeletedChannels.Contains("payload-a") && server.DeletedChannels.Contains("payload-b") &&
                 !server.DeletedChannels.Contains("payload-c") && server.Entry("other-thread", "file-c") != null,
                 "esvaziar não removeu os descendentes ou atingiu conteúdo fora da lixeira");

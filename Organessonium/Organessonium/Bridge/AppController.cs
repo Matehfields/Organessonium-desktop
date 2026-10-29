@@ -162,6 +162,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     public void SetSession(DiscordSession session)
     {
+        ResetCleanupMonitoring();
         _session = session;
         _registry = null;
         Volatile.Write(ref _unindexedPayloadScanStarted, 0);
@@ -208,6 +209,7 @@ public sealed partial class AppController : IAsyncDisposable
         _videoMemoryGuard.Dispose();
         DetachSyncHost();
         _loggingOut = true;
+        ResetCleanupMonitoring();
         foreach (var request in _videoOpenRequests.Values) request.Cancel();
         await Task.Run(_videoProgress.Suspend);
         foreach (var video in _videoSessions.Values) await video.DisposeAsync();
@@ -444,6 +446,7 @@ public sealed partial class AppController : IAsyncDisposable
     private async Task LogoutAsync()
     {
         _loggingOut = true;
+        ResetCleanupMonitoring();
         if (_syncHost != null) await _syncHost.SuspendAccountAsync();
         if (_store.Load().StartWithWindows) await Organessonium.Services.Sync.StartupManager.SetEnabledAsync(false);
         _loadedApps = [];
@@ -3714,6 +3717,7 @@ public sealed partial class AppController : IAsyncDisposable
         var devicesChanged = false;
         try
         {
+            await using var writes = await registry.BeginTrashWriteBatchAsync(selected, restore);
             for (var i = 0; i < selected.Count; i++)
             {
                 var entry = selected[i];
@@ -3838,22 +3842,8 @@ public sealed partial class AppController : IAsyncDisposable
                 finally { progressGate.Release(); }
             });
 
-            completed = 0;
-            await OpsProgressAsync(opId, 80, "Conferindo referências e limpando payloads...");
-            try
-            {
-                await registry.SharedStorage.CompleteCleanupBatchAsync(cleanups, async (_, cleaned) =>
-                {
-                    pendingCleanup |= !cleaned;
-                    await OpsProgressAsync(opId, 80 + 19 * ++completed / Math.Max(1, cleanups.Count),
-                        $"Limpando payloads ({completed}/{cleanups.Count})");
-                }, CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                pendingCleanup = true;
-                AppLogger.Error("Delete.BatchCleanup", ex);
-            }
+            await QueuePhysicalCleanupAsync(registry, cleanups);
+            pendingCleanup = cleanups.Count > 0;
         }
 
         var foldersToDelete = plan.Folders;
@@ -3902,7 +3892,7 @@ public sealed partial class AppController : IAsyncDisposable
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
         if (failed == 0) await OpsProgressAsync(opId, 100, $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)");
         await OpsUpdateAsync(opId, status, failed == 0
-            ? $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)" + (pendingCleanup ? "; limpeza segura dos payloads pendente" : "")
+            ? $"{visibleDeleted}/{visibleTotal} {visibleKind} removido(s) do índice" + (pendingCleanup ? "; limpeza física em segundo plano" : "")
             : $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s), {failed} falharam");
         return new DeleteResult(visibleTotal, visibleDeleted, failed);
     }
@@ -4574,7 +4564,9 @@ public sealed partial class AppController : IAsyncDisposable
 
     private AppRegistry Registry()
     {
-        return _registry ??= new AppRegistry(RequireApi(), _store, _store.Load());
+        var registry = _registry ??= new AppRegistry(RequireApi(), _store, _store.Load());
+        ObserveRegistryCleanup(registry);
+        return registry;
     }
 
     private ForumDownloader Downloader()

@@ -64,6 +64,7 @@ internal sealed partial class SharedStorageManager
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             await manager.ReleaseReferenceAsync(scope, fileId, CancellationToken.None);
             ActiveReads.TryRemove(scope, out _);
+            manager.ResumeDeferredMaintenance();
         }
     }
 }

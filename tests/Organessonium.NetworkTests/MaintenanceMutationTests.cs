@@ -6,6 +6,55 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static async Task<TestOutcome> MutationIdentityAndWriteBatchesAsync()
+    {
+        using var h = new SharedHarness();
+        var entry = (await h.UploadAsync([await h.PrepareAsync("identity.bin", [1, 2, 3])])).Single();
+        var owner = h.Storage.OwnerId;
+        await h.Storage.WriteRecordAsync(new { schemaVersion = 1, entryType = "storageMutation",
+            operationId = Guid.NewGuid().ToString("N"), fileId = entry.FileId, ownerId = owner, state = "pending" }, null, default);
+        h.Store.ClearLocalDataForLogout();
+        RequireSync(string.IsNullOrEmpty(h.Store.Load().BotToken), "o logout conservou a credencial da conta");
+        h.Store.Save(h.Settings);
+        using var probe = new MaintenanceRootProbe(h.Server, blockFirst: false);
+        using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(probe, false));
+        var registry = new AppRegistry(api, h.Store, h.Settings);
+        await registry.RefreshMappingsAsync();
+        RequireSync(registry.SharedStorage.OwnerId == owner, "o logout trocou a identidade e abandonou reservas remotas");
+        await registry.SharedStorage.EnsureMetadataAvailableAsync(entry.FileId, default).WaitAsync(TimeSpan.FromSeconds(10));
+        var journal = (await registry.GetStorageJournalIndexAsync(default)).ThreadId;
+        probe.ArchiveChanges.Clear();
+        entry.Name = "identity-renamed.bin";
+        await registry.UpdateEntryAsync(entry).WaitAsync(TimeSpan.FromSeconds(10));
+        RequireSync(probe.ArchiveChanges.GetValueOrDefault(journal) <= 2 &&
+            (await registry.RefreshFolderAsync("root", "/")).Any(item => item.FileId == entry.FileId && item.Name == entry.Name),
+            "a edição alternou o arquivamento do journal por registro ou perdeu o metadata");
+        await registry.EnsureTrashIndexAsync();
+        probe.ArchiveChanges.Clear();
+        var moved = await registry.MoveToTrashAsync(entry).WaitAsync(TimeSpan.FromSeconds(10));
+        RequireSync(probe.ArchiveChanges.Values.All(count => count <= 2) &&
+            (await registry.RefreshFolderAsync("trash", "/@trash")).Any(item => item.FileId == entry.FileId),
+            "enviar à lixeira alternou os índices durante os seriais ou perdeu o arquivo: " +
+            System.Text.Json.JsonSerializer.Serialize(probe.ArchiveChanges));
+        await registry.RestoreFromTrashAsync(moved);
+        probe.ArchiveChanges.Clear();
+        var folder = AppEntry.Folder("Fast folder", "/"); folder.ParentFolderId = "root";
+        await registry.AddEntryAsync(folder).WaitAsync(TimeSpan.FromSeconds(10));
+        RequireSync(probe.ArchiveChanges.GetValueOrDefault("root-thread") <= 2 &&
+            h.Store.LoadCachedEntriesForFolder("root").Any(item => item.FolderId == folder.FolderId),
+            "criar uma pasta alternou o índice pai ou não publicou a pasta");
+        probe.ArchiveChanges.Clear();
+        await using (await registry.BeginUploadIndexBatchAsync())
+        {
+            var uploadFolder = AppEntry.Folder("Upload folder", "/"); uploadFolder.ParentFolderId = "root";
+            await registry.AddEntryAsync(uploadFolder, synchronizeSerials: false);
+            await registry.SynchronizeFolderSerialsAsync(["root", uploadFolder.FolderId]);
+        }
+        RequireSync(probe.ArchiveChanges.GetValueOrDefault("root-thread") <= 2,
+            "a preparação da pasta arquivou o índice pai antes de abrir o lote de upload");
+        return TestOutcome.Pass();
+    }
+
     private static async Task<TestOutcome> MaintenanceYieldsToMutationsAsync()
     {
         using (var h = new SharedHarness())
@@ -64,12 +113,16 @@ internal static partial class Program
     {
         private readonly HttpMessageInvoker _forward = new(inner, false);
         internal int RootReads;
+        internal System.Collections.Concurrent.ConcurrentDictionary<string, int> ArchiveChanges { get; } = new(StringComparer.Ordinal);
         internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            var segments = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (request.Method == HttpMethod.Patch && segments.Length >= 2 && segments[^2] == "channels")
+                ArchiveChanges.AddOrUpdate(segments[^1], 1, (_, count) => count + 1);
             if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/channels/root-thread/messages", StringComparison.Ordinal) &&
                 Interlocked.Increment(ref RootReads) == 1 && blockFirst)
             {

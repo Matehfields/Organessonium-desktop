@@ -937,6 +937,10 @@ public sealed partial class AppRegistry
         entry.Normalize();
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         entry.ParentFolderId = parentFolderId;
+        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        await using var parentWrite = !synchronizeSerials && _uploadIndexBatches > 0
+            ? null : await _discord.AcquireThreadWriteAsync(parent.ThreadId, cancellationToken);
+        await OpenEntryIndexAsync(parent.ThreadId, synchronizeSerials, cancellationToken, onRateLimitWait);
         if (entry.Type == "folder")
         {
             var existing = await FindExistingFolderAsync(entry, parentFolderId, cancellationToken);
@@ -957,8 +961,6 @@ public sealed partial class AppRegistry
             entry.ThreadId = created.ThreadId;
         }
 
-        var parent = await GetMappingAsync(parentFolderId, cancellationToken);
-        await OpenEntryIndexAsync(parent.ThreadId, synchronizeSerials, cancellationToken, onRateLimitWait);
         try
         {
             await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
@@ -969,7 +971,7 @@ public sealed partial class AppRegistry
             if (synchronizeSerials)
             {
                 await SynchronizeFolderSerialAsync(parentFolderId, entry.Path, siblings, cancellationToken);
-                if (entry.Type == "folder")
+                if (entry.Type == "folder" && string.IsNullOrWhiteSpace(_mappings[entry.FolderId].SerialMessageId))
                 {
                     await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), [], cancellationToken);
                 }

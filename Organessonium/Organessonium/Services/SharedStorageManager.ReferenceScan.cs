@@ -34,7 +34,9 @@ internal sealed partial class SharedStorageManager
             }
         }
         foreach (var message in names) await InspectAsync(message);
-        await Parallel.ForEachAsync(mappings.DistinctBy(mapping => mapping.ThreadId),
+        // The technical journal is validated separately; it contains no library file metadata.
+        await Parallel.ForEachAsync(mappings.Where(mapping => mapping.FolderId != AppRegistry.StorageJournalFolderId)
+                .DistinctBy(mapping => mapping.ThreadId),
             new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token }, async (mapping, cancellation) =>
             {
                 foreach (var message in await _api.GetMessagesAsync(mapping.ThreadId, null, cancellation))

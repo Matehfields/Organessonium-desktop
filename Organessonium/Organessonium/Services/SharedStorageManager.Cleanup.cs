@@ -53,6 +53,9 @@ internal sealed partial class SharedStorageManager
         Func<StorageCleanupRecord, bool, Task> onCompleted, CancellationToken token, bool continueOnFailure = true)
     {
         if (requests.Count == 0) return;
+        await using var writes = await HoldWritesAsync(requests.SelectMany(request => request.Payloads)
+            .Where(payload => payload.Storage?.Shared == true && _catalog.Values.Any(row => row.ThreadId == payload.ThreadId && row.OwnerId == OwnerId))
+            .Select(payload => payload.ThreadId), token);
         // Keep the owner gate for one fresh reference proof shared by this batch.
         // CleanAsync still requires a durable release (or verifies that metadata was removed).
         var live = await ReadCleanupReferencesAsync(token);
@@ -78,6 +81,7 @@ internal sealed partial class SharedStorageManager
 
     internal async Task ReconcileAsync(CancellationToken token = default)
     {
+        var deferUntilNextAction = false;
         CancellationTokenSource lifetime;
         lock (_maintenance)
         {
@@ -88,6 +92,7 @@ internal sealed partial class SharedStorageManager
             }
             lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
             _maintenance.Cleanup = lifetime;
+            _maintenance.Pending = false;
         }
         try
         {
@@ -97,19 +102,34 @@ internal sealed partial class SharedStorageManager
                 await RefreshJournalAsync(lifetime.Token);
                 await RecoverOwnedMutationsAsync(lifetime.Token);
                 await RecoverOwnedReadsAsync(lifetime.Token);
-                await CleanBatchAsync(_cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray(),
-                    (_, _) => Task.CompletedTask, lifetime.Token, continueOnFailure: false);
+                foreach (var applied in _cleanups.Values.Where(request => _appliedCleanups.Contains(request.OperationId)))
+                    NotifyCleanup(new(Completed: applied.OperationId));
+                var pending = _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray();
+                if (pending.Length > 0) NotifyCleanup(new(Pending: pending.Select(request => request.OperationId).ToArray()));
+                await CleanBatchAsync(pending, (request, cleaned) =>
+                {
+                    var interested = NotifyCleanup(cleaned ? new(Completed: request.OperationId) : new(Waiting: true));
+                    deferUntilNextAction |= !cleaned && interested;
+                    return Task.CompletedTask;
+                }, lifetime.Token, continueOnFailure: false);
             }
             finally { _gate.Release(); }
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested && lifetime.IsCancellationRequested)
         {
+            NotifyCleanup(new(Waiting: true));
             lock (_maintenance) _maintenance.Pending = true;
+        }
+        catch
+        {
+            deferUntilNextAction = NotifyCleanup(new(Waiting: true));
+            throw;
         }
         finally
         {
             lock (_maintenance) { _maintenance.Cleanup = null; lifetime.Dispose(); }
-            if (!token.IsCancellationRequested) ResumeDeferredMaintenance();
+            if (deferUntilNextAction) { lock (_maintenance) _maintenance.Pending = true; }
+            else if (!token.IsCancellationRequested) ResumeDeferredMaintenance();
         }
     }
 
