@@ -8,35 +8,54 @@ namespace Organessonium.Services;
 
 internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage, DiscordApiClient api, MetadataService metadata)
 {
-    private readonly ConcurrentDictionary<string, Lazy<Channel<Work>>> _queues = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Channel<Work[]>>> _queues = new(StringComparer.Ordinal);
     private static readonly SemaphoreSlim NetworkBodies = new(16, 16);
+    private readonly ConcurrentDictionary<(string Thread, string Version, string Batch), byte> _uncertain = new();
+    internal bool HasUncertainPublication(string thread, string version) => _uncertain.Keys.Any(key => key.Thread == thread && key.Version == version);
 
     internal async Task<ChunkReference> SendAsync(SharedStorageReservation reservation, EncryptedPayloadContext context,
         PreparedUploadPart part, Func<ChunkReference, Task>? confirmed, CancellationToken token,
         AdaptiveUploadGate? bodyGate = null, Func<TimeSpan, Task>? onWait = null, Action<bool>? activity = null)
     {
-        token.ThrowIfCancellationRequested();
-        part.SetTransportName(Guid.NewGuid().ToString("N") + ".bin");
         var work = new Work(reservation, context, part, confirmed, token, bodyGate, onWait, activity);
-        var queue = _queues.GetOrAdd(reservation.ThreadId, id => new Lazy<Channel<Work>>(() =>
+        await QueueAsync(reservation.ThreadId, [work], token).ConfigureAwait(false);
+        return await work.Completion.Task.ConfigureAwait(false);
+    }
+
+    internal async Task<ChunkReference> SendWithCompanionAsync(SharedStorageReservation reservation, EncryptedPayloadContext context,
+        PreparedUploadPart part, Func<ChunkReference, Task>? confirmed, SharedUploadCompanionPayload companion, CancellationToken token,
+        AdaptiveUploadGate? bodyGate, Func<TimeSpan, Task>? onWait, Action<bool>? activity)
+    {
+        var original = new Work(reservation, context, part, confirmed, token, bodyGate, onWait, activity);
+        var thumbnail = new Work(reservation, companion.Context, companion.Part, companion.Confirmed, token, bodyGate, onWait, activity);
+        await QueueAsync(reservation.ThreadId, [original, thumbnail], token).ConfigureAwait(false);
+        await Task.WhenAll(original.Completion.Task, thumbnail.Completion.Task).ConfigureAwait(false);
+        return await original.Completion.Task.ConfigureAwait(false);
+    }
+
+    private async Task QueueAsync(string thread, Work[] group, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        foreach (var work in group) work.Part.SetTransportName(Guid.NewGuid().ToString("N") + ".bin");
+        var queue = _queues.GetOrAdd(thread, id => new Lazy<Channel<Work[]>>(() =>
         {
-            var channel = Channel.CreateBounded<Work>(new BoundedChannelOptions(DiscordLimits.MaxPendingUploadMessages * DiscordLimits.MaxAttachmentsPerSharedMessage)
+            var channel = Channel.CreateBounded<Work[]>(new BoundedChannelOptions(DiscordLimits.MaxPendingUploadMessages * DiscordLimits.MaxAttachmentsPerSharedMessage)
             { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = false });
             _ = RunAsync(id, channel.Reader);
             return channel;
         })).Value;
         using var admission = CancellationTokenSource.CreateLinkedTokenSource(token, api.PayloadLifetime);
-        await queue.Writer.WriteAsync(work, admission.Token).ConfigureAwait(false);
-        ProductionReady(reservation, context.Role);
+        await queue.Writer.WriteAsync(group, admission.Token).ConfigureAwait(false);
+        foreach (var work in group) ProductionReady(work.Reservation, work.Context.Role);
         // Cancellation after admission cannot abort a multipart containing another file.
-        return await work.Completion.Task.ConfigureAwait(false);
     }
 
-    private async Task RunAsync(string threadId, ChannelReader<Work> reader)
+    private async Task RunAsync(string threadId, ChannelReader<Work[]> reader)
     {
+        Work[]? carry = null;
         try
         {
-            while (await reader.WaitToReadAsync(api.PayloadLifetime).ConfigureAwait(false))
+            while (carry != null || await reader.WaitToReadAsync(api.PayloadLifetime).ConfigureAwait(false))
             {
                 await RamUploadBudget.PendingMessages.WaitAsync(api.PayloadLifetime).ConfigureAwait(false);
                 var batch = new List<Work>(DiscordLimits.MaxAttachmentsPerSharedMessage);
@@ -44,13 +63,18 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                 var firstWait = deadline;
                 while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage)
                 {
-                    while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage && reader.TryRead(out var work))
+                    while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage)
                     {
-                        if (work.Token.IsCancellationRequested) work.Completion.TrySetCanceled(work.Token);
-                        else batch.Add(work);
+                        var group = carry;
+                        if (group == null && !reader.TryRead(out group)) break;
+                        carry = null;
+                        if (batch.Count + group.Length > DiscordLimits.MaxAttachmentsPerSharedMessage) { carry = group; break; }
+                        foreach (var work in group)
+                            if (work.Token.IsCancellationRequested) work.Completion.TrySetCanceled(work.Token);
+                            else batch.Add(work);
                     }
                     var remaining = DiscordLimits.SharedBatchWaitMilliseconds - Stopwatch.GetElapsedTime(deadline).TotalMilliseconds;
-                    if (batch.Count == DiscordLimits.MaxAttachmentsPerSharedMessage) break;
+                    if (carry != null || batch.Count == DiscordLimits.MaxAttachmentsPerSharedMessage) break;
                     if (remaining <= 0)
                     {
                         if (!HasPendingProduction(threadId)) break;
@@ -74,7 +98,8 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
         }
         catch (Exception error)
         {
-            while (reader.TryRead(out var work)) work.Completion.TrySetException(error);
+            if (carry != null) foreach (var work in carry) work.Completion.TrySetException(error);
+            while (reader.TryRead(out var group)) foreach (var work in group) work.Completion.TrySetException(error);
         }
     }
 
@@ -111,6 +136,7 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                 }).ToList()
             };
             await storage.WriteRecordAsync(plan, null, api.PayloadLifetime);
+            foreach (var work in batch) _uncertain[(threadId, work.Reservation.VersionId, plan.BatchId)] = 0;
             DiscordMessageDto message;
             try
             {
@@ -147,6 +173,9 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                 try { if (batch[index].Confirmed != null) await batch[index].Confirmed!(references[index]); }
                 catch (Exception error) { failures[index] = error; }
             }
+            foreach (var version in batch.Select(work => work.Reservation.VersionId).Distinct())
+                if (Enumerable.Range(0, batch.Count).Where(index => batch[index].Reservation.VersionId == version).All(index => failures[index] == null))
+                    _uncertain.TryRemove((threadId, version, plan.BatchId), out _);
             for (var index = 0; index < batch.Count; index++)
             {
                 var work = batch[index];

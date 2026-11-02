@@ -7,8 +7,15 @@ public sealed class SharedUploadContext
 {
     internal SharedStorageManager Manager { get; }
     internal SharedStorageReservation Reservation { get; }
+    internal Task<SharedUploadCompanionPayload?>? Companion { get; set; }
     internal SharedUploadContext(SharedStorageManager manager, SharedStorageReservation reservation)
     { Manager = manager; Reservation = reservation; }
+}
+
+internal sealed record SharedUploadCompanionPayload(EncryptedPayloadContext Context, PreparedUploadPart Part,
+    Func<ChunkReference, Task> Confirmed, RamMediaPreview Thumbnail) : IDisposable
+{
+    public void Dispose() { Part.Dispose(); Thumbnail.Dispose(); }
 }
 
 public sealed partial class ForumUploader
@@ -23,17 +30,25 @@ public sealed partial class ForumUploader
         var batchId = string.IsNullOrEmpty(existingBatch) ? Guid.NewGuid().ToString("N")[..10] : existingBatch;
         var completed = references.Count;
         progress?.Invoke(completed);
-        var pending = Enumerable.Range(0, count).Where(index => !references.ContainsKey(index)).Select(async index =>
+        var missing = Enumerable.Range(0, count).Where(index => !references.ContainsKey(index)).ToArray();
+        var pending = missing.Select(async index =>
         {
             using var part = await prepare(index).ConfigureAwait(false);
             part.TransferProgress = bytes => wireProgress?.Invoke(index, bytes);
-            var reference = await shared.Manager.Batcher.SendAsync(shared.Reservation, encryption.WithChunkIndex(index).WithChunkCount(count), part,
-                async reference =>
+            async Task ConfirmAsync(ChunkReference reference)
                 {
                     if (checkpoint != null) await checkpoint(new ForumUploadedBatch(shared.Reservation.ThreadId, batchId,
                         [new ForumUploadedChunk(shared.Reservation.ThreadId, batchId, index, reference.MessageId,
                             part.Length, part.LogicalSizeBytes, reference.AttachmentId)]));
-                }, token, bodyGate, onWait, activity).ConfigureAwait(false);
+                }
+            var companion = index == missing[0] && encryption.Role == EncryptedPayloadRoles.Original && shared.Companion != null
+                ? await shared.Companion.ConfigureAwait(false) : null;
+            var context = encryption.WithChunkIndex(index).WithChunkCount(count);
+            var reference = companion == null
+                ? await shared.Manager.Batcher.SendAsync(shared.Reservation, context, part, ConfirmAsync,
+                    token, bodyGate, onWait, activity).ConfigureAwait(false)
+                : await shared.Manager.Batcher.SendWithCompanionAsync(shared.Reservation, context, part, ConfirmAsync, companion,
+                    token, bodyGate, onWait, activity).ConfigureAwait(false);
             lock (references) references[index] = reference;
             progress?.Invoke(Interlocked.Increment(ref completed));
         }).ToArray();

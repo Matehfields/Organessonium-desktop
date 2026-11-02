@@ -682,7 +682,6 @@ public sealed partial class AppController : IAsyncDisposable
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
                     await PublishLibraryFileCountAsync(registry);
-                    QueueRegistryMaintenance(registry);
                 }
                 catch (OperationCanceledException)
                 {
@@ -694,6 +693,7 @@ public sealed partial class AppController : IAsyncDisposable
                 }
                 finally
                 {
+                    QueueRegistryMaintenance(registry);
                     await _bridge.CallAsync("_onFolderLoadState", "/", false);
                     await _bridge.CallAsync("_onServerReadState", false);
                 }
@@ -2203,6 +2203,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            foreach (var task in tasks) await CancelUploadCheckpointAsync(task.PreparedTransfer);
             await OpsUpdateAsync(opId, "cancelled", "Cancelado");
             await _bridge.CallAsync("_onStatus", "Upload cancelado.", false);
         }
@@ -2412,8 +2413,7 @@ public sealed partial class AppController : IAsyncDisposable
         using var originalFiles = new SemaphoreSlim(Math.Max(1, fileParallelism), Math.Max(1, fileParallelism));
         using var smallOriginals = new SemaphoreSlim(DiscordLimits.MaxActiveSharedOriginalFiles, DiscordLimits.MaxActiveSharedOriginalFiles);
         using var pendingFiles = new SemaphoreSlim(DiscordLimits.MaxPendingUploadFiles, DiscordLimits.MaxPendingUploadFiles);
-        await using var poolWrites = await registry.SharedStorage.HoldWritesAsync(tasks.Where(task => task.PreparedTransfer?.Storage?.Shared == true)
-            .Select(task => task.PreparedTransfer!.ThreadId), cancellationToken);
+        await using var journalWrite = await registry.SharedStorage.HoldJournalWriteAsync(cancellationToken);
         var uploadWorkers = settings.EffectiveUploadThreads;
         var partsPerFile = UploadConcurrencyPlanner.PartsPerFile(uploadWorkers, fileParallelism, settings.ForceUploadParallelism);
         using var uploadGate = new AdaptiveUploadGate(uploadWorkers, adaptive: !settings.ForceUploadParallelism);
@@ -2430,11 +2430,8 @@ public sealed partial class AppController : IAsyncDisposable
         for (var index = 0; index < fileCancellations.Length; index++)
             _uploadFileOperations[opId + ":" + index] = fileCancellations[index];
 
-        var producers = tasks.Select((task, index) => task.PreparedTransfer is { Storage.Shared: true } planned && planned.UploadedChunks.Count < planned.TotalChunks
-            ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
-                planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
-                waitingForPublication: () => Volatile.Read(ref publishing) > 0) : null).ToArray();
-        Task RunWorkersAsync() => Task.WhenAll(Enumerable.Range(0, tasks.Count).Select(index =>
+        var producers = new SharedPayloadBatcher.ProductionExpectation?[tasks.Count];
+        Task RunWorkersAsync(IEnumerable<int> indices) => Task.WhenAll(indices.Select(index =>
             RunPausableUploadAsync(opId, index, tasks[index], fileCancellations[index].Token, async (task, fileToken) =>
         {
             var admission = task.PreparedTransfer is { Storage.Shared: true, TotalChunks: 1 } ? smallOriginals : originalFiles;
@@ -2494,6 +2491,8 @@ public sealed partial class AppController : IAsyncDisposable
                     deferSerialSynchronization: true,
                     replacement: task.Replacement,
                     onPreviewSize: size => Interlocked.Add(ref totalBytes, size), scheduledTransfer: task.PreparedTransfer != null && !task.Resuming,
+                    reservationVerified: task.PreparedTransfer?.Storage?.Shared == true,
+                    recoverSharedParts: task.Resuming || task.NeedsRemoteRecovery,
                     onOriginalUploaded: ReleaseOriginal,
                     onPublishingMetadata: () =>
                     {
@@ -2566,13 +2565,29 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             await OpsTransferMetricsAsync(opId, "upload", 0, tasks.Count, 0, totalBytes, 0);
-            await RunWorkersAsync();
-            await registry.SharedStorage.ReconcileReservationsAsync(cancellationToken);
+            var pending = Enumerable.Range(0, tasks.Count).ToList();
+            while (pending.Count > 0 && Volatile.Read(ref stoppedByApi) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var wave = await AllocateNextUploadPoolAsync(tasks, pending, registry, cancellationToken);
+                // Dedicated files use their existing transport; shared files advance one pool at a time.
+                wave.AddRange(pending.Where(index => tasks[index].PreparedTransfer == null && !wave.Contains(index)));
+                foreach (var index in wave)
+                    if (tasks[index].PreparedTransfer is { Storage.Shared: true } planned && planned.UploadedChunks.Count < planned.TotalChunks)
+                        producers[index] = registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId,
+                            planned.TransferId, planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
+                            waitingForPublication: () => Volatile.Read(ref publishing) > 0);
+                await RunWorkersAsync(wave);
+                pending.RemoveAll(wave.Contains);
+            }
+            registry.SharedStorage.RequestReservationReconciliation();
         }
         finally
         {
             for (var index = 0; index < fileCancellations.Length; index++)
             {
+                if (fileCancellations[index].IsCancellationRequested)
+                    await CancelUploadCheckpointAsync(tasks[index].PreparedTransfer);
                 producers[index]?.Dispose();
                 _uploadFileOperations.TryRemove(opId + ":" + index, out _);
                 fileCancellations[index].Dispose();
@@ -2648,6 +2663,8 @@ public sealed partial class AppController : IAsyncDisposable
         FileReplacement? replacement = null,
         Action<long>? onPreviewSize = null,
         bool scheduledTransfer = false,
+        bool reservationVerified = false,
+        bool recoverSharedParts = true,
         Action? onOriginalUploaded = null,
         Action? onPublishingMetadata = null)
     {
@@ -2761,7 +2778,7 @@ public sealed partial class AppController : IAsyncDisposable
             if (transferState.Storage?.Shared == true)
             {
                 var reservation = new SharedStorageReservation(transferState.FileId, transferState.TransferId, transferState.ThreadId, transferState.Storage);
-                if (!scheduledTransfer) await registry.SharedStorage.VerifyReservationAsync(reservation, cancellationToken);
+                if (!scheduledTransfer && !reservationVerified) await registry.SharedStorage.VerifyReservationAsync(reservation, cancellationToken);
                 sharedUpload = new SharedUploadContext(registry.SharedStorage, reservation);
                 payloadLease = await registry.SharedStorage.HoldWritesAsync([transferState.ThreadId], cancellationToken);
             }
@@ -2821,7 +2838,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await ReportRateLimitWaitAsync(remaining);
             }
 
-            if (sharedUpload != null && existingTransferState != null && !scheduledTransfer && hadSharedAllocation &&
+            if (sharedUpload != null && existingTransferState != null && recoverSharedParts && hadSharedAllocation &&
                 transferState.UploadedChunks.Count < totalChunks)
             {
                 await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, -1,
@@ -2842,6 +2859,8 @@ public sealed partial class AppController : IAsyncDisposable
                 .Where(chunk => !string.IsNullOrWhiteSpace(chunk.MessageId))
                 .ToDictionary(chunk => chunk.Index, chunk => chunk.MessageId);
             using var checkpointGate = new SemaphoreSlim(1, 1);
+            if (sharedUpload != null && ThumbnailCache.IsImage(name) && transferState.ThumbnailRef == null && uploadedMap.Count < totalChunks)
+                sharedUpload.Companion = PrepareImageCompanionAsync(file, transferState, checkpointGate, cancellationToken, onPreviewSize, onBytesUploaded);
             var byteProgress = new UploadByteProgress(sourceLength, chunkSizeBytes, transferState.Encryption != null,
                 (logical, wire) => { if (onBytesUploaded != null) _ = onBytesUploaded(logical, wire); });
             foreach (var index in uploadedMap.Keys) byteProgress.Confirm(index);
@@ -3092,26 +3111,7 @@ public sealed partial class AppController : IAsyncDisposable
         catch (OperationCanceledException)
         {
             if (PauseRequested(opId, fileIndex)) throw;
-            if (transferState?.Storage?.Shared == true)
-            {
-                try { await registry.SharedStorage.CancelReservationAsync(transferState, CancellationToken.None); }
-                catch (Exception error) { AppLogger.Error("SharedStorage.CancelCleanup", error); }
-            }
-            else if (!string.IsNullOrWhiteSpace(threadId) && transferState?.Replacement == null)
-            {
-                try { await Downloader().DeleteThreadAsync(threadId); } catch { }
-            }
-
-            if (transferState != null)
-            {
-                var loadedSettings = _store.Load();
-                await _transferManager.CancelAsync(
-                    transferState,
-                    loadedSettings.KeepTransferHistory,
-                    loadedSettings.CleanupTempOnCancel,
-                    CancellationToken.None);
-            }
-
+            await CancelUploadCheckpointAsync(transferState);
             throw;
         }
         catch (Exception ex)
@@ -3132,6 +3132,9 @@ public sealed partial class AppController : IAsyncDisposable
         }
         finally
         {
+            if (sharedUpload?.Companion != null)
+                try { (await sharedUpload.Companion)?.Dispose(); }
+                catch (OperationCanceledException) { }
             if (transferState?.Replacement != null && transferState.Status is TransferStatuses.Completed or TransferStatuses.Cancelled or TransferStatuses.Failed)
             {
                 try { await registry.SharedStorage.ReleaseReferenceAsync("upload:" + transferState.TransferId, transferState.FileId, CancellationToken.None); }
@@ -4894,6 +4897,15 @@ public sealed partial class AppController : IAsyncDisposable
             {
                 await RunUploadQueueAsync(uploadId, uploads, all, serialFolderIds, token);
                 resumed += uploads.Count;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                foreach (var task in uploads) await CancelUploadCheckpointAsync(task.PreparedTransfer);
+                await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
+                await serialBatch.DisposeAsync();
+                await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
+                await OpsUpdateAsync(uploadId, "cancelled", "Cancelado");
+                return;
             }
             finally { EndTransferOperation(uploadId); }
         }
@@ -7212,6 +7224,7 @@ private static string ClassifyConnectError(Exception ex)
     private sealed record UploadTask(FileInfo File, string Path, FileReplacement? Replacement = null)
     {
         internal bool Resuming { get; init; }
+        internal bool NeedsRemoteRecovery { get; init; }
         internal TransferState? PreparedTransfer { get; init; }
     }
     private sealed record UploadConflictResponse(string Action, bool ApplyToAll);
@@ -7309,7 +7322,7 @@ private static string ClassifyConnectError(Exception ex)
 
         public int Original(int percent)
         {
-            return Report(0, _hasVideoPreview ? 80 : _isImage ? 98 : 99, percent);
+            return Report(0, _hasVideoPreview ? 80 : 99, percent);
         }
 
         public int ThumbnailGeneration(int percent)

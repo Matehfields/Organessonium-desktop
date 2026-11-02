@@ -24,9 +24,12 @@ public static class VideoPreviewWorker
     internal static async Task<RamMediaPreview> GenerateAsync(FileInfo source, bool video,
         bool hardwareAcceleration, Action<int>? progress, CancellationToken token, string? executable = null)
     {
-        await WorkerGate.WaitAsync(token).ConfigureAwait(false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var callerToken = token;
+        token = deadline.Token;
+        await WorkerGate.WaitAsync(callerToken).ConfigureAwait(false);
         IDisposable? reservation = null;
-        IDisposable? processRegistration = null;
+        HiddenMediaProcess? processHost = null;
         Process? worker = null;
         Task<string>? errors = null;
         try
@@ -44,20 +47,13 @@ public static class VideoPreviewWorker
             {
                 throw new IOException("Memória indisponível para gerar a prévia. O arquivo original foi preservado.");
             }
-            var info = new ProcessStartInfo(executable ?? Environment.ProcessPath ?? throw new InvalidOperationException("Executável do app indisponível."))
-            {
-                UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
-                RedirectStandardOutput = true, RedirectStandardError = true
-            };
-            info.ArgumentList.Add(Argument);
-            info.ArgumentList.Add(video ? "480p" : "thumbnail");
-            info.ArgumentList.Add(source.FullName);
-            info.ArgumentList.Add(hardwareAcceleration ? "true" : "false");
-            worker = Process.Start(info) ?? throw new IOException("Não foi possível iniciar o gerador de prévias.");
-            processRegistration = AppMemoryBudget.RegisterMediaWorker(worker);
-            errors = ReadProgressAsync(worker.StandardError, progress, token);
+            if (!video) deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            processHost = HiddenMediaProcess.Start(executable ?? Environment.ProcessPath ?? throw new InvalidOperationException("Executável do app indisponível."),
+                Argument, video ? "480p" : "thumbnail", source.FullName, hardwareAcceleration ? "true" : "false");
+            worker = processHost.Process;
+            errors = ReadProgressAsync(processHost.Error, progress, token);
             var header = new byte[4];
-            try { await worker.StandardOutput.BaseStream.ReadExactlyAsync(header, token).ConfigureAwait(false); }
+            try { await processHost.Output.ReadExactlyAsync(header, token).ConfigureAwait(false); }
             catch (EndOfStreamException)
             {
                 await worker.WaitForExitAsync(token).ConfigureAwait(false);
@@ -71,7 +67,7 @@ public static class VideoPreviewWorker
             var bytes = new byte[size];
             try
             {
-                await worker.StandardOutput.BaseStream.ReadExactlyAsync(bytes, token).ConfigureAwait(false);
+                await processHost.Output.ReadExactlyAsync(bytes, token).ConfigureAwait(false);
                 await worker.WaitForExitAsync(token).ConfigureAwait(false);
                 await errors.ConfigureAwait(false);
                 if (worker.ExitCode != 0) throw new IOException("O gerador de prévias terminou com erro.");
@@ -79,6 +75,8 @@ public static class VideoPreviewWorker
             }
             catch { CryptographicOperations.ZeroMemory(bytes); throw; }
         }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
+        { throw new IOException("O codec excedeu o tempo de geração da miniatura; o arquivo original foi preservado."); }
         finally
         {
             if (worker != null)
@@ -90,9 +88,8 @@ public static class VideoPreviewWorker
                 {
                     try { await errors.ConfigureAwait(false); } catch (OperationCanceledException) { } catch (IOException) { }
                 }
-                worker.Dispose();
             }
-            processRegistration?.Dispose();
+            processHost?.Dispose();
             reservation?.Dispose();
             WorkerGate.Release();
         }

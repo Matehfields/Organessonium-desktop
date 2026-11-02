@@ -19,7 +19,7 @@ public sealed partial class ForumDownloader
         }
         catch
         {
-            if (checkpoint != null && !token.IsCancellationRequested) lease.LeaveRecoverable();
+            if (checkpoint != null && !token.IsCancellationRequested) await lease.LeaveRecoverableAsync();
             else
             {
                 try { await lease.DisposeAsync(); }

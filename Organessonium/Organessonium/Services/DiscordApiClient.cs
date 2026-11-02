@@ -74,7 +74,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         int? limit = 500,
         CancellationToken cancellationToken = default,
         Func<IReadOnlyList<DiscordMessageDto>, Task>? onBatch = null,
-        bool waitForTransientNetwork = false)
+        bool waitForTransientNetwork = false,
+        ulong? stopAtMessageId = null)
     {
         var messages = new List<DiscordMessageDto>();
         string? before = null;
@@ -103,6 +104,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             {
                 await onBatch(batch);
             }
+
+            if (stopAtMessageId.HasValue && batch.Any(message => ulong.TryParse(message.Id, out var id) && id <= stopAtMessageId.Value)) break;
 
             before = batch[^1].Id;
             if (batch.Count < take)

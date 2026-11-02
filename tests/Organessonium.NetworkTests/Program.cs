@@ -56,6 +56,10 @@ internal static partial class Program
         ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),
         ("uploadBatchCadence", UploadBatchCadenceAsync),
         ("uploadPoolBoundary", UploadPoolBoundaryAsync),
+        ("resumedUploadDestinationsAndCancellation", ResumedUploadDestinationsAndCancellationAsync),
+        ("cancelledUploadOutboxRecovery", CancelledUploadOutboxRecoveryAsync),
+        ("imageUploadCompanions", ImageUploadCompanionsAsync),
+        ("coldPreviewJournalSnapshot", ColdPreviewJournalSnapshotAsync),
         ("transferPauseAndResume", TransferPauseAndResumeAsync),
         ("serialRefreshAndSilentReconciliation", SerialRefreshAndSilentReconciliationAsync),
         ("janitorArchivesOnlyIdle", JanitorArchivesOnlyIdleAsync),
@@ -176,6 +180,7 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.FirstOrDefault() == VideoPreviewWorker.Argument) return await VideoPreviewWorker.RunAsync(args);
         if (args.Length == 2 && args[0] == "--diagnostic-probe") return await RunDiagnosticProbeAsync(args[1]);
         if (args.Length == 1 && args[0] == "--live-upload-cadence")
             return await RunLiveUploadCadenceAsync();

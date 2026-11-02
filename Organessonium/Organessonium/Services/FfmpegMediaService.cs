@@ -71,6 +71,10 @@ internal static class FfmpegMediaService
         }
         using (reservation)
         {
+            var callerToken = token;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            if (thumbnail) deadline.CancelAfter(TimeSpan.FromSeconds(30));
+            token = deadline.Token;
             var runtime = executable ?? await EmbeddedMediaRuntime.GetExecutableAsync(token).ConfigureAwait(false);
             var info = new ProcessStartInfo(runtime)
             {
@@ -93,7 +97,11 @@ internal static class FfmpegMediaService
                 if (process.ExitCode != 0)
                     throw new IOException($"O FFmpeg não pôde gerar a prévia (código {process.ExitCode}). O arquivo original foi preservado.");
             }
-            catch (Exception) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }
+            catch (Exception) when (token.IsCancellationRequested)
+            {
+                if (!callerToken.IsCancellationRequested) throw new IOException("O codec excedeu o tempo de geração da miniatura.");
+                throw new OperationCanceledException(callerToken);
+            }
             finally
             {
                 Stop(process);

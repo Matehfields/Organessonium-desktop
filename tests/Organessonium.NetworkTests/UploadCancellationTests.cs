@@ -68,10 +68,14 @@ internal static partial class Program
     {
         private readonly HttpMessageInvoker _forward = new(inner, false);
         private int _held;
+        internal string? CountJournal;
+        internal int JournalReads;
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource AllowPayload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
+            if (request.Method == HttpMethod.Get && CountJournal != null && request.RequestUri!.AbsolutePath.EndsWith("/channels/" + CountJournal + "/messages"))
+                Interlocked.Increment(ref JournalReads);
             if (request.Method == HttpMethod.Post && request.Content is MultipartFormDataContent &&
                 inner.FileThreads().Any(thread => request.RequestUri!.AbsolutePath.EndsWith("/channels/" + thread + "/messages", StringComparison.Ordinal)) &&
                 Interlocked.Exchange(ref _held, 1) == 0)

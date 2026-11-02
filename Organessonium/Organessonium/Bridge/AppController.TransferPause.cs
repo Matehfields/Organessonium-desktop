@@ -40,7 +40,13 @@ public sealed partial class AppController
         {
             while (true)
             {
-                try { await attempt(task, pause.Token); return; }
+                try
+                {
+                    await attempt(task, pause.Token);
+                    if (lifetime.IsCancellationRequested)
+                        await CancelUploadCheckpointAsync(_operationTransferStates.GetValueOrDefault(key) ?? task.PreparedTransfer);
+                    return;
+                }
                 catch (Exception error) when (!lifetime.IsCancellationRequested &&
                     (error is OperationCanceledException && pause.Requested || TransferMemoryPressureException.Find(error) != null))
                 {
@@ -50,7 +56,8 @@ public sealed partial class AppController
                     await OpsUploadFileProgressAsync(op, index, "paused", -1, TransferMemoryPressureException.Find(error)?.Message ?? "Pausado");
                     await pause.ResumeAsync();
                     await _bridge.CallAsync("_opsTransferResumed", op, index);
-                    task = task with { PreparedTransfer = checkpoint, Resuming = checkpoint != null };
+                    task = task with { PreparedTransfer = checkpoint, NeedsRemoteRecovery = checkpoint != null &&
+                        Registry().SharedStorage.Batcher.HasUncertainPublication(checkpoint.ThreadId, checkpoint.TransferId) };
                     prepareResume(task, pause.Token);
                 }
             }
@@ -58,17 +65,19 @@ public sealed partial class AppController
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
             var checkpoint = _operationTransferStates.GetValueOrDefault(key) ?? task.PreparedTransfer;
-            if (checkpoint?.Status == TransferStatuses.Paused)
-            {
-                if (checkpoint.Storage?.Shared == true) await Registry().SharedStorage.CancelReservationAsync(checkpoint, CancellationToken.None);
-                else if (checkpoint.Replacement == null && !string.IsNullOrEmpty(checkpoint.ThreadId)) await Downloader().DeleteThreadAsync(checkpoint.ThreadId);
-                var settings = _store.Load();
-                await _transferManager.CancelAsync(checkpoint, settings.KeepTransferHistory, settings.CleanupTempOnCancel);
-            }
+            await CancelUploadCheckpointAsync(checkpoint);
             await OpsUploadFileProgressAsync(op, index, "cancelled", -1, "Cancelado");
             if (_transferOperations.TryGetValue(op, out var operation) && operation.IsCancellationRequested) throw;
         }
         finally { _transferPauses.TryRemove(key, out _); _operationTransferStates.TryRemove(key, out _); _pendingTransferPauses.TryRemove(key, out _); }
+    }
+
+    private async Task CancelUploadCheckpointAsync(TransferState? state)
+    {
+        if (state == null || state.Status is TransferStatuses.Completed or TransferStatuses.Cancelled) return;
+        await Registry().SharedStorage.CancelReservationAsync(state, CancellationToken.None, deferCleanup: true);
+        var settings = _store.Load();
+        await _transferManager.CancelAsync(state, settings.KeepTransferHistory, settings.CleanupTempOnCancel, CancellationToken.None);
     }
 
     private async Task RunPausableDownloadAsync(string op, TransferState checkpoint, CancellationToken lifetime,

@@ -69,12 +69,13 @@ internal sealed partial class SharedStorageManager
     }
 
     internal async Task<IReadOnlyDictionary<string, SharedStorageReservation>> ReserveManyAsync(
-        IReadOnlyList<(string FileId, string VersionId)> files, CancellationToken token)
+        IReadOnlyList<(string FileId, string VersionId)> files, CancellationToken token, bool onePoolOnly = false)
     {
         if (files.Count == 0) return new Dictionary<string, SharedStorageReservation>();
         await _gate.WaitAsync(token);
         try
         {
+            await LoadJournalSnapshotAsync(token);
             if (!UseReservationHints()) await RefreshJournalAsync(token);
             var result = new Dictionary<string, SharedStorageReservation>(StringComparer.Ordinal);
             var remaining = files.Distinct().ToList();
@@ -92,7 +93,16 @@ internal sealed partial class SharedStorageManager
                         { selected = current; break; }
                     }
                 }
-                selected = selected == null ? await CreateStorageAsync(token) : await ReloadCatalogAsync(selected, token);
+                try
+                {
+                    selected = selected == null ? await CreateStorageAsync(token) : await ReloadCatalogAsync(selected, token);
+                    await _api.GetChannelAsync(selected.ThreadId, token);
+                }
+                catch (DiscordApiException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound && selected != null)
+                {
+                    await RetireMissingPoolAsync(selected, token);
+                    continue;
+                }
                 if (selected.State != "open" || selected.Members.Count >= DiscordLimits.MaxFilesPerSharedThread &&
                     !selected.Members.Any(member => member.FileId == first.FileId)) continue;
                 var assigned = new List<(string FileId, string VersionId)>();
@@ -113,6 +123,7 @@ internal sealed partial class SharedStorageManager
                 }
                 await SaveCatalogAsync(selected, token);
                 foreach (var assignedFile in assigned) remaining.Remove(assignedFile);
+                if (onePoolOnly) break;
             }
             WarmReservationJournal(token);
             return result;
@@ -122,6 +133,46 @@ internal sealed partial class SharedStorageManager
 
     internal async Task<SharedStorageReservation> ReserveAsync(string fileId, string versionId, CancellationToken token) =>
         (await ReserveManyAsync([(fileId, versionId)], token))[versionId];
+
+    internal async Task<bool> ValidateUploadPoolAsync(IReadOnlyList<TransferState> transfers, CancellationToken token)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            var first = transfers[0];
+            if (!UseReservationHints() || !_catalog.ContainsKey(first.Storage!.StorageId!)) await RefreshJournalAsync(token);
+            _catalog.TryGetValue(first.Storage!.StorageId!, out var row);
+            var missingThread = false;
+            try { await _api.GetChannelAsync(first.ThreadId, token); }
+            catch (DiscordApiException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound) { missingThread = true; }
+            if (row != null && (row.ThreadId != first.ThreadId || row.OwnerId != OwnerId))
+                throw new IOException("A identidade do destino remoto mudou; o checkpoint foi preservado.");
+            if (!missingThread)
+            {
+                if (row == null) throw new IOException("O catálogo remoto não foi encontrado; o checkpoint foi preservado.");
+                row = await ReloadCatalogAsync(row, token);
+                if (row.OwnerId != OwnerId || transfers.Any(state => !row.Members.Any(member => member.FileId == state.FileId)))
+                    throw new IOException("A reserva remota mudou; nenhuma identidade foi substituída.");
+                return true;
+            }
+            if (transfers.Any(state => state.UploadedChunks.Count > 0 || state.ThumbnailRef != null || state.VideoPreview480pChunkRefs is { Count: > 0 }))
+                throw new IOException("O destino de uma transferência com partes confirmadas foi removido. Os checkpoints foram preservados.");
+            if (row != null) await RetireMissingPoolAsync(row, token);
+            return false;
+        }
+        finally { _gate.Release(); }
+    }
+
+    private async Task RetireMissingPoolAsync(StorageThreadRecord row, CancellationToken token)
+    {
+        row.State = "closed";
+        try { await SaveCatalogAsync(row, token); }
+        catch (DiscordApiException error) when (error.StatusCode == System.Net.HttpStatusCode.NotFound)
+        { _catalog.Remove(row.StorageId); SaveCatalogHints(); }
+    }
+
+    internal async Task<IAsyncDisposable> HoldJournalWriteAsync(CancellationToken token) =>
+        await _api.AcquireThreadWriteAsync(await GetJournalThreadAsync(token), token);
 
     internal async Task VerifyReservationAsync(SharedStorageReservation reservation, CancellationToken token)
     {
@@ -199,6 +250,7 @@ internal sealed partial class SharedStorageManager
 
     private async Task RefreshJournalAsync(CancellationToken token)
     {
+        await LoadJournalSnapshotAsync(token);
         if (!_initialized && _reservationWarmup != null)
         {
             var warmup = _reservationWarmup;
@@ -214,6 +266,7 @@ internal sealed partial class SharedStorageManager
             _mutations.Clear(); _deletionFences.Clear(); _initialized = false; _frontier = 0;
         }
         await ApplyJournalMessagesAsync(messages, token);
+        await SaveJournalSnapshotAsync(token);
     }
 
     private async Task ApplyJournalMessagesAsync(List<DiscordMessageDto> messages, CancellationToken token)

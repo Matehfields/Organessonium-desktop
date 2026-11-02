@@ -7,6 +7,28 @@ namespace Organessonium.Services;
 internal sealed partial class SharedStorageManager
 {
     private Task<List<DiscordMessageDto>>? _reservationWarmup;
+    private int _reservationReconcileDirty, _reservationReconcileRunning;
+    internal void RequestReservationReconciliation()
+    {
+        Interlocked.Exchange(ref _reservationReconcileDirty, 1);
+        if (Interlocked.CompareExchange(ref _reservationReconcileRunning, 1, 0) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (Interlocked.Exchange(ref _reservationReconcileDirty, 0) != 0)
+                    await RunBackgroundAsync(ReconcileReservationsAsync, _api.PayloadLifetime);
+            }
+            catch (OperationCanceledException) when (_api.PayloadLifetime.IsCancellationRequested) { }
+            catch (Exception error) { AppLogger.Error("SharedStorage.ReservationReconciliation", error); }
+            finally
+            {
+                Interlocked.Exchange(ref _reservationReconcileRunning, 0);
+                if (Volatile.Read(ref _reservationReconcileDirty) != 0 && !_api.PayloadLifetime.IsCancellationRequested)
+                    RequestReservationReconciliation();
+            }
+        });
+    }
     private string CatalogHintsKey => "storageCatalogHints:" + OwnerId + ":" + _settings.NamesChannelId + ":" + _settings.FoldersForumId + ":" + _settings.AppsForumId;
 
     // These encrypted local locators are hints, never a quota or ownership decision.

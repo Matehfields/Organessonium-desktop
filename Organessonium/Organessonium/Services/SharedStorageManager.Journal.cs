@@ -20,12 +20,11 @@ internal sealed partial class SharedStorageManager
     {
         async Task<IReadOnlyList<DiscordMessageDto>> ReadAsync(string channel)
         {
-            var rows = await _api.GetMessagesAsync(channel, limit, token);
-            if (limit.HasValue && rows.Count == limit && rows.All(row => Snowflake(row.Id) > _frontier))
-                rows = await _api.GetMessagesAsync(channel, null, token);
-            return rows;
+            return await _api.GetMessagesAsync(channel, limit.HasValue ? null : limit, token,
+                stopAtMessageId: limit.HasValue ? _frontier : null);
         }
 
+        var legacy = await ReadAsync(_settings.NamesChannelId);
         var messages = (await ReadAsync(await GetJournalThreadAsync(token))).ToList();
         long materializedBytes = 0;
         var candidates = Enumerable.Range(0, messages.Count)
@@ -52,7 +51,7 @@ internal sealed partial class SharedStorageManager
         await Parallel.ForEachAsync(small, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = token }, MaterializeAsync);
         foreach (var index in candidates.Except(small)) await MaterializeAsync(index, token);
         // Read-only fallback for the first V2 writer. Never create or update storage records in names.
-        foreach (var message in await ReadAsync(_settings.NamesChannelId))
+        foreach (var message in legacy)
         {
             using var json = await _metadata.ReadJsonAsync(message, token);
             if (json?.RootElement.TryGetProperty("entryType", out var type) != true ||

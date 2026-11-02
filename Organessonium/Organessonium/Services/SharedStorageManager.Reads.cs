@@ -16,11 +16,14 @@ internal sealed partial class SharedStorageManager
 
     internal async Task<StorageReadLease> BeginReadAsync(string scope, string fileId, List<StoragePayloadVersion> payloads, CancellationToken token)
     {
-        await AwaitReservationJournalAsync(token);
+        await using var priority = PrioritizeUploads();
         ActiveReads[scope] = 0;
-        await _gate.WaitAsync(token);
+        IAsyncDisposable? journalWrite = null;
+        try { await _gate.WaitAsync(token); }
+        catch { ActiveReads.TryRemove(scope, out _); throw; }
         try
         {
+            journalWrite = await HoldJournalWriteAsync(token);
             await RefreshJournalAsync(token);
             var continuing = _references.TryGetValue(scope, out var previous) && previous.State == "live" && previous.OwnerId == OwnerId && previous.FileId == fileId &&
                 previous.Payloads.Count == payloads.Count && previous.Payloads.SelectMany(payload => payload.Attachments)
@@ -34,9 +37,14 @@ internal sealed partial class SharedStorageManager
                 await ReleaseReferenceAsync(scope, fileId, CancellationToken.None);
                 throw new IOException("Esse conteúdo está sendo excluído. Atualize a lista antes de tentar novamente.");
             }
-            return new StorageReadLease(this, scope, fileId);
+            return new StorageReadLease(this, scope, fileId, journalWrite);
         }
-        catch { ActiveReads.TryRemove(scope, out _); throw; }
+        catch
+        {
+            ActiveReads.TryRemove(scope, out _);
+            if (journalWrite != null) await journalWrite.DisposeAsync();
+            throw;
+        }
         finally { _gate.Release(); }
     }
 
@@ -55,16 +63,26 @@ internal sealed partial class SharedStorageManager
         }
     }
 
-    internal sealed class StorageReadLease(SharedStorageManager manager, string scope, string fileId) : IAsyncDisposable
+    internal sealed class StorageReadLease(SharedStorageManager manager, string scope, string fileId, IAsyncDisposable journalWrite) : IAsyncDisposable
     {
         private int _disposed;
-        internal void LeaveRecoverable() { ActiveReads.TryRemove(scope, out _); }
+        internal async ValueTask LeaveRecoverableAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            await journalWrite.DisposeAsync();
+            ActiveReads.TryRemove(scope, out _);
+            manager.ResumeDeferredMaintenance();
+        }
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            await manager.ReleaseReferenceAsync(scope, fileId, CancellationToken.None);
-            ActiveReads.TryRemove(scope, out _);
-            manager.ResumeDeferredMaintenance();
+            try { await manager.ReleaseReferenceAsync(scope, fileId, CancellationToken.None); }
+            finally
+            {
+                await journalWrite.DisposeAsync();
+                ActiveReads.TryRemove(scope, out _);
+                manager.ResumeDeferredMaintenance();
+            }
         }
     }
 }

@@ -112,6 +112,8 @@ internal static partial class Program
             "o lote criou posts por arquivo ou fragmentou os anexos");
         RequireSync(transport.SerialWrites == 1 && transport.FilesAtFirstSerial == count,
             "o serial foi publicado antes do último metadata do lote");
+        RequireSync(transport.FilesBeforePoolCreation.SequenceEqual(poolSizes.Select((_, index) => index * 256)),
+            "um pool posterior foi criado antes de encher o anterior");
         RequireSync(latency == 0 || transport.JournalParallel > 1, "confirmações independentes do journal continuam serializadas por latência HTTP");
         var metadata = new MetadataService(Services.MetadataEncryption.MetadataCodec.ForStore(h.Store), api.DownloadAttachmentBytesAsync);
         var claims = 0;
@@ -132,6 +134,7 @@ internal static partial class Program
         internal readonly Stopwatch Clock = new();
         internal int Requests, JournalParallel, SerialWrites, FilesAtFirstSerial, Files;
         internal long FirstPayloadMs = -1;
+        internal List<int> FilesBeforePoolCreation = [];
         private string _projection = "root-thread";
         internal void Reset(string projection)
         { _projection = projection; SerialWrites = FilesAtFirstSerial = Files = 0; }
@@ -139,6 +142,8 @@ internal static partial class Program
         {
             Interlocked.Increment(ref Requests);
             var path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Post && path.EndsWith("/channels/files/threads") && inner is SyncDiscordFixture server)
+                FilesBeforePoolCreation.Add(server.FileThreads().SelectMany(server.Messages).Sum(message => message.Attachments.Count));
             var writing = request.Method == HttpMethod.Post || request.Method == HttpMethod.Patch;
             var journalWrite = writing && path.EndsWith($"/channels/{journal}/messages", StringComparison.Ordinal);
             if (journalWrite)

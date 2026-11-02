@@ -142,11 +142,18 @@ public static class ThumbnailCache
         return CreateSquareEncoded(bytes, new PngBitmapEncoder());
     }
 
+    internal static byte[] CreateSquarePng(BitmapSource frame) => CreateSquareEncoded(frame, new PngBitmapEncoder());
+
     private static byte[] CreateSquareEncoded(byte[] bytes, BitmapEncoder encoder)
     {
         using var input = new MemoryStream(bytes);
         var decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
         var frame = decoder.Frames[0];
+        return CreateSquareEncoded(frame, encoder);
+    }
+
+    private static byte[] CreateSquareEncoded(BitmapSource frame, BitmapEncoder encoder)
+    {
         var side = Math.Max(1, Math.Min(frame.PixelWidth, frame.PixelHeight));
         var crop = new CroppedBitmap(
             frame,

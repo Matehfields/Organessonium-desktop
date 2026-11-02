@@ -16,6 +16,8 @@ internal static partial class Program
         using var blocked = new BlockFirstPayload(h.Server);
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(blocked, false));
         var registry = new AppRegistry(api, h.Store, h.Settings); await registry.RefreshMappingsAsync();
+        blocked.CountJournal = (await registry.GetStorageJournalIndexAsync(default)).ThreadId;
+        var readsBeforeResume = 0; var resumeJournalReads = -1;
         var uploadPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var downloadPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var memoryPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -23,6 +25,8 @@ internal static partial class Program
         var owner = new System.Windows.Window();
         var bridge = new WebMessageBridge(web, script =>
         {
+            if (script.Contains("_onAppsBatch") && script.Contains("pause-0.bin"))
+                resumeJournalReads = blocked.JournalReads - readsBeforeResume;
             if (script.Contains("\"paused\""))
             {
                 if (script.Contains("_opsUploadFileProgress")) uploadPaused.TrySetResult();
@@ -55,10 +59,12 @@ internal static partial class Program
         var paused = states.Single(state => state.FileName == "pause-0.bin");
         RequireSync(paused.Status == TransferStatuses.Paused && paused.UploadedChunks.Count == 1 && !upload.IsCompleted,
             "a pausa perdeu a confirmação, terminou cedo ou cancelou o arquivo");
+        readsBeforeResume = blocked.JournalReads;
         await Toggle(op, 0); await upload.WaitAsync(TimeSpan.FromSeconds(30));
         RequireSync(Visible().Count(entry => entry.Type == "file") == 4 &&
             h.Server.FileThreads().SelectMany(h.Server.Messages).Sum(message => message.Attachments.Count) == 4 && paths.All(File.Exists),
             "retomar repetiu anexos confirmados, perdeu cards ou interrompeu os outros arquivos");
+        RequireSync(resumeJournalReads == 0, "a pausa na sessão voltou a ler o journal para publicar uma identidade nova");
 
         Console.WriteLine("PAUSE_UPLOAD_VERIFIED confirmed attachments reused; other files completed");
         using var download = new DirectDownloadFixture(hashes: true);

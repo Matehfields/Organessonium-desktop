@@ -100,6 +100,7 @@ internal sealed partial class SharedStorageManager
             try
             {
                 await RefreshJournalAsync(lifetime.Token);
+                if (await ImportCancelledUploadsAsync(lifetime.Token)) await RefreshJournalAsync(lifetime.Token);
                 await RecoverOwnedMutationsAsync(lifetime.Token);
                 await RecoverOwnedReadsAsync(lifetime.Token);
                 foreach (var applied in _cleanups.Values.Where(request => _appliedCleanups.Contains(request.OperationId)))
@@ -201,11 +202,12 @@ internal sealed partial class SharedStorageManager
                     else await _api.PreserveMessageAttachmentsAsync(shared.ThreadId, message.Id, keep, token,
                         message.Attachments.Select(attachment => attachment.Id).ToArray());
                 }
+                var changed = member?.PendingVersions.RemoveAll(version => request.Payloads.Any(payload => payload.VersionId == version)) > 0;
                 if (!live.Any(payload => payload.ThreadId == shared.ThreadId && payload.FileId == request.FileId))
                 {
-                    shared.Members.RemoveAll(member => member.FileId == request.FileId);
-                    await SaveCatalogAsync(shared, token);
+                    changed |= shared.Members.RemoveAll(member => member.FileId == request.FileId) > 0;
                 }
+                if (changed) await SaveCatalogAsync(shared, token);
             }
             else
             {
@@ -233,8 +235,9 @@ internal sealed partial class SharedStorageManager
         return live.ToArray();
     }
 
-    internal async Task CancelReservationAsync(TransferState transfer, CancellationToken token)
+    internal async Task CancelReservationAsync(TransferState transfer, CancellationToken token, bool deferCleanup = false)
     {
+        if (deferCleanup) { await EnqueueCancelledUploadAsync(transfer); return; }
         if (transfer.Storage?.Shared != true) return;
         await _gate.WaitAsync(token);
         try

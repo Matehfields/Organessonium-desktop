@@ -38,7 +38,7 @@ internal static partial class Program
         var checkpoint = await h.Transfers.CreateDownloadAsync(held, h.Directory.CreateSubdirectory("held-download"));
         var read = await h.Storage.BeginReadAsync("download:" + checkpoint.TransferId, held.FileId,
             SharedStorageManager.Payloads(MetadataService.CreateFileMetadata(held)), default);
-        read.LeaveRecoverable();
+        await read.LeaveRecoverableAsync();
         RequireSync(!await h.DeleteAsync(held), "a exclusão ignorou um download pausado");
         await h.Storage.ReconcileAsync();
         RequireSync(h.Server.Messages(held.ThreadId).Any(message => message.Id == held.ChunkReferences!.Single().MessageId), "reconciliação removeu bytes necessários ao checkpoint");

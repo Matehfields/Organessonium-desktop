@@ -32,12 +32,12 @@ public sealed partial class AppController
                     {
                         await registry.SharedStorage.RunBackgroundAsync(async token =>
                         {
-                            await registry.RefreshServerIndexAsync(false, token, async (id, entries) =>
+                            await Task.WhenAll(registry.SharedStorage.WarmReadIndexAsync(token), registry.RefreshServerIndexAsync(false, token, async (id, entries) =>
                             {
                                 if (_registry != registry || _loggingOut) return;
                                 ReplaceLoadedFolder(id, entries);
                                 await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-                            });
+                            }));
                             if (_registry == registry && !_loggingOut) await PublishLibraryFileCountAsync(registry);
                             await registry.RunJanitorAsync(token);
                         }, api.PayloadLifetime);
