@@ -16,7 +16,7 @@ internal static class RamUploadBudget
     private static long _externalNativeReserved, _externalManagedReserved;
     private static int _priorityWaiters;
     private static long _lastCollection;
-    private const long DrainAdmissionBytes = AppMemoryBudget.LimitBytes - 16L * 1024 * 1024;
+    private const long DrainAdmissionBytes = AppMemoryBudget.LimitBytes - AppMemoryBudget.NativeHeadroomBytes;
 
     internal static int PipelineBatchChunks(int partBytes)
     {

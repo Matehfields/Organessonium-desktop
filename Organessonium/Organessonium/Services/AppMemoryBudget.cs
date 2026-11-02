@@ -9,6 +9,7 @@ internal static class AppMemoryBudget
 {
     internal const long LimitBytes = 1_000_000_000;
     internal const long AdmissionBytes = 800L * 1024 * 1024;
+    internal const long NativeHeadroomBytes = 64L * 1024 * 1024;
     private const uint JobMemoryLimit = 0x200;
     private static readonly object Sync = new();
     private static SafeFileHandle? _job;
@@ -74,6 +75,11 @@ internal static class AppMemoryBudget
 
     internal static long CommittedBytes()
     {
+        // Child processes can join/exit between WebView notifications. Read the same job
+        // accounting that enforces the hard limit, including children not yet in our lists.
+        var job = _job;
+        if (job != null && QueryJobMemory(job, 28, out var usage, (uint)Marshal.SizeOf<MemoryUsage>(), IntPtr.Zero))
+            return checked((long)usage.Current);
         using var current = Process.GetCurrentProcess();
         var bytes = current.PrivateMemorySize64;
         foreach (var id in Volatile.Read(ref _webViewIds).Concat(Volatile.Read(ref _mediaWorkerIds)).Distinct())
@@ -96,6 +102,9 @@ internal static class AppMemoryBudget
             return checked((long)limits.PeakJobMemory.ToUInt64());
         }
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryUsage { public ulong Current, Peak; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BasicLimits
@@ -127,6 +136,9 @@ internal static class AppMemoryBudget
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryInformationJobObject(SafeFileHandle job, int type, out ExtendedLimits value, uint size, IntPtr returnedLength);
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryJobMemory(SafeFileHandle job, int type, out MemoryUsage value, uint size, IntPtr returnedLength);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);

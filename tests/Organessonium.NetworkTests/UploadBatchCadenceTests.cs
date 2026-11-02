@@ -81,9 +81,21 @@ internal static partial class Program
         using var web = new WebView2();
         var owner = new System.Windows.Window();
         var completedCards = 0;
+        var activeRows = new System.Collections.Generic.HashSet<string>();
+        var maximumActiveRows = 0;
         var bridge = new WebMessageBridge(web, script =>
         {
             if (script.Contains("_onAppsBatch")) Interlocked.Increment(ref completedCards);
+            if (script.Contains("_opsUploadFileProgress"))
+            {
+                var start = script.IndexOf("f(...", StringComparison.Ordinal) + 5;
+                using var json = System.Text.Json.JsonDocument.Parse(script[start..script.LastIndexOf(");", StringComparison.Ordinal)]);
+                var args = json.RootElement;
+                var key = args[0].GetString() + ":" + args[1].GetInt32();
+                if (args[2].GetString() == "active") activeRows.Add(key);
+                else if (args[2].GetString() is "done" or "error" or "cancelled" or "paused") activeRows.Remove(key);
+                maximumActiveRows = Math.Max(maximumActiveRows, activeRows.Count);
+            }
             return Task.CompletedTask;
         });
         await using var controller = new AppController(owner, h.Store, bridge, _ => Task.CompletedTask);
@@ -112,6 +124,8 @@ internal static partial class Program
             "o lote criou posts por arquivo ou fragmentou os anexos");
         RequireSync(transport.SerialWrites == 1 && transport.FilesAtFirstSerial == count,
             "o serial foi publicado antes do último metadata do lote");
+        RequireSync(maximumActiveRows <= 16 && maximumActiveRows > 0 && activeRows.Count == 0,
+            "o painel excedeu dezesseis uploads simultâneos ou reteve operações concluídas");
         RequireSync(transport.FilesBeforePoolCreation.SequenceEqual(poolSizes.Select((_, index) => index * 256)),
             "um pool posterior foi criado antes de encher o anterior");
         RequireSync(latency == 0 || transport.JournalParallel > 1, "confirmações independentes do journal continuam serializadas por latência HTTP");

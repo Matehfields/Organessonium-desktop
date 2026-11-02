@@ -18,6 +18,7 @@ internal static partial class Program
         ("permanentDeletionBatchHidden", PermanentDeletionBatchHiddenAsync),
         ("encryptedLocalPreviewsAndLogout", EncryptedLocalPreviewsAndLogoutAsync),
         ("cachedSerialStatisticsAtStartup", CachedSerialStatisticsAtStartupAsync),
+        ("jobMemoryIncludesUnregisteredChildren", JobMemoryIncludesUnregisteredChildrenAsync),
         ("setupAndEncryptedPreviewHidden", SetupAndEncryptedPreviewHiddenAsync),
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
@@ -180,6 +181,11 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
+        if (args.FirstOrDefault() == "--memory-budget-child")
+        {
+            var memory = new byte[96 * 1024 * 1024]; Array.Fill(memory, (byte)7);
+            Console.WriteLine("MEMORY_READY"); await Task.Delay(TimeSpan.FromMinutes(2)); GC.KeepAlive(memory); return 0;
+        }
         if (args.FirstOrDefault() == VideoPreviewWorker.Argument) return await VideoPreviewWorker.RunAsync(args);
         if (args.Length == 2 && args[0] == "--diagnostic-probe") return await RunDiagnosticProbeAsync(args[1]);
         if (args.Length == 1 && args[0] == "--live-upload-cadence")

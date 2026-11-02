@@ -229,7 +229,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.AutoResumeTransfers = GetBool(values, "autoResumeTransfers", settings.AutoResumeTransfers);
             settings.KeepTransferHistory = GetBool(values, "keepTransferHistory", settings.KeepTransferHistory);
             settings.CleanupTempOnCancel = GetBool(values, "cleanupTempOnCancel", settings.CleanupTempOnCancel);
-            settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, 8);
+            settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, DiscordLimits.MaxPendingUploadFiles);
             settings.MaxParallelDownloads = Math.Clamp(GetInt(values, "maxParallelDownloads", settings.MaxParallelDownloads), 1, 16);
             settings.SearchWorkers = Math.Clamp(GetInt(values, "searchWorkers", settings.SearchWorkers), 1, 8);
             settings.EncryptionMode = EncryptionModes.Normalize(Get(values, "encryptionMode", settings.EncryptionMode));
@@ -286,7 +286,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "autoResumeTransfers", settings.AutoResumeTransfers ? "true" : "false");
             Upsert(connection, "keepTransferHistory", settings.KeepTransferHistory ? "true" : "false");
             Upsert(connection, "cleanupTempOnCancel", settings.CleanupTempOnCancel ? "true" : "false");
-            Upsert(connection, "maxParallelUploads", Math.Clamp(settings.MaxParallelUploads, 1, 8).ToString());
+            Upsert(connection, "maxParallelUploads", Math.Clamp(settings.MaxParallelUploads, 1, DiscordLimits.MaxPendingUploadFiles).ToString());
             Upsert(connection, "maxParallelDownloads", Math.Clamp(settings.MaxParallelDownloads, 1, 16).ToString());
             Upsert(connection, "searchWorkers", Math.Clamp(settings.SearchWorkers, 1, 8).ToString());
             Upsert(connection, "encryptionMode", EncryptionModes.Normalize(settings.EncryptionMode));
@@ -707,7 +707,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.AutoResumeTransfers = GetBool(values, "autoResumeTransfers", settings.AutoResumeTransfers);
         settings.KeepTransferHistory = GetBool(values, "keepTransferHistory", settings.KeepTransferHistory);
         settings.CleanupTempOnCancel = GetBool(values, "cleanupTempOnCancel", settings.CleanupTempOnCancel);
-        settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, 8);
+        settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, DiscordLimits.MaxPendingUploadFiles);
         settings.MaxParallelDownloads = Math.Clamp(GetInt(values, "maxParallelDownloads", settings.MaxParallelDownloads), 1, 16);
         Save(settings);
     }

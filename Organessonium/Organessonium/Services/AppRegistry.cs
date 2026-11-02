@@ -250,9 +250,10 @@ public sealed partial class AppRegistry
         return entry;
     }
 
-    private async Task<List<AppEntry>> LoadSynchronizedDevicesFromSerialAsync(
+    internal async Task<List<AppEntry>> LoadSynchronizedDevicesFromSerialAsync(
         CancellationToken cancellationToken,
-        bool forceRefresh = false)
+        bool forceRefresh = false,
+        bool allowMetadataFallback = true)
     {
         var serial = await _serials.LoadStandaloneSerialAsync(
             SynchronizedRootFolderId,
@@ -266,6 +267,8 @@ public sealed partial class AppRegistry
 
         if (serial == null)
         {
+            if (!allowMetadataFallback)
+                return _store.LoadCachedEntriesForFolder(SynchronizedRootFolderId).Where(entry => entry.Type == "folder").ToList();
             if (!_mappings.TryGetValue(SynchronizedRootFolderId, out var folderMapping))
             {
                 return [];

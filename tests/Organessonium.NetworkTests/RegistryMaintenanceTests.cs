@@ -33,6 +33,9 @@ internal static partial class Program
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         typeof(AppController).GetField("_registry", flags)!.SetValue(controller, registry);
         await ((Task)typeof(AppController).GetMethod("RefreshServerIndexAsync", flags)!.Invoke(controller, [false])!).WaitAsync(TimeSpan.FromSeconds(10));
+        RequireSync(!barrier.Started.Task.IsCompleted && readStates.SequenceEqual(new[] { true, false }),
+            "atualizar pelos seriais iniciou uma varredura de metadados");
+        typeof(AppController).GetMethod("QueueRegistryMaintenance", flags)!.Invoke(controller, [registry]);
         await barrier.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         RequireSync(readStates.SequenceEqual(new[] { true, false }) && !h.Store.LoadCachedEntriesForFolder("root").Any(entry => entry.Name == unindexed.Name),
             "a leitura visível esperou pelas mensagens ou ignorou o serial válido");
@@ -40,6 +43,13 @@ internal static partial class Program
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         while (!h.Store.LoadCachedEntriesForFolder("root").Any(entry => entry.Name == unindexed.Name)) await Task.Delay(25, timeout.Token);
         RequireSync(readStates.SequenceEqual(new[] { true, false }), "a reconciliação silenciosa exibiu progresso de leitura");
+        var rebuilt = AppEntry.File("rebuild-only.bin", "second-payload", TransferState.Now(), 4, "/");
+        rebuilt.ChunkCount = 1; rebuilt.ChunkMessageIds = ["second-message"];
+        await metadata.SendEntryAsync(h.Api, "root-thread", rebuilt);
+        await ((Task)typeof(AppController).GetMethod("RefreshServerIndexAsync", flags)!.Invoke(controller, [true])!).WaitAsync(TimeSpan.FromSeconds(15));
+        RequireSync(readStates.SequenceEqual(new[] { true, false, true, false }) &&
+            h.Store.LoadCachedEntriesForFolder("root").Any(entry => entry.Name == rebuilt.Name),
+            "a reconstrução explícita não leu o metadata ausente do serial");
         return TestOutcome.Pass();
     });
 

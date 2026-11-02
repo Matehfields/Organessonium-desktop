@@ -41,6 +41,7 @@ let smoothScrollFrame = 0, smoothScrollVelocity = 0;
 let cardPreviewFrame = 0;
 let thumbnailRequestTimer = 0;
 let thumbnailObserver = null;
+let thumbnailPrefetchBelow = 180;
 let visibleThumbnailIds = new Set();
 const thumbnailCacheLimit = 128;
 const thumbnailCacheOrder = new Map();
@@ -1027,15 +1028,7 @@ window._onSpecialItemsLoaded = (view, items) => {
 };
 window._onServerIndexRefreshed = rebuilt => {
     setStatus(rebuilt ? 'Índice reconstruído.' : 'Índice atualizado.', false);
-    favoritesLoaded = false;
-    devicesLoaded = false;
-    if (activeLibraryView === 'devices') {
-        showDevicesWorkspace(true);
-    } else if (activeLibraryView === 'favorites') {
-        showFavoritesWorkspace(true);
-    } else {
-        scheduleVisibleThumbnails();
-    }
+    scheduleVisibleThumbnails();
 };
 window._onFavoriteChanged = entry => {
     if (!entry) return;
@@ -1159,7 +1152,7 @@ function ensureThumbnailObserver() {
             }
         });
         trimThumbnailCache();
-    }, { root:$('main-area'), rootMargin:'180px 0px', threshold:.01 });
+    }, { root:$('main-area'), rootMargin:`180px 0px ${thumbnailPrefetchBelow}px 0px`, threshold:.01 });
     return thumbnailObserver;
 }
 
@@ -2437,7 +2430,10 @@ function updateTransferPauseButton(container, id, index, status) {
 window._opsTransferResumed = (id, index = -1) => {
     if (index >= 0) {
         const row = $('op-file-' + id + '-' + index);
-        if (row) row.dataset.fileStatus = 'active';
+        if (row && !['done','error','cancelled'].includes(row.dataset.fileStatus)) {
+            row.dataset.fileStatus = 'queued';
+            window._opsUploadFileProgress(id, index, 'waiting', -1, t('waiting'));
+        }
     } else {
         const item = $('op-' + id);
         if (item) item.dataset.opStatus = 'active';
@@ -5387,16 +5383,7 @@ function navigate(path, addHistory = true, folderId = '') {
 }
 
 function refreshCurrentFolder() {
-    if (activeLibraryView === 'favorites') { showFavoritesWorkspace(true); return; }
-    if (activeLibraryView === 'devices' && currentPath === '/@synchronized') { showDevicesWorkspace(true); return; }
-    setStatus(t('loading'), true);
-    folderFileCounts.clear();
-    requestedFolderStatistics.clear();
-    if (window.bridge && typeof window.bridge.refreshCurrentFolder === 'function') {
-        window.bridge.refreshCurrentFolder();
-        return;
-    }
-    window.bridge.loadApps();
+    refreshServerIndex(false);
 }
 function refreshServerIndex(rebuildSerials) {
     setStatus(rebuildSerials ? 'Reconstruindo índice...' : 'Atualizando índice...', true);
@@ -5406,7 +5393,8 @@ function refreshServerIndex(rebuildSerials) {
         window.bridge.refreshServerIndex(Boolean(rebuildSerials));
         return;
     }
-    refreshCurrentFolder();
+    if (window.bridge && typeof window.bridge.refreshCurrentFolder === 'function') window.bridge.refreshCurrentFolder();
+    else window.bridge.loadApps();
 }
 function goBack() {
     if (!historyBack.length) return;
@@ -5872,7 +5860,7 @@ function loadSettings() {
     settings.forceUploadParallelism = settings.forceUploadParallelism === true;
     settings.previewThreads = Math.max(1, Math.min(8, Number(settings.previewThreads) || 4));
     settings.videoPrefetchChunks = Math.max(0, Math.min(6, Number.isFinite(Number(settings.videoPrefetchChunks)) ? Number(settings.videoPrefetchChunks) : 1));
-    settings.maxParallelUploads = Math.max(1, Math.min(8, Number(settings.maxParallelUploads) || 3));
+    settings.maxParallelUploads = Math.max(1, Math.min(16, Number(settings.maxParallelUploads) || 3));
     settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
     settings.customKeyAvailable = settings.customKeyAvailable === true;
     settings.accentColorMode = ['system','preset','custom'].includes(settings.accentColorMode) ? settings.accentColorMode : 'system';
@@ -6054,6 +6042,19 @@ function syncCardPreviewSize() {
         const size = Math.max(104, Math.min(360, Math.round(rect.width)));
         grid.style.setProperty('--card-preview-size', size + 'px');
     });
+    const previewElement = document.querySelector('.cards-grid [data-thumb]');
+    const card = previewElement?.closest('.file-card');
+    if (!card) return;
+    const bounds = card.getBoundingClientRect();
+    const preview = previewElement.getBoundingClientRect();
+    const height = Math.ceil(bounds.height + (parseFloat(getComputedStyle(card.parentElement).rowGap) || 0)
+        + Math.max(0, preview.top - bounds.top) + preview.height * .01);
+    if (height <= 0 || height === thumbnailPrefetchBelow) return;
+    thumbnailPrefetchBelow = height;
+    if (thumbnailObserver) thumbnailObserver.disconnect();
+    thumbnailObserver = null;
+    const observer = ensureThumbnailObserver();
+    document.querySelectorAll('[data-thumb]').forEach(element => observer.observe(element));
 }
 
 // ─── Context menu ─────────────────────────────────────────────────────────────

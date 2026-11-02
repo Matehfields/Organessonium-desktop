@@ -830,14 +830,28 @@ public sealed partial class AppController : IAsyncDisposable
             if (rebuildSerials) await registry.RefreshServerIndexAsync(true, onFolderRefreshed: Refreshed);
             else await registry.RefreshSerialIndexAsync(onFolderRefreshed: Refreshed);
             await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-            await PublishLibraryFileCountAsync(registry);
+            var favoriteVersion = Interlocked.Increment(ref _favoriteLoadVersion);
+            var favorites = await registry.LoadFavoritesAsync(forceRefresh: true);
+            if (favoriteVersion == Volatile.Read(ref _favoriteLoadVersion))
+            {
+                _favoriteApps = favorites;
+                await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", favorites);
+            }
+            var deviceVersion = Interlocked.Increment(ref _deviceLoadVersion);
+            var devices = await registry.LoadSynchronizedDevicesFromSerialAsync(default, forceRefresh: true, allowMetadataFallback: false);
+            if (deviceVersion == Volatile.Read(ref _deviceLoadVersion))
+            {
+                _deviceApps = devices;
+                await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", devices);
+            }
+            if (rebuildSerials) await PublishLibraryFileCountAsync(registry);
+            else if (await registry.GetCachedLibraryStatisticsAsync() is { } statistics) await SendLibraryStatisticsAsync(statistics);
             await _bridge.CallAsync("_onServerIndexRefreshed", rebuildSerials);
         }
         finally
         {
             await _bridge.CallAsync("_onServerReadState", false);
         }
-        QueueRegistryMaintenance(Registry());
     }
 
     private async Task LoadFolderAtPathAsync(
@@ -2409,7 +2423,7 @@ public sealed partial class AppController : IAsyncDisposable
         var active = 0;
         var publishing = 0;
         var stoppedByApi = 0;
-        var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, 8), tasks.Count);
+        var fileParallelism = Math.Min(Math.Clamp(settings.MaxParallelUploads, 1, DiscordLimits.MaxPendingUploadFiles), tasks.Count);
         using var originalFiles = new SemaphoreSlim(Math.Max(1, fileParallelism), Math.Max(1, fileParallelism));
         using var smallOriginals = new SemaphoreSlim(DiscordLimits.MaxActiveSharedOriginalFiles, DiscordLimits.MaxActiveSharedOriginalFiles);
         using var pendingFiles = new SemaphoreSlim(DiscordLimits.MaxPendingUploadFiles, DiscordLimits.MaxPendingUploadFiles);
@@ -4502,7 +4516,7 @@ public sealed partial class AppController : IAsyncDisposable
         settings.VideoPreviewQuality = NormalizeVideoPreviewQuality(ArgString(args, 9, "low"));
         settings.DataPath = ArgString(args, 10, settings.DataPath);
         settings.UploadThreads = Math.Clamp(ArgInt(args, 11, settings.UploadThreads), 1, 16);
-        settings.MaxParallelUploads = Math.Clamp(ArgInt(args, 12, settings.MaxParallelUploads), 1, 8);
+        settings.MaxParallelUploads = Math.Clamp(ArgInt(args, 12, settings.MaxParallelUploads), 1, DiscordLimits.MaxPendingUploadFiles);
         settings.Proxy.Mode = SettingsStore.NormalizeProxyMode(ArgString(args, 13, "automatic"));
         settings.Proxy.Host = ArgString(args, 14, settings.Proxy.Host);
         settings.Proxy.Port = Math.Clamp(ArgInt(args, 15, settings.Proxy.Port), 0, 65535);

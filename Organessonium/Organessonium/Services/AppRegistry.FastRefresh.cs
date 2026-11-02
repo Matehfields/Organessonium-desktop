@@ -4,11 +4,14 @@ namespace Organessonium.Services;
 
 public sealed partial class AppRegistry
 {
-    internal async Task<List<AppEntry>> LoadFolderSerialAsync(string folderId, string path, CancellationToken token = default)
+    internal async Task<List<AppEntry>> LoadFolderSerialAsync(string folderId, string path, CancellationToken token = default,
+        bool allowMetadataFallback = true)
     {
+        if (!allowMetadataFallback && !_mappings.ContainsKey(NormalizeFolderId(folderId)))
+            return await LoadCachedFolderAsync(folderId, path, token);
         var mapping = await GetMappingAsync(folderId, token);
         var serial = await _serials.LoadFolderAsync(mapping, token);
-        if (serial == null) return await RefreshFolderAsync(folderId, path, token);
+        if (serial == null) return allowMetadataFallback ? await RefreshFolderAsync(folderId, path, token) : await LoadCachedFolderAsync(folderId, path, token);
         await _entryMutationGate.WaitAsync(token);
         try
         {
@@ -39,7 +42,7 @@ public sealed partial class AppRegistry
             async Task Read(string id, string path)
             {
                 if (!visited.Add(id)) return;
-                var entries = await LoadFolderSerialAsync(id, path, token);
+                var entries = await LoadFolderSerialAsync(id, path, token, allowMetadataFallback: false);
                 if (onFolderRefreshed != null) await onFolderRefreshed(id, entries);
                 foreach (var folder in entries.Where(entry => entry.Type == "folder" && _mappings.ContainsKey(entry.FolderId)))
                     await Read(folder.FolderId, PathRules.ChildPath(folder));

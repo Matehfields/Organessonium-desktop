@@ -55,6 +55,10 @@ internal static partial class Program
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
             await Check("document.querySelectorAll('.cards-grid .file-card').length===100", "a pasta não começou com apenas cem cards");
             await Check("document.querySelectorAll('[data-thumb] img').length>0", "as miniaturas iniciais não apareceram");
+            const string prefetchedRow = "(()=>{const main=document.getElementById('main-area').getBoundingClientRect();const cards=[...document.querySelectorAll('.cards-grid .file-card')];const next=cards.find(card=>card.getBoundingClientRect().top>=main.bottom);if(!next)return false;const y=next.getBoundingClientRect().top;return cards.filter(card=>Math.abs(card.getBoundingClientRect().top-y)<2).every(card=>{const image=card.querySelector('[data-thumb] img');return image?.complete&&image.naturalWidth>0})})()";
+            for (var attempt = 0; attempt < 30 && await view.ExecuteScriptAsync(prefetchedRow) != "true"; attempt++)
+                await Task.Delay(100);
+            await Check(prefetchedRow, "a linha abaixo da tela não foi antecipada");
             await view.ExecuteScriptAsync("window.__firstCard=document.querySelector('.cards-grid .file-card');window.__firstImage=window.__firstCard.querySelector('img');window._onThumb(window.__firstCard.querySelector('[data-thumb]').dataset.thumb);render()");
             await Task.Delay(100);
             await Check("window.__firstCard===document.querySelector('.cards-grid .file-card')&&window.__firstImage===window.__firstCard.querySelector('img')",
@@ -91,6 +95,19 @@ internal static partial class Program
                 RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
                 return TestOutcome.Pass();
             }
+            await view.ExecuteScriptAsync("""
+                window.__refreshRequests=[];window.__specialReads=0;
+                window.bridge.refreshServerIndex=rebuild=>window.__refreshRequests.push(rebuild);
+                window.bridge.loadFavorites=window.bridge.loadSynchronizedDevices=()=>window.__specialReads++;
+                $('btn-refresh').click();
+                document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'F5',bubbles:true}));
+                document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'F5',ctrlKey:true,bubbles:true}));
+                window._onSpecialItemsLoaded('favorites',[]);$('sidebar-favorites').click();$('btn-refresh').click();window._onServerIndexRefreshed(false);
+                window._onSpecialItemsLoaded('devices',[]);$('sidebar-devices').click();$('btn-refresh').click();window._onServerIndexRefreshed(false);
+                $('sidebar-files').click();
+                """);
+            await Check("JSON.stringify(window.__refreshRequests)==='[false,false,true,false,false]'&&window.__specialReads===0",
+                "Atualizar/F5 iniciou reconstrução, Ctrl+F5 não a solicitou ou uma aba especial iniciou outra leitura");
             for (var step = 0; step < 4; step++)
             {
                 await view.ExecuteScriptAsync("setView('list')"); await Task.Delay(50);
