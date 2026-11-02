@@ -4,8 +4,6 @@ namespace Organessonium.Services;
 
 internal sealed partial class SharedStorageManager
 {
-    internal bool IsForeignPool(string thread) => _catalog.Values.Any(row => row.ThreadId == thread && row.OwnerId != OwnerId);
-
     internal async Task AuditOrphansAsync(HashSet<string> payloadThreads, CancellationToken token)
     {
         await _gate.WaitAsync(token);

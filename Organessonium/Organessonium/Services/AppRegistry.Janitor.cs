@@ -13,7 +13,7 @@ public sealed partial class AppRegistry
         foreach (var forum in new[] { _settings.FoldersForumId, _settings.AppsForumId }.Distinct())
             foreach (var thread in await _discord.GetActiveThreadsAsync(forum, token))
             {
-                if (_uploadIndexThreads.ContainsKey(thread.Id) || SharedStorage.IsForeignPool(thread.Id)) continue;
+                if (_uploadIndexThreads.ContainsKey(thread.Id)) continue;
                 try { if (await _discord.ArchiveIdleThreadAsync(thread.Id, token)) archived++; }
                 catch (DiscordApiException error) when (error.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound) { }
             }

@@ -47,15 +47,24 @@ internal static partial class Program
     {
         using var h = new SharedHarness();
         var entry = (await h.UploadAsync([await h.PrepareAsync("kept.bin", [4, 5, 6])])).Single();
+        var otherOwner = Guid.NewGuid().ToString("N");
+        var otherStorage = new SharedStorageManager(h.Api, h.Store, h.Settings, ownerId: otherOwner,
+            journalIndex: h.Registry.GetStorageJournalIndexAsync);
+        var otherPool = await otherStorage.ReserveAsync(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), default);
         await using (await h.Api.AcquireThreadWriteAsync(entry.ThreadId, default))
+        await using (await h.Api.AcquireThreadWriteAsync(otherPool.ThreadId, default))
         {
             await h.Registry.RunJanitorAsync(default);
-            RequireSync((await h.Api.GetChannelAsync(entry.ThreadId)).ThreadMetadata?.Archived == false,
+            RequireSync((await h.Api.GetChannelAsync(entry.ThreadId)).ThreadMetadata?.Archived == false &&
+                (await h.Api.GetChannelAsync(otherPool.ThreadId)).ThreadMetadata?.Archived == false,
                 "o janitor arquivou um pool com escrita ativa");
         }
         await h.Api.UnarchiveThreadAsync(entry.ThreadId);
+        await h.Api.UnarchiveThreadAsync(otherPool.ThreadId);
         await h.Registry.RunJanitorAsync(default);
         RequireSync((await h.Api.GetChannelAsync(entry.ThreadId)).ThreadMetadata?.Archived == true &&
+            (await h.Api.GetChannelAsync(otherPool.ThreadId)).ThreadMetadata?.Archived == true &&
+            (await h.CatalogAsync()).Any(row => row.StorageId == otherPool.Layout.StorageId && row.OwnerId == otherOwner && row.Members.Count == 1) &&
             h.Server.Messages(entry.ThreadId).Sum(message => message.Attachments.Count) == 1 &&
             (await h.Registry.LoadCachedFolderAsync("root", "/")).Any(candidate => candidate.FileId == entry.FileId),
             "o janitor deixou uma thread inativa aberta ou removeu conteúdo válido");
