@@ -98,6 +98,7 @@ const I18N = {
             ? 'A transferência em andamento será cancelada.'
             : v.count + ' transferências em andamento serão canceladas.',
         cancelTransfers:'Cancelar transferência',
+        pauseTransfer:'Pausar transferência', resumeTransfer:'Retomar transferência', pausedTransfer:'Pausado',
         transfersCancelled:'Cancelando transferência...',
         interruptedTransfersTitle:'Transferências interrompidas',
         interruptedTransfersMessage:v => 'Há ' + v.count + ' transferência(s) interrompida(s). Deseja retomar agora?',
@@ -243,6 +244,7 @@ const I18N = {
             ? 'The running transfer will be canceled.'
             : v.count + ' running transfers will be canceled.',
         cancelTransfers:'Cancel transfer',
+        pauseTransfer:'Pause transfer', resumeTransfer:'Resume transfer', pausedTransfer:'Paused',
         transfersCancelled:'Canceling transfer...',
         interruptedTransfersTitle:'Interrupted transfers',
         interruptedTransfersMessage:v => 'There are ' + v.count + ' interrupted transfer(s). Resume now?',
@@ -2408,6 +2410,40 @@ window._onPathChosen = (type, path) => {
     queueSettingsSave();
 };
 
+function updateTransferPauseButton(container, id, index, status) {
+    if (!container) return;
+    let button = container.querySelector('.transfer-pause-toggle');
+    if (!button) {
+        const original = document.createElement('span'); original.className = 'transfer-default-icon';
+        while (container.firstChild) original.appendChild(container.firstChild);
+        container.appendChild(original);
+        button = document.createElement('button'); button.type = 'button'; button.className = 'transfer-pause-toggle';
+        button.addEventListener('click', event => {
+            event.stopPropagation();
+            button.disabled = true;
+            window.bridge?.toggleTransferPause?.(id, index);
+        });
+        container.appendChild(button);
+    }
+    const paused = status === 'paused';
+    button.disabled = ['done','error','cancelled'].includes(status);
+    button.innerHTML = icon(paused ? 'play_arrow' : 'pause', 17);
+    button.setAttribute('aria-label', t(paused ? 'resumeTransfer' : 'pauseTransfer'));
+    button.title = button.getAttribute('aria-label');
+    container.classList.toggle('transfer-paused', paused);
+    container.classList.toggle('transfer-controllable', !button.disabled);
+}
+
+window._opsTransferResumed = (id, index = -1) => {
+    if (index >= 0) {
+        const row = $('op-file-' + id + '-' + index);
+        if (row) row.dataset.fileStatus = 'active';
+    } else {
+        const item = $('op-' + id);
+        if (item) item.dataset.opStatus = 'active';
+    }
+};
+
 window._opsAdd = (id, type, name) => {
     opsPanel.classList.remove('hidden');
     const item = document.createElement('div');
@@ -2426,6 +2462,7 @@ window._opsAdd = (id, type, name) => {
             <div class="op-progress-line"><div class="op-progress"><div class="op-progress-bar" id="op-progress-${id}" style="width:0%"></div></div><span class="op-percent" id="op-percent-${id}">0%</span></div>
         </div>`;
     opsList.appendChild(item);
+    if (['upload','download'].includes(type)) updateTransferPauseButton(item.querySelector('.op-icon'), id, -1, 'active');
     if (type === 'cleanup') { item.setAttribute('aria-busy', 'true'); $('op-percent-' + id).textContent = '…'; }
     opsList.scrollTop = opsList.scrollHeight;
     refreshOpsTitle();
@@ -2476,6 +2513,7 @@ window._opsUploadBatch = (id, names, sizes) => {
         if (window.bridge?.cancelUploadFile) window.bridge.cancelUploadFile(id, index);
     }));
     opsList.appendChild(item);
+    item.querySelectorAll('.op-file-row').forEach((row, index) => updateTransferPauseButton(row.querySelector('.op-file-icon'), id, index, 'queued'));
     opsList.scrollTop = opsList.scrollHeight;
     refreshOpsTitle();
 };
@@ -2483,9 +2521,11 @@ window._opsUploadBatch = (id, names, sizes) => {
 window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     const row = $('op-file-' + id + '-' + fileIndex);
     if (!row) return;
-    const normalizedStatus = ['active', 'waiting', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
+    const normalizedStatus = ['active', 'waiting', 'paused', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
+    if (row.dataset.fileStatus === 'paused' && ['active','waiting'].includes(normalizedStatus)) return;
     if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && normalizedStatus === 'active') return;
     row.dataset.fileStatus = normalizedStatus;
+    updateTransferPauseButton(row.querySelector('.op-file-icon'), id, fileIndex, normalizedStatus);
     const cancelButton = row.querySelector('.op-file-cancel');
     if (cancelButton) cancelButton.disabled = ['done','error','cancelled'].includes(normalizedStatus);
     const detail = $('op-file-detail-' + id + '-' + fileIndex);
@@ -2509,6 +2549,7 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     indicator.className = 'op-file-progress ' + normalizedStatus;
     if (normalizedStatus === 'done') indicator.innerHTML = icon('check',15);
     else if (normalizedStatus === 'waiting') indicator.innerHTML = icon('schedule',15);
+    else if (normalizedStatus === 'paused') indicator.innerHTML = icon('pause',15);
     else if (normalizedStatus === 'error') indicator.innerHTML = icon('error',15);
     else if (normalizedStatus === 'cancelled') indicator.innerHTML = icon('block',15);
     else indicator.innerHTML = '';
@@ -2517,6 +2558,7 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
 
 window._opsUpdate = (id, status, msg) => {
     const item = $('op-'+id); if (!item) return;
+    if (item.dataset.opStatus === 'paused' && ['active','waiting'].includes(status)) return;
     item.dataset.opStatus = status || 'active';
     if (item.dataset.opType === 'cleanup') {
         item.setAttribute('aria-busy', status === 'active' ? 'true' : 'false');
@@ -2526,7 +2568,7 @@ window._opsUpdate = (id, status, msg) => {
             if (cleanupIcon) { cleanupIcon.className = 'op-icon cleanup'; cleanupIcon.innerHTML = icon('delete',17); }
         }
     }
-    if (['done', 'cancelled', 'error', 'waiting'].includes(status)) {
+    if (['done', 'cancelled', 'error', 'waiting', 'paused'].includes(status)) {
         const etaEl = $('op-eta-' + id);
         if (etaEl) { etaEl.textContent = ''; etaEl.classList.add('hidden'); }
     }
@@ -2577,6 +2619,7 @@ window._opsUpdate = (id, status, msg) => {
     } else if (status==='error' && iconEl) {
         iconEl.className='op-icon error'; iconEl.innerHTML=icon('error',17);
     }
+    if (['upload','download'].includes(item.dataset.opType)) updateTransferPauseButton(iconEl, id, -1, status);
 };
 
 window._opsProgress = (id, percent, msg) => {

@@ -664,7 +664,7 @@ public sealed partial class AppRegistry
     {
         try
         {
-            return await ReadLibraryStatisticsAsync(RootFolderId, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cancellationToken, cachedOnly: true);
+            return await ReadLibraryTotalsAsync(RootFolderId, cancellationToken, cachedOnly: true);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { AppLogger.Error("Registry.CachedStatistics", ex); return null; }
@@ -680,10 +680,7 @@ public sealed partial class AppRegistry
             return cached;
         }
 
-        var statistics = await ReadLibraryStatisticsAsync(
-            normalizedFolderId,
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
-            cancellationToken);
+        var statistics = await ReadLibraryTotalsAsync(normalizedFolderId, cancellationToken);
         if (statistics != null)
         {
             _folderFileCounts[normalizedFolderId] = statistics.FileCount;
@@ -1784,6 +1781,16 @@ public sealed partial class AppRegistry
         }
 
         return refreshedCount;
+    }
+
+    private async Task<LibraryStatistics?> ReadLibraryTotalsAsync(string folderId, CancellationToken token, bool cachedOnly = false)
+    {
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var total = await ReadLibraryStatisticsAsync(folderId, visited, token, cachedOnly);
+        if (total == null || folderId != RootFolderId || !_mappings.ContainsKey(TrashFolderId) || visited.Contains(TrashFolderId)) return total;
+        var trash = await ReadLibraryStatisticsAsync(TrashFolderId, visited, token, cachedOnly);
+        return trash == null ? null : new LibraryStatistics(total.FileCount + trash.FileCount,
+            total.FolderCount + trash.FolderCount, total.TotalBytes + trash.TotalBytes);
     }
 
     private async Task<LibraryStatistics?> ReadLibraryStatisticsAsync(

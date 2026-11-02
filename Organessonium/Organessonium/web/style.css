@@ -934,7 +934,7 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 }
 .filter-wrap > .dropdown{left:0;right:auto;}
 .content-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;}
-.content-title-block{min-width:0;}
+.content-title-block{min-width:0;flex:1;}
 .current-folder-title{
     display:flex;align-items:baseline;gap:8px;min-width:0;
     margin:0;
@@ -943,11 +943,11 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 }
 .current-folder-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .content-title-block .path-crumbs{
-    min-width:0;max-width:50%;flex:0 1 auto;
+    min-width:0;max-width:none;flex:0 1 auto;
     padding:0;gap:3px;
     overflow:hidden;white-space:nowrap;
 }
-.content-title-block .p-crumb{max-width:180px;font-size:18px;}
+.content-title-block .p-crumb{max-width:none;font-size:18px;}
 .content-title-block .p-crumb-sep{font-size:18px;}
 .content-filter-row{
     display:flex;align-items:center;justify-content:space-between;gap:12px;
@@ -2476,6 +2476,13 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
 }
 .op-file-row:last-child{border-bottom:0;}
 .op-file-icon{display:flex;align-items:center;justify-content:center;color:var(--text-secondary);}
+.op-file-icon,.op-icon{position:relative;}
+.transfer-default-icon{display:flex;align-items:center;justify-content:center;}
+.transfer-pause-toggle{position:absolute;inset:-3px;border:0;border-radius:50%;padding:0;background:var(--surface3);color:var(--text-primary);display:flex;align-items:center;justify-content:center;cursor:pointer;opacity:0;pointer-events:none;}
+.op-file-icon:hover .transfer-pause-toggle:not(:disabled),.op-icon:hover .transfer-pause-toggle:not(:disabled),
+.transfer-pause-toggle:focus-visible,.transfer-paused .transfer-pause-toggle{opacity:1;pointer-events:auto;}
+.op-file-icon.transfer-controllable:hover .transfer-default-icon,.op-icon.transfer-controllable:hover .transfer-default-icon,.transfer-paused .transfer-default-icon{opacity:0;}
+.op-file-progress.paused{border:0;color:var(--text-secondary);animation:none;}
 .op-file-copy{min-width:0;display:flex;flex-direction:column;gap:2px;}
 .op-file-name{
     font-size:12px;font-weight:500;color:var(--text-primary);

@@ -295,6 +295,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "resolveUploadConflict": ResolveUploadConflict(args); return Task.CompletedTask;
             case "cancelTransfers": CancelTransfers(ArgString(args, 0)); return Task.CompletedTask;
             case "cancelUploadFile": CancelUploadFile(ArgString(args, 0), ArgInt(args, 1, -1)); return Task.CompletedTask;
+            case "toggleTransferPause": ToggleTransferPause(ArgString(args, 0), ArgInt(args, 1, -1)); return Task.CompletedTask;
             case "resumeTransfers": _ = RunAsync(ResumeInterruptedTransfersAsync); return Task.CompletedTask;
             case "failInterruptedTransfers": _ = RunAsync(FailInterruptedTransfersAsync); return Task.CompletedTask;
             case "startDownload": return StartDownloadAsync(ArgString(args, 0), ArgString(args, 1));
@@ -677,13 +678,11 @@ public sealed partial class AppController : IAsyncDisposable
                 try
                 {
                     await registry.RefreshMappingsAsync();
-                    var refreshed = await registry.RefreshFolderAsync(AppRegistry.RootFolderId, "/");
+                    var refreshed = await registry.LoadFolderSerialAsync(AppRegistry.RootFolderId, "/");
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
                     await PublishLibraryFileCountAsync(registry);
-                    _ = RunAsync(() => registry.ArchiveActiveFolderThreadsAsync());
-                    _ = CleanupSupersededRemoteSerialsAsync(registry);
-                    _ = RunAsync(RecoverUnindexedPayloadPostsAsync);
+                    QueueRegistryMaintenance(registry);
                 }
                 catch (OperationCanceledException)
                 {
@@ -823,11 +822,14 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             var registry = Registry();
-            await registry.RefreshServerIndexAsync(rebuildSerials, onFolderRefreshed: async (folderId, entries) =>
+            async Task Refreshed(string folderId, IReadOnlyList<AppEntry> entries)
             {
                 ReplaceLoadedFolder(folderId, entries);
-                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-            });
+                await Task.CompletedTask;
+            }
+            if (rebuildSerials) await registry.RefreshServerIndexAsync(true, onFolderRefreshed: Refreshed);
+            else await registry.RefreshSerialIndexAsync(onFolderRefreshed: Refreshed);
+            await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
             await PublishLibraryFileCountAsync(registry);
             await _bridge.CallAsync("_onServerIndexRefreshed", rebuildSerials);
         }
@@ -835,6 +837,7 @@ public sealed partial class AppController : IAsyncDisposable
         {
             await _bridge.CallAsync("_onServerReadState", false);
         }
+        QueueRegistryMaintenance(Registry());
     }
 
     private async Task LoadFolderAtPathAsync(
@@ -2185,13 +2188,13 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var opId = NewId();
+        var cancellationToken = BeginTransferOperation(opId);
         await OpsUploadBatchAsync(opId, tasks.Select(task => task.File.Name).ToArray(), tasks.Select(task => task.File.Length).ToArray());
         if (skipped > 0)
         {
             await OpsProgressAsync(opId, 0, $"{skipped} item(ns) sem acesso foram ignorados");
         }
 
-        var cancellationToken = BeginTransferOperation(opId);
         try
         {
             await using var uploadPriority = registry.SharedStorage.PrioritizeUploads();
@@ -2431,12 +2434,9 @@ public sealed partial class AppController : IAsyncDisposable
             ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
                 planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
                 waitingForPublication: () => Volatile.Read(ref publishing) > 0) : null).ToArray();
-        Task RunWorkersAsync() => Parallel.ForEachAsync(Enumerable.Range(0, tasks.Count),
-            new ParallelOptions { MaxDegreeOfParallelism = DiscordLimits.MaxPendingUploadFiles, CancellationToken = cancellationToken },
-            async (index, workerToken) =>
+        Task RunWorkersAsync() => Task.WhenAll(Enumerable.Range(0, tasks.Count).Select(index =>
+            RunPausableUploadAsync(opId, index, tasks[index], fileCancellations[index].Token, async (task, fileToken) =>
         {
-            var task = tasks[index];
-            var fileToken = fileCancellations[index].Token;
             var admission = task.PreparedTransfer is { Storage.Shared: true, TotalChunks: 1 } ? smallOriginals : originalFiles;
             var originalHeld = 0;
             var pendingHeld = false;
@@ -2448,11 +2448,11 @@ public sealed partial class AppController : IAsyncDisposable
             }
             try
             {
-                producers[index]?.Activate();
                 await admission.WaitAsync(fileToken);
                 originalHeld = 1;
                 await pendingFiles.WaitAsync(fileToken);
                 pendingHeld = true;
+                producers[index]?.Activate();
                 if (Volatile.Read(ref stoppedByApi) != 0) return;
                 fileToken.ThrowIfCancellationRequested();
                 var activeNow = Interlocked.Increment(ref active);
@@ -2497,6 +2497,7 @@ public sealed partial class AppController : IAsyncDisposable
                     onOriginalUploaded: ReleaseOriginal,
                     onPublishingMetadata: () =>
                     {
+                        if (_transferPauses.TryGetValue(TransferKey(opId, index), out var pause)) pause.FinishPublication();
                         if (Interlocked.Exchange(ref publishingCounted, 1) == 0) Interlocked.Increment(ref publishing);
                     }), fileToken);
                 uploadedEntries[index] = uploaded;
@@ -2524,10 +2525,12 @@ public sealed partial class AppController : IAsyncDisposable
             }
             catch (OperationCanceledException)
             {
+                if (PauseRequested(opId, index) && !fileCancellations[index].IsCancellationRequested) throw;
                 await OpsUploadFileProgressAsync(opId, index, "cancelled", -1, "Cancelado");
                 Interlocked.Increment(ref cancelled);
                 if (cancellationToken.IsCancellationRequested) throw;
             }
+            catch (Exception error) when (TransferMemoryPressureException.Find(error) is { } pressure) { throw pressure; }
             catch (Exception ex)
             {
                 Debug.WriteLine("[Upload] " + ex.Message);
@@ -2552,7 +2555,13 @@ public sealed partial class AppController : IAsyncDisposable
                 if (activeCounted) Interlocked.Decrement(ref active);
                 if (Interlocked.Exchange(ref publishingCounted, 0) != 0) Interlocked.Decrement(ref publishing);
             }
-        });
+        }, (task, token) =>
+        {
+            producers[index] = task.PreparedTransfer is { Storage.Shared: true } planned && planned.UploadedChunks.Count < planned.TotalChunks
+                ? registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId, planned.TransferId,
+                    planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, token,
+                    waitingForPublication: () => Volatile.Read(ref publishing) > 0) : null;
+        })));
 
         try
         {
@@ -2740,6 +2749,7 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
 
+            _operationTransferStates[TransferKey(opId, fileIndex)] = transferState;
             if (!transferState.UploadChecksumPending) transferState.Checksums?.Validate(sourceLength, totalChunks);
             if (transferState.SharedAllocationPending)
             {
@@ -3081,6 +3091,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            if (PauseRequested(opId, fileIndex)) throw;
             if (transferState?.Storage?.Shared == true)
             {
                 try { await registry.SharedStorage.CancelReservationAsync(transferState, CancellationToken.None); }
@@ -3205,6 +3216,7 @@ public sealed partial class AppController : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) { throw; }
+        catch (TransferMemoryPressureException) { throw; }
         catch (Exception ex)
         {
             AppLogger.Error("PreviewUpload", ex);
@@ -3267,6 +3279,7 @@ public sealed partial class AppController : IAsyncDisposable
                 }
             }
             catch (OperationCanceledException) { throw; }
+            catch (TransferMemoryPressureException) { throw; }
             catch (Exception ex)
             {
                 AppLogger.Error("VideoPreviewUpload", ex);
@@ -3340,8 +3353,8 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var opId = NewId();
-        await OpsAddAsync(opId, "download", name);
         var cancellationToken = BeginTransferOperation(opId);
+        await OpsAddAsync(opId, "download", name);
         _ = RunAsync(async () =>
         {
             TransferState? transferState = null;
@@ -3360,13 +3373,15 @@ public sealed partial class AppController : IAsyncDisposable
                 if (entry != null)
                 {
                     transferState = await _transferManager.CreateDownloadAsync(entry, dest, cancellationToken);
-                    await Downloader().DownloadAndAssembleAsync(
+                    await RunPausableDownloadAsync(opId, transferState, cancellationToken, async attemptToken =>
+                    {
+                        await Downloader().DownloadAndAssembleAsync(
                         entry,
                         dest,
                         transferState,
                         _transferManager,
                         msg => _ = OpsUpdateAsync(opId, "active", msg),
-                        cancellationToken,
+                        attemptToken,
                         progress =>
                         {
                             _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Assembling ? progress.Message
@@ -3378,6 +3393,7 @@ public sealed partial class AppController : IAsyncDisposable
                                 _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes, rateBytes: progress.RateBytes);
                             }
                         });
+                    });
                     await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                 }
                 else
@@ -3473,8 +3489,8 @@ public sealed partial class AppController : IAsyncDisposable
             }
 
             var opId = NewId();
-            await OpsAddAsync(opId, "download", $"{folderName} ({toDownload.Count} arquivo(s))");
             var cancellationToken = BeginTransferOperation(opId);
+            await OpsAddAsync(opId, "download", $"{folderName} ({toDownload.Count} arquivo(s))");
             var done = 0;
             var failed = 0;
             var totalBytes = toDownload.Sum(app => Math.Max(0, app.SizeBytes));
@@ -3502,13 +3518,15 @@ public sealed partial class AppController : IAsyncDisposable
                     try
                     {
                         transferState = await _transferManager.CreateDownloadAsync(app, destDir, cancellationToken);
+                        await RunPausableDownloadAsync(opId, transferState, cancellationToken, async attemptToken =>
+                    {
                         await Downloader().DownloadAndAssembleAsync(
                             app,
                             destDir,
                             transferState,
                             _transferManager,
                             msg => _ = OpsUpdateAsync(opId, "active", $"({i + 1}/{toDownload.Count}) {msg}"),
-                            cancellationToken,
+                            attemptToken,
                             progress =>
                             {
                                 Interlocked.Exchange(ref currentFileBytes, Math.Max(0, progress.DownloadedBytes));
@@ -3526,6 +3544,7 @@ public sealed partial class AppController : IAsyncDisposable
                                         rateBytes: receivedBeforeFile + Interlocked.Read(ref currentReceivedBytes));
                                 }
                             });
+                    });
                         await _transferManager.CompleteAsync(transferState, _store.Load().KeepTransferHistory, cancellationToken);
                         var measuredTotal = Math.Max(Math.Max(0, app.SizeBytes), Math.Max(Interlocked.Read(ref currentFileTotal), Interlocked.Read(ref currentFileBytes)));
                         Interlocked.Exchange(ref downloadedBytes, completedBeforeFile + measuredTotal);
@@ -4869,8 +4888,8 @@ public sealed partial class AppController : IAsyncDisposable
         if (uploads.Count > 0)
         {
             var uploadId = NewId();
-            await OpsUploadBatchAsync(uploadId, uploads.Select(task => task.PreparedTransfer!.FileName).ToArray(), uploads.Select(task => task.File.Length).ToArray());
             var token = BeginTransferOperation(uploadId);
+            await OpsUploadBatchAsync(uploadId, uploads.Select(task => task.PreparedTransfer!.FileName).ToArray(), uploads.Select(task => task.File.Length).ToArray());
             try
             {
                 await RunUploadQueueAsync(uploadId, uploads, all, serialFolderIds, token);
@@ -4882,8 +4901,8 @@ public sealed partial class AppController : IAsyncDisposable
         foreach (var state in states.Where(state => state.TransferType == TransferTypes.Download))
         {
             var opId = state.TransferId;
-            await OpsAddAsync(opId, state.TransferType, state.FileName);
             var cancellationToken = BeginTransferOperation(opId);
+            await OpsAddAsync(opId, state.TransferType, state.FileName);
             try
             {
                 state.Status = TransferStatuses.Recovering;
@@ -4907,13 +4926,15 @@ public sealed partial class AppController : IAsyncDisposable
                     var downloadBytes = Math.Max(0, entry.SizeBytes);
                     long receivedBytes = 0;
                     await OpsTransferMetricsAsync(opId, "download", 0, 1, 0, downloadBytes);
-                    await Downloader().DownloadAndAssembleAsync(
+                    await RunPausableDownloadAsync(opId, state, cancellationToken, async attemptToken =>
+                    {
+                        await Downloader().DownloadAndAssembleAsync(
                         entry,
                         destination,
                         state,
                         _transferManager,
                         msg => _ = OpsUpdateAsync(opId, "active", msg),
-                        cancellationToken,
+                        attemptToken,
                         progress =>
                         {
                             _ = OpsProgressAsync(opId, Math.Min(99, progress.Percent), progress.Message);
@@ -4923,6 +4944,7 @@ public sealed partial class AppController : IAsyncDisposable
                                 _ = OpsTransferMetricsAsync(opId, "download", 0, 1, progress.DownloadedBytes, progress.TotalBytes, rateBytes: progress.RateBytes);
                             }
                         });
+                    });
                     await _transferManager.CompleteAsync(state, settings.KeepTransferHistory, cancellationToken);
                     await OpsTransferMetricsAsync(opId, "download", 1, 1, downloadBytes, downloadBytes, rateBytes: Interlocked.Read(ref receivedBytes));
                     resumed++;
@@ -7073,6 +7095,7 @@ private static string ClassifyConnectError(Exception ex)
 
     private static bool IsResumableUploadFailure(Exception ex)
     {
+        if (TransferMemoryPressureException.Find(ex) != null) return true;
         if (ex is DiscordApiException api)
         {
             return (int)api.StatusCode == 429 ||

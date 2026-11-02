@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Organessonium.Services;
 
 internal static class RamUploadBudget
@@ -13,6 +15,8 @@ internal static class RamUploadBudget
     private static long _reserved;
     private static long _externalNativeReserved, _externalManagedReserved;
     private static int _priorityWaiters;
+    private static long _lastCollection;
+    private const long DrainAdmissionBytes = AppMemoryBudget.LimitBytes - 16L * 1024 * 1024;
 
     internal static int PipelineBatchChunks(int partBytes)
     {
@@ -49,6 +53,8 @@ internal static class RamUploadBudget
     private static async Task<IDisposable> WaitForReservationAsync(long bytes, long managedBytes, bool external,
         bool priority, CancellationToken token)
     {
+        var waiting = Stopwatch.StartNew();
+        long emptySince = 0;
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -61,8 +67,12 @@ internal static class RamUploadBudget
                 var nativeBaseline = Math.Max(0, AppMemoryBudget.CommittedBytes() - pool);
                 var managedBaseline = Math.Max(0, GC.GetTotalMemory(false) - pool);
                 // Let existing sends drain before new chunks can displace a waiting thumbnail.
+                // The soft target cannot be reclaimed by collecting Chromium/native memory.
+                // Let admitted work drain using the existing hard-limit headroom, while
+                // retaining all reservations and a safety margin for the entire job.
+                var admission = waiting.Elapsed >= TimeSpan.FromSeconds(2) ? DrainAdmissionBytes : AppMemoryBudget.AdmissionBytes;
                 if ((priority || Volatile.Read(ref _priorityWaiters) == 0) &&
-                    nativeBaseline + buffers + nativeExternal <= AppMemoryBudget.AdmissionBytes &&
+                    nativeBaseline + buffers + nativeExternal <= admission &&
                     managedBaseline + buffers + managedExternal <= ManagedAdmissionBytes)
                 {
                     if (external) { _externalNativeReserved += bytes; _externalManagedReserved += managedBytes; }
@@ -70,8 +80,18 @@ internal static class RamUploadBudget
                     return new Reservation(bytes, managedBytes, external);
                 }
                 Pool.TrimFreeBuffers();
+                if (_reserved == 0 && _externalNativeReserved == 0 && _externalManagedReserved == 0)
+                {
+                    if (emptySince == 0) emptySince = Environment.TickCount64;
+                    if (Environment.TickCount64 - emptySince >= 30_000)
+                        throw new TransferMemoryPressureException();
+                }
+                else emptySince = 0;
             }
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: false);
+            var now = Environment.TickCount64;
+            var last = Interlocked.Read(ref _lastCollection);
+            if (now - last >= 5000 && Interlocked.CompareExchange(ref _lastCollection, now, last) == last)
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: false);
             await Task.Delay(200, token).ConfigureAwait(false);
         }
     }
@@ -92,5 +112,16 @@ internal static class RamUploadBudget
                 else _reserved -= release;
             }
         }
+    }
+}
+
+internal sealed class TransferMemoryPressureException() : System.IO.IOException(
+    "Memória indisponível dentro do limite de 1 GB. Libere memória e retome a transferência.")
+{
+    internal static TransferMemoryPressureException? Find(Exception error)
+    {
+        for (var current = error; current != null; current = current.InnerException)
+            if (current is TransferMemoryPressureException pressure) return pressure;
+        return null;
     }
 }

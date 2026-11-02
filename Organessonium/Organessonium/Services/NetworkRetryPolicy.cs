@@ -26,6 +26,7 @@ internal static class NetworkRetryPolicy
     }
     public static bool IsTransient(Exception exception)
     {
+        if (TransferMemoryPressureException.Find(exception) != null) return false;
         for (var current = exception; current != null; current = current.InnerException)
         {
             if (current is TimeoutException or OperationCanceledException) return true;

@@ -1125,6 +1125,7 @@ public sealed partial class ForumDownloader
                         if (encryptedMemory != null) CryptographicOperations.ZeroMemory(encryptedMemory.GetBuffer());
                     }
                 }
+                catch (Exception error) when (TransferMemoryPressureException.Find(error) is { } pressure) { throw pressure; }
                 catch (Exception ex) when ((ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested) &&
                                            (NetworkRetryPolicy.IsTransient(ex) || attempt < maxAttempts))
                 {

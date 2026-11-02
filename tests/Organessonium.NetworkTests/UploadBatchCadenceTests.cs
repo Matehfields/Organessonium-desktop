@@ -53,6 +53,10 @@ internal static partial class Program
         RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
             (await registry.LoadFavoritesAsync()).Count == 0 && Visible().Count(entry => entry.ParentFolderId == "trash") == 12,
             "a lixeira publicou índices intermediários ou manteve favorito excluído");
+        var withTrash = await registry.GetLibraryStatisticsAsync("root");
+        var cachedWithTrash = await registry.GetCachedLibraryStatisticsAsync();
+        RequireSync(withTrash?.FileCount == 12 && cachedWithTrash?.FileCount == 12 && withTrash.TotalBytes == 36,
+            "o total do servidor ignorou arquivos ou bytes na lixeira");
         transport.Reset(mappings["destination"].ThreadId);
         await Invoke("RelocateTrashItemsAsync", Ids(), true);
         RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
@@ -62,13 +66,15 @@ internal static partial class Program
         return TestOutcome.Pass();
     });
 
-    private static Task<TestOutcome> UploadBatchCadenceAsync() => OnHiddenDispatcherAsync(async () =>
+    private static Task<TestOutcome> UploadBatchCadenceAsync() => RunUploadBatchCadenceAsync(200, 100);
+    private static Task<TestOutcome> UploadPoolBoundaryAsync() => RunUploadBatchCadenceAsync(600, 0);
+
+    private static Task<TestOutcome> RunUploadBatchCadenceAsync(int count, int latency) => OnHiddenDispatcherAsync(async () =>
     {
         using var h = new SharedHarness();
-        const int count = 200;
         await h.Registry.RefreshMappingsAsync();
         var journal = await h.Registry.GetStorageJournalIndexAsync(default);
-        using var transport = new UploadCadenceHandler(h.Server, journal.ThreadId);
+        using var transport = new UploadCadenceHandler(h.Server, journal.ThreadId, latency);
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(transport, false));
         var registry = new AppRegistry(api, h.Store, h.Settings);
         await registry.RefreshMappingsAsync();
@@ -100,11 +106,13 @@ internal static partial class Program
         RequireSync(entries.Count(entry => entry.Type == "file") == count && completedCards >= count &&
             entries.All(entry => entry.Type != "file" || entry.ChunkReferences?.Count == 1 && entry.Checksums != null),
             "o lote perdeu cards, referências ou checksums");
-        RequireSync(h.Server.PayloadPosts == 1 && batches.Length == count / 10 && batches.All(message => message.Attachments.Count == 10),
+        var poolSizes = Enumerable.Range(0, (count + 255) / 256).Select(index => Math.Min(256, count - index * 256)).ToArray();
+        RequireSync(h.Server.PayloadPosts == poolSizes.Length && batches.Length == poolSizes.Sum(size => (size + 9) / 10) &&
+            batches.Sum(message => message.Attachments.Count) == count,
             "o lote criou posts por arquivo ou fragmentou os anexos");
         RequireSync(transport.SerialWrites == 1 && transport.FilesAtFirstSerial == count,
             "o serial foi publicado antes do último metadata do lote");
-        RequireSync(transport.JournalParallel > 1, "confirmações independentes do journal continuam serializadas por latência HTTP");
+        RequireSync(latency == 0 || transport.JournalParallel > 1, "confirmações independentes do journal continuam serializadas por latência HTTP");
         var metadata = new MetadataService(Services.MetadataEncryption.MetadataCodec.ForStore(h.Store), api.DownloadAttachmentBytesAsync);
         var claims = 0;
         foreach (var message in h.Server.Messages(journal.ThreadId))

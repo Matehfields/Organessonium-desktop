@@ -148,7 +148,14 @@ internal static partial class Program
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9r8AAAAASUVORK5CYII="));
             RamUploadBudget.Pool.TrimFreeBuffers();
             GC.Collect();
-            var pressureBytes = AppMemoryBudget.AdmissionBytes - AppMemoryBudget.CommittedBytes() -
+            var softPressureBytes = AppMemoryBudget.AdmissionBytes - AppMemoryBudget.CommittedBytes() -
+                2L * DiscordLimits.AttachmentBytes - VideoPreviewWorker.ThumbnailWorkingReservationBytes + 24L * 1024 * 1024;
+            using (var softPressure = await RamUploadBudget.ReserveExternalBytesAsync(softPressureBytes, 0, default))
+            using (var drainTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+            using (var drained = await VideoPreviewWorker.GenerateAsync(source, false, false, null, drainTimeout.Token, executable))
+                RequireSync(drained.Length > 0 && AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes,
+                    "a pressão acima do alvo de 800 MiB bloqueou a miniatura apesar da margem disponível dentro de 1 GB");
+            var pressureBytes = AppMemoryBudget.LimitBytes - 16L * 1024 * 1024 - AppMemoryBudget.CommittedBytes() -
                 2L * DiscordLimits.AttachmentBytes - 48L * 1024 * 1024;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(50));
             using var pressure = await RamUploadBudget.ReserveExternalBytesAsync(pressureBytes, 0, timeout.Token);

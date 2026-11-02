@@ -7,6 +7,7 @@ internal sealed partial class SharedStorageManager
         internal int Uploads;
         internal bool Pending;
         internal CancellationTokenSource? Cleanup;
+        internal readonly HashSet<CancellationTokenSource> Background = [];
         internal Func<CleanupUpdate, bool>? CleanupProgress;
     }
 
@@ -15,6 +16,7 @@ internal sealed partial class SharedStorageManager
         lock (_maintenance)
         {
             _maintenance.Uploads++;
+            foreach (var background in _maintenance.Background) background.Cancel();
             if (_maintenance.Cleanup != null)
             {
                 _maintenance.Pending = true;
@@ -26,6 +28,23 @@ internal sealed partial class SharedStorageManager
 
     // Interactive metadata writes share the same preemption and deferred-cleanup contract.
     internal IAsyncDisposable PrioritizeMutations() => PrioritizeUploads();
+
+    internal async Task RunBackgroundAsync(Func<CancellationToken, Task> work, CancellationToken lifetime)
+    {
+        while (true)
+        {
+            lifetime.ThrowIfCancellationRequested();
+            using var run = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+            var admitted = false;
+            lock (_maintenance)
+                if (_maintenance.Uploads == 0) { _maintenance.Background.Add(run); admitted = true; }
+            if (!admitted) { await Task.Delay(1000, lifetime); continue; }
+            try { await work(run.Token); return; }
+            catch (OperationCanceledException) when (run.IsCancellationRequested && !lifetime.IsCancellationRequested) { }
+            finally { lock (_maintenance) _maintenance.Background.Remove(run); }
+            await Task.Delay(1000, lifetime);
+        }
+    }
 
     private void ResumeDeferredMaintenance()
     {

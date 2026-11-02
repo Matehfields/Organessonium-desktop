@@ -20,6 +20,21 @@ public sealed partial class DiscordApiClient
     internal bool IsSharedThread(string threadId) => SharedThreadIds.ContainsKey(_storageAccountKey + ":" + threadId);
     internal bool HasThreadWriter(string threadId) => ThreadWriters.TryGetValue(_storageAccountKey + ":" + threadId, out var state) && Volatile.Read(ref state.Users) > 0;
 
+    internal async Task<bool> ArchiveIdleThreadAsync(string threadId, CancellationToken token)
+    {
+        var state = ThreadWriters.GetOrAdd(_storageAccountKey + ":" + threadId, _ => new ThreadWriteState());
+        await state.Gate.WaitAsync(token);
+        try
+        {
+            if (state.Users != 0) return false;
+            var channel = await GetChannelAsync(threadId, token);
+            if (channel.ThreadMetadata?.Locked == true || channel.ThreadMetadata?.Archived == true) return false;
+            await ArchiveThreadAsync(threadId, token);
+            return true;
+        }
+        finally { state.Gate.Release(); }
+    }
+
     public void InvalidatePayloadMessage(string threadId, string messageId) => _payloadMessages.TryRemove((threadId, messageId), out _);
 
     public async Task<DiscordMessageDto> ResolvePayloadMessageAsync(string threadId, string messageId,
