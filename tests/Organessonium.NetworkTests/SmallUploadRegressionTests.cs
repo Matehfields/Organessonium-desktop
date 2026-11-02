@@ -45,6 +45,7 @@ internal static partial class Program
             foreach (var path in paths) await File.WriteAllBytesAsync(path, new byte[4096]);
             transport.IndexThreadId = store.LoadFolderIndexMappings()["photos"].ThreadId;
             transport.Archives.Clear(); transport.HoldMetadata = true;
+            var serialWritesBeforeUpload = transport.SerialWrites;
             var upload = (Task)typeof(AppController).GetMethod("UploadPathsAsync", flags)!.Invoke(controller, new object[] { paths })!;
             await transport.MetadataStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
             // The user opens/refreshes the folder after the queue captured its initial snapshot.
@@ -52,6 +53,9 @@ internal static partial class Program
                 new object[] { "/Fotos", "[\"photos\"]", false })!).WaitAsync(TimeSpan.FromSeconds(15));
             RequireSync(!transport.Archives.Any(change => change.Thread == transport.IndexThreadId && change.Archived),
                 "a atualização fechou o índice enquanto o lote ainda o utiliza");
+            // Reconciliation in a separate task must not publish a partial serial.
+            RequireSync(transport.SerialWrites == serialWritesBeforeUpload,
+                "a recarga publicou um serial antes de terminar o upload");
             transport.AllowMetadata.TrySetResult();
             await upload.WaitAsync(TimeSpan.FromSeconds(40));
             var visible = (IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!;
@@ -61,7 +65,7 @@ internal static partial class Program
             RequireSync(server.PayloadPosts == 1 && server.FileThreads().Sum(thread => server.Messages(thread).Sum(message => message.Attachments.Count)) == 12 &&
                 paths.All(File.Exists) && visible.Any(entry => entry.FileId == existing.FileId) &&
                 paths.All(path => visible.Any(entry => entry.Name == Path.GetFileName(path) && entry.Path == "/Fotos")),
-                "o lote perdeu arquivos da pasta recarregada, publicou incompleto ou alterou os originais");
+                $"o lote perdeu arquivos da pasta recarregada, publicou incompleto ou alterou os originais: posts={server.PayloadPosts}, attachments={server.FileThreads().Sum(thread => server.Messages(thread).Sum(message => message.Attachments.Count))}, existing={visible.Any(entry => entry.FileId == existing.FileId)}, cards={visible.Count(entry => entry.Type == "file")}, sources={paths.All(File.Exists)}");
             var cached = await registry.LoadCachedFolderAsync("photos", "/Fotos");
             RequireSync(cached.Count(entry => entry.Type == "file") == 13, "cache/serial perdeu entradas após o lote");
             var checksum = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(new byte[4096]));
@@ -102,6 +106,8 @@ internal static partial class Program
         private int _held;
         internal string IndexThreadId = "";
         internal bool HoldMetadata;
+        internal bool HoldAllMetadata;
+        internal int SerialWrites;
         internal ConcurrentQueue<(string Thread, bool Archived)> Archives { get; } = new();
         internal TaskCompletionSource MetadataStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource AllowMetadata { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -110,13 +116,15 @@ internal static partial class Program
             var path = request.RequestUri!.AbsolutePath;
             var offset = path.IndexOf("/channels/", StringComparison.Ordinal);
             var parts = offset < 0 ? [] : path[(offset + 10)..].Split('/');
+            if ((request.Method == HttpMethod.Post || request.Method == HttpMethod.Patch) && parts.Length > 1 && parts[0] == "serial")
+                Interlocked.Increment(ref SerialWrites);
             if (request.Method == HttpMethod.Patch && parts.Length == 1)
             {
                 using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
                 if (json.RootElement.TryGetProperty("archived", out var archived)) Archives.Enqueue((parts[0], archived.GetBoolean()));
             }
             if (HoldMetadata && request.Method == HttpMethod.Post && parts.Length == 2 && parts[0] == IndexThreadId &&
-                parts[1] == "messages" && Interlocked.Exchange(ref _held, 1) == 0)
+                parts[1] == "messages" && (HoldAllMetadata || Interlocked.Exchange(ref _held, 1) == 0))
             {
                 MetadataStarted.TrySetResult();
                 await AllowMetadata.Task.WaitAsync(token);

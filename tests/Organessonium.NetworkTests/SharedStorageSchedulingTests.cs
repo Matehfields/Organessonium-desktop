@@ -13,7 +13,7 @@ internal static partial class Program
     {
         using var h = new SharedHarness();
         h.Settings.MaxParallelUploads = 1; h.Store.Save(h.Settings);
-        using var transport = new ObservedSmallUploadHandler(h.Server) { IndexThreadId = "root-thread", HoldMetadata = true };
+        using var transport = new ObservedSmallUploadHandler(h.Server) { IndexThreadId = "root-thread", HoldMetadata = true, HoldAllMetadata = true };
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(transport, false));
         var registry = new AppRegistry(api, h.Store, h.Settings); await registry.RefreshMappingsAsync();
         using var web = new WebView2();

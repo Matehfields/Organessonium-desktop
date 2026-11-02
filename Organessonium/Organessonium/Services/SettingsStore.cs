@@ -766,6 +766,16 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
+    internal void CacheUploadedEntry(AppEntry entry)
+    {
+        entry.Normalize();
+        lock (_lock)
+        {
+            using var connection = Open();
+            InsertCachedEntry(connection, entry);
+        }
+    }
+
     private static void InsertCachedEntry(SqliteConnection connection, AppEntry entry)
     {
         using var insert = connection.CreateCommand();

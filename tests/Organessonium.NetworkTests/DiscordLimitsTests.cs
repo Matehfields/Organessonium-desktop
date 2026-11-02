@@ -8,6 +8,47 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static async Task<TestOutcome> DiscordNumericChannelIsolationAsync()
+    {
+        const string payload = "123456789012345678";
+        const string journal = "987654321098765432";
+        using var handler = new LimitsHandler((request, _) =>
+        {
+            var response = MessageResponse();
+            response.Headers.Add("X-RateLimit-Bucket", "same-endpoint-different-channel");
+            response.Headers.Add("X-RateLimit-Limit", "5");
+            response.Headers.Add("X-RateLimit-Remaining", request.RequestUri!.AbsolutePath.Contains(payload) ? "0" : "4");
+            response.Headers.Add("X-RateLimit-Reset-After", "2");
+            return Task.FromResult(response);
+        });
+        using var discord = new DiscordApiClient(Guid.NewGuid().ToString(), new HttpClient(handler));
+        await discord.GetMessageAsync(journal, "100");
+        await discord.GetMessageAsync(payload, "101");
+        using var quick = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        try { await discord.GetMessageAsync(journal, "102", quick.Token); }
+        catch (OperationCanceledException) { return TestOutcome.Fail("a cota esgotada do payload bloqueou o journal de outro canal numérico"); }
+        // A slow POST must also leave the other channel's route lock available.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var slowHandler = new LimitsHandler(async (request, token) =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains(payload))
+            { started.TrySetResult(); await release.Task.WaitAsync(token); }
+            return MessageResponse();
+        });
+        using var client = new DiscordApiClient(Guid.NewGuid().ToString(), new HttpClient(slowHandler));
+        var pending = client.CreateMessageAsync(payload, "payload");
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+            await client.CreateMessageAsync(journal, "journal", deadline.Token);
+        }
+        catch (OperationCanceledException) { return TestOutcome.Fail("um POST lento reteve o lock de todos os canais numéricos"); }
+        finally { release.TrySetResult(); await pending; }
+        return TestOutcome.Pass();
+    }
+
     private static async Task<TestOutcome> DiscordLimitsRejectOversizedPayloadsAsync()
     {
         var calls = 0;

@@ -194,7 +194,7 @@ internal sealed partial class SharedStorageManager
         var channel = await GetJournalThreadAsync(token);
         await using var lease = await _api.AcquireThreadWriteAsync(channel, token);
         return await _api.WriteEncodedDocumentAsync(channel,
-            _metadata.EncodeJson(JsonSerializer.Serialize(record, JsonOptions.Web)), messageId, token);
+            _metadata.EncodeJson(JsonSerializer.Serialize(record, JsonOptions.Web)), messageId, token, serializeRoute: false);
     }
 
     private async Task RefreshJournalAsync(CancellationToken token)

@@ -1946,6 +1946,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
+        await using var serialBatch = registry.BeginSerialBatch();
         var all = CurrentLocalEntries();
         var opId = NewId();
         await OpsAddAsync(opId, "move", ids.Count == 1 ? "Movendo item" : "Movendo itens");
@@ -1969,6 +1970,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await OpsProgressAsync(opId, Percent(i + 1, ids.Count), $"Movido {i + 1}/{ids.Count}: {entry.Name}");
             }
 
+            await serialBatch.DisposeAsync();
             await OpsUpdateAsync(opId, "done", $"OK {moved} item(ns) movido(s).");
             await _bridge.CallAsync("_onStatus", $"OK {moved} item(ns) movido(s).", false);
             await PublishLocalRegistryAsync(registry, all);
@@ -2040,6 +2042,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
+        await using var serialBatch = registry.BeginSerialBatch();
         var all = CurrentLocalEntries();
         var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
         if (entry == null)
@@ -2076,6 +2079,7 @@ public sealed partial class AppController : IAsyncDisposable
             await registry.UpdateEntryAsync(entry);
         }
 
+        await serialBatch.DisposeAsync();
         await PublishLocalRegistryAsync(registry, all);
         await _bridge.CallAsync("_onStatus", "OK Item renomeado.", false);
     }
@@ -2121,6 +2125,7 @@ public sealed partial class AppController : IAsyncDisposable
         var folderCount = 0;
         var skipped = 0;
         var registry = Registry();
+        await using var serialBatch = registry.BeginSerialBatch();
         await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
         var all = CurrentLocalEntries();
         var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2156,6 +2161,7 @@ public sealed partial class AppController : IAsyncDisposable
             if (folderCount > 0)
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
+                await serialBatch.DisposeAsync();
                 await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
                 await _bridge.CallAsync("_onStatus", "OK Pasta criada sem arquivos para enviar.", false);
             }
@@ -2202,6 +2208,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 await registry.SynchronizeFolderSerialsAsync(serialFolderIds, CancellationToken.None);
+                await serialBatch.DisposeAsync();
                 await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
             }
             finally
@@ -3028,6 +3035,8 @@ public sealed partial class AppController : IAsyncDisposable
             entry.VideoPreviewSizeBytes = previewIds.VideoPreviewSizeBytes;
             if (transferState.Replacement != null)
                 entry = await PublishFileVersionAsync(registry, transferState.Replacement, entry, cancellationToken, ReportRateLimitWaitAsync);
+            else if (scheduledTransfer && entry.Storage?.Shared == true)
+                await registry.AddNewUploadEntryAsync(entry, cancellationToken, ReportRateLimitWaitAsync);
             else
                 await registry.AddEntryAsync(entry, cancellationToken, ReportRateLimitWaitAsync,
                     synchronizeSerials: !deferSerialSynchronization);
@@ -3710,6 +3719,7 @@ public sealed partial class AppController : IAsyncDisposable
         if (selected.Count == 0) throw new InvalidOperationException("Nenhum item encontrado para esta ação.");
 
         var registry = Registry();
+        await using var serialBatch = registry.BeginSerialBatch();
         var opId = NewId();
         await OpsAddAsync(opId, "move", restore ? "Restaurando da lixeira" : "Enviando à lixeira");
         await SetBackgroundActivityAsync("Em andamento...", true);
@@ -3746,6 +3756,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await _bridge.CallAsync("_onAppsBatch", changed);
                 await OpsProgressAsync(opId, Percent(i + 1, selected.Count), moved.Name);
             }
+            await serialBatch.DisposeAsync();
             Interlocked.Increment(ref _favoriteLoadVersion);
             _favoriteApps = await registry.LoadFavoritesAsync();
             await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
@@ -3771,6 +3782,7 @@ public sealed partial class AppController : IAsyncDisposable
     private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
     {
         await using var priority = registry.SharedStorage.PrioritizeMutations();
+        await using var serialBatch = registry.BeginSerialBatch();
         foreach (var folder in selected.Where(IsFolderEntry).ToList())
         {
             var descendants = await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true);
@@ -3890,6 +3902,7 @@ public sealed partial class AppController : IAsyncDisposable
         var visibleDeleted = fileTotal > 0 ? deletedFiles : deletedFolders;
         var visibleKind = fileTotal > 0 ? "arquivo(s)" : "pasta(s)";
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
+        await serialBatch.DisposeAsync();
         if (failed == 0) await OpsProgressAsync(opId, 100, $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)");
         await OpsUpdateAsync(opId, status, failed == 0
             ? $"{visibleDeleted}/{visibleTotal} {visibleKind} removido(s) do índice" + (pendingCleanup ? "; limpeza física em segundo plano" : "")
@@ -4836,6 +4849,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         var settings = _store.Load();
         var registry = Registry();
+        await using var serialBatch = registry.BeginSerialBatch();
         await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
         var all = CurrentLocalEntries();
         var resumed = 0;
@@ -4944,6 +4958,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
+        await serialBatch.DisposeAsync();
         await PublishLocalRegistryAsync(registry, CurrentLocalEntries(), incremental: true);
         if (!silent)
         {

@@ -4,6 +4,25 @@ namespace Organessonium.Services;
 
 public sealed partial class AppRegistry
 {
+    private async Task<string> AddUploadFileEntryAsync(Models.AppEntry entry, CancellationToken token,
+        Func<TimeSpan, Task>? onRateLimitWait)
+    {
+        entry.Normalize();
+        entry.ParentFolderId = NormalizeFolderId(entry.ParentFolderId);
+        var parent = await GetMappingAsync(entry.ParentFolderId, token);
+        await _entryMutationGate.WaitAsync(token);
+        try
+        {
+            await OpenEntryIndexAsync(parent.ThreadId, false, token, onRateLimitWait);
+            // Preserve the publication/cache ordering used by folder reconciliation.
+            // The journal's independent confirmations do not need this index gate.
+            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, token, onRateLimitWait);
+            _store.CacheUploadedEntry(entry);
+        }
+        finally { _entryMutationGate.Release(); }
+        return entry.MetadataMessageId;
+    }
+
     private readonly ConcurrentDictionary<string, byte> _uploadIndexThreads = new(StringComparer.Ordinal);
     private int _uploadIndexBatches;
 

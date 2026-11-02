@@ -842,23 +842,40 @@ public sealed partial class AppRegistry
         }
     }
 
-    public async Task<string> AddEntryAsync(
+    public Task<string> AddEntryAsync(
         AppEntry entry,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool synchronizeSerials = true)
+        bool synchronizeSerials = true) =>
+        PublishEntryAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials, newUploadIdentity: false);
+
+    internal Task<string> AddNewUploadEntryAsync(AppEntry entry, CancellationToken token,
+        Func<TimeSpan, Task>? onRateLimitWait)
+    {
+        if (entry.Type != "file" || entry.Storage?.Shared != true ||
+            !Guid.TryParseExact(entry.FileId, "N", out _) || !Guid.TryParseExact(entry.VersionId, "N", out _) ||
+            !string.IsNullOrEmpty(entry.MetadataMessageId) || entry.Versions.Count > 0 || Volatile.Read(ref _uploadIndexBatches) == 0)
+            throw new InvalidOperationException("A publicação inicial exige uma identidade nova reservada pelo lote.");
+        return PublishEntryAsync(entry, token, onRateLimitWait, synchronizeSerials: false, newUploadIdentity: true);
+    }
+
+    private async Task<string> PublishEntryAsync(AppEntry entry, CancellationToken cancellationToken,
+        Func<TimeSpan, Task>? onRateLimitWait, bool synchronizeSerials, bool newUploadIdentity)
     {
         await using var priority = SharedStorage.PrioritizeMutations();
-        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
-        await _entryMutationGate.WaitAsync(cancellationToken);
+        // A freshly generated, already reserved identity only creates a new message.
+        // Existing identities, versions and resumptions still acquire the remote edit claim.
+        await using var mutation = newUploadIdentity ? null : await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
         string messageId;
-        try
+        if (entry.Type == "file" && !synchronizeSerials && Volatile.Read(ref _uploadIndexBatches) > 0)
         {
-            messageId = await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials);
+            messageId = await AddUploadFileEntryAsync(entry, cancellationToken, onRateLimitWait);
         }
-        finally
+        else
         {
-            _entryMutationGate.Release();
+            await _entryMutationGate.WaitAsync(cancellationToken);
+            try { messageId = await AddEntryCoreAsync(entry, cancellationToken, onRateLimitWait, synchronizeSerials); }
+            finally { _entryMutationGate.Release(); }
         }
         if (entry.Type == "file")
             await SharedStorage.PublishFileReferenceAsync(entry, (await GetMappingAsync(NormalizeFolderId(entry.ParentFolderId), cancellationToken)).ThreadId, cancellationToken);
@@ -1215,15 +1232,16 @@ public sealed partial class AppRegistry
         }
     }
 
-    private Task<FolderSerial> RebuildFavoritesSerialAsync(CancellationToken cancellationToken)
+    private Task RebuildFavoritesSerialAsync(CancellationToken cancellationToken)
     {
         return RebuildFavoritesSerialAsync([], cancellationToken);
     }
 
-    private async Task<FolderSerial> RebuildFavoritesSerialAsync(
+    private async Task RebuildFavoritesSerialAsync(
         IEnumerable<AppEntry> additionalEntries,
         CancellationToken cancellationToken)
     {
+        if (DeferFavoritesSerial(additionalEntries)) return;
         var favorites = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
         var mappings = MappingSnapshot();
         var trashedFolders = await LoadTrashFolderIdsAsync(cancellationToken);
@@ -1273,7 +1291,6 @@ public sealed partial class AppRegistry
             Kind = FolderSerialKind.Favorites
         };
         await PublishFavoritesSerialAsync(result, cancellationToken);
-        return result;
     }
 
     private async Task PublishFavoritesSerialAsync(FolderSerial serial, CancellationToken cancellationToken)
@@ -1645,6 +1662,7 @@ public sealed partial class AppRegistry
         IEnumerable<AppEntry> entries,
         CancellationToken cancellationToken)
     {
+        if (DeferFolderSerial(folderId)) return;
         await _serialSynchronizationGate.WaitAsync(cancellationToken);
         try
         {

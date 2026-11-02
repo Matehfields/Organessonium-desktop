@@ -169,6 +169,14 @@ internal static partial class Program
             sharedUpload: new SharedUploadContext(registry.SharedStorage, reservation));
         RequireSync(!gate.Release.Task.IsCompleted && sent.ChunkReferences?.Count == 1,
             "o corpo do upload aguardou a leitura completa do histórico");
+        var entry = AppEntry.File(state.FileName, sent.ThreadId, TransferState.Now(), 3, "/");
+        entry.FileId = state.FileId; entry.VersionId = state.TransferId;
+        entry.ParentFolderId = "root"; entry.Storage = reservation.Layout; entry.Encryption = state.Encryption;
+        entry.ChunkReferences = sent.ChunkReferences!.ToList(); entry.ChunkCount = 1; entry.BatchId = sent.BatchId;
+        await using (await registry.BeginUploadIndexBatchAsync())
+            await registry.AddNewUploadEntryAsync(entry, timeout.Token, null);
+        RequireSync(!gate.Release.Task.IsCompleted && h.Server.Messages("root-thread").Any(message => message.Id == entry.MetadataMessageId),
+            "a publicação inicial aguardou o histórico ou não confirmou os metadados");
         gate.Release.TrySetResult();
         await registry.SharedStorage.EnsureMetadataAvailableAsync(state.FileId, timeout.Token);
         RequireSync(gate.MaximumConcurrent >= 4 && gate.MaximumConcurrent <= 8 && planPaths.All(path => gate.Reads.GetValueOrDefault(path) == 1),

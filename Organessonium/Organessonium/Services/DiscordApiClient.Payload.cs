@@ -128,10 +128,10 @@ public sealed partial class DiscordApiClient
     }
 
     internal async Task<DiscordMessageDto> WriteEncodedDocumentAsync(string channelId, string encoded,
-        string? messageId, CancellationToken token)
+        string? messageId, CancellationToken token, bool serializeRoute = true)
     {
         if (encoded.Length <= DiscordLimits.MessageContentCharacters)
-            return string.IsNullOrEmpty(messageId) ? await CreateMessageAsync(channelId, encoded, token) :
+            return string.IsNullOrEmpty(messageId) ? await CreateMessageAsync(channelId, encoded, token, serializeRoute: serializeRoute) :
                 await UpdateMessageAsync(channelId, messageId, encoded, token, clearAttachments: true);
         var bytes = Encoding.UTF8.GetBytes(encoded);
         if (bytes.Length > DiscordLimits.AttachmentBytes) throw new InvalidDataException("O documento excede o limite de metadata.");
@@ -144,7 +144,7 @@ public sealed partial class DiscordApiClient
             return new HttpRequestMessage(string.IsNullOrEmpty(messageId) ? HttpMethod.Post : HttpMethod.Patch,
                 string.IsNullOrEmpty(messageId) ? $"channels/{channelId}/messages" : $"channels/{channelId}/messages/{messageId}")
             { Content = multipart };
-        }, token);
+        }, token, serializeRoute: serializeRoute);
         if (!string.IsNullOrEmpty(messageId)) InvalidatePayloadMessage(channelId, messageId);
         return await ReadJsonAsync<DiscordMessageDto>(response, token);
     }
