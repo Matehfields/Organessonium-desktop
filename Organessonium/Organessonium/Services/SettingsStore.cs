@@ -301,7 +301,12 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
-    public List<AppEntry> LoadCachedEntriesForFolder(string folderId)
+    public List<AppEntry> LoadCachedEntriesForFolder(string folderId) => LoadCachedEntriesForFolder(folderId, null);
+
+    internal AppEntry? LoadCachedFileEntry(string folderId, string metadataMessageId) =>
+        LoadCachedEntriesForFolder(folderId, metadataMessageId).FirstOrDefault();
+
+    private List<AppEntry> LoadCachedEntriesForFolder(string folderId, string? metadataMessageId)
     {
         var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? "root" : folderId;
         lock (_lock)
@@ -318,8 +323,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
                        chunk_refs_json, video_preview_chunk_refs_json, modified_at, version_id, version_uploaded_at, versions_json, storage_json, thumbnail_ref_json, checksums_json
                 FROM app_entries
                 WHERE COALESCE(NULLIF(parent_folder_id, ''), 'root') = $folderId
-                ORDER BY rowid
                 """;
+            command.CommandText += metadataMessageId == null ? " ORDER BY rowid" : " AND names_message_id = $messageId LIMIT 1";
+            if (metadataMessageId != null) command.Parameters.AddWithValue("$messageId", metadataMessageId);
             command.Parameters.AddWithValue("$folderId", normalizedFolderId);
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -773,6 +779,24 @@ public sealed class SettingsStore : IEncryptionSecretStore
         {
             using var connection = Open();
             InsertCachedEntry(connection, entry);
+        }
+    }
+
+    internal void CacheFileDetails(AppEntry entry)
+    {
+        entry.Normalize();
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var transaction = connection.BeginTransaction();
+            using (var delete = connection.CreateCommand())
+            {
+                delete.CommandText = "DELETE FROM app_entries WHERE names_message_id = $messageId";
+                delete.Parameters.AddWithValue("$messageId", entry.MetadataMessageId);
+                delete.ExecuteNonQuery();
+            }
+            InsertCachedEntry(connection, entry);
+            transaction.Commit();
         }
     }
 

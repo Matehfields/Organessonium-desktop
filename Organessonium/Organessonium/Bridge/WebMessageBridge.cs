@@ -42,8 +42,6 @@ public sealed class WebMessageBridge
 
     public async Task CallAsync(string functionName, params object?[] args)
     {
-        if (functionName is "_onAppsLoaded" or "_onCachedAppsLoaded" or "_onAppsBatch" or "_onSpecialItemsLoaded")
-            await AppMemoryBudget.ReclaimBeforeLibraryRenderAsync();
         Services.Diagnostics.DevelopmentDiagnostics.Signal("ui.callback", functionName);
         var name = JsonSerializer.Serialize(functionName, JsonOptions.Web);
         var jsonArgs = JsonSerializer.Serialize(args, JsonOptions.Web);

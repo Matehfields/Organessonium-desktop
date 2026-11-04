@@ -37,6 +37,28 @@ internal static partial class Program
         RequireSync(otherStore.SerialCacheDirectory.GetFiles("*.bin").Length == 1 && otherStore.SerialCacheDirectory.GetFiles("*.tmp").Length == 0 &&
             (await other.GetLibraryStatisticsAsync("root"))?.TotalBytes == 144,
             "gravações concorrentes do serial colidiram ou deixaram temporários");
+        var siblings = Enumerable.Range(0, 3000).Select(index => new AppEntry
+        {
+            FileId = "sibling-" + index, MetadataMessageId = "sibling-message-" + index, ThreadId = "shared-pool",
+            Name = "photo-" + index + ".jpg", Type = "file", ParentFolderId = "root", Path = "/",
+            Encryption = full.Encryption, ChunkReferences = full.ChunkReferences, Versions = full.Versions,
+            SizeBytes = 96
+        }).Prepend(full).ToList();
+        otherStore.CacheFolderEntries("root", siblings);
+        await other.LoadFileDetailsAsync(cold); // Warm the SQL/JSON paths before measuring.
+        var folderReadBefore = GC.GetTotalAllocatedBytes(true);
+        otherStore.LoadCachedEntriesForFolder("root");
+        Console.WriteLine("METRIC whole-folder-read files=3001 allocatedBytes=" + (GC.GetTotalAllocatedBytes(true) - folderReadBefore));
+        var allocatedBefore = GC.GetTotalAllocatedBytes(true);
+        for (var index = 0; index < 24; index++) await other.LoadFileDetailsAsync(cold);
+        var allocated = GC.GetTotalAllocatedBytes(true) - allocatedBefore;
+        Console.WriteLine("METRIC cached-thumbnail-details files=3001 requests=24 allocatedBytes=" + allocated);
+        RequireSync(allocated < 4 * 1024 * 1024 && h.Server.MessageReads.GetValueOrDefault((rootThread, full.MetadataMessageId)) == reads,
+            "a leitura de detalhes voltou a materializar os irmãos da pasta ou a consultar a rede");
+        await other.LoadFileDetailsAsync(cold, forceRefresh: true);
+        RequireSync(otherStore.LoadCachedEntriesForFolder("root").Count == 3001 &&
+            otherStore.LoadCachedFileEntry("root", full.MetadataMessageId)?.Versions.Count == full.Versions.Count,
+            "a hidratação de um arquivo alterou os irmãos ou perdeu o histórico");
         return TestOutcome.Pass();
     }
 

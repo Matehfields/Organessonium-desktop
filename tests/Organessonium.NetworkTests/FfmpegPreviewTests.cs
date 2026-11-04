@@ -66,6 +66,9 @@ internal static partial class Program
             view.Navigate("https://organessonium.local/index.html");
             await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
             AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(item => item.ProcessId));
+            using var thumbnailResources = new PreviewResourceRegistry();
+            using var thumbnailAdapter = new Organessonium.Bridge.WebView2PreviewAdapter(view, thumbnailResources);
+            thumbnailAdapter.Attach();
             var thumbnailJson = JsonSerializer.Serialize(ThumbnailCache.Get("media-test"));
             await view.ExecuteScriptAsync("window.__organessoniumSettings={previewEnabled:true,theme:'dark',animationsEnabled:false,language:'pt-BR'};window.onBridgeReady();window.bridge.requestPreview=()=>{};window.__media={name:'gameplay.mkv',threadId:'media-test',fileId:'media-ui',type:'file',mimeType:'video/x-matroska',path:'/',parentFolderId:'root',sizeBytes:10000};window._onAppsLoaded([window.__media]);window._thumbs={'media-test':" + thumbnailJson + "};window._onThumb('media-test');");
             await Task.Delay(200);

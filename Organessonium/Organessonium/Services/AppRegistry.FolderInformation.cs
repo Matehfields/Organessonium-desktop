@@ -19,7 +19,6 @@ public sealed partial class AppRegistry
         {
             token.ThrowIfCancellationRequested();
             if (!visited.Add(folder.Id)) continue;
-            await AppMemoryBudget.ReclaimBeforeLibraryRenderAsync();
             var entries = await LoadFolderSerialAsync(folder.Id, folder.Path, token);
             // OSER v3 has no per-file sizes or version history. Hydrate this index
             // only when the local details cannot supply the requested totals.

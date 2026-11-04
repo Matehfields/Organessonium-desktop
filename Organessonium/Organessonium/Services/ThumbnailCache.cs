@@ -6,11 +6,9 @@ namespace Organessonium.Services;
 public static class ThumbnailCache
 {
     private const int MemoryEntryLimit = 128;
-    private const long MemoryCharacterLimit = 8L * 1024 * 1024; // UTF-16 strings: at most 16 MiB of character data.
     private static readonly object MemorySync = new();
     private static readonly Dictionary<string, (string Value, LinkedListNode<string> Node)> Memory = new();
     private static readonly LinkedList<string> MemoryOrder = new();
-    private static long MemoryCharacters;
     private static DirectoryInfo? CacheDirectory;
 
     public static void Configure(DirectoryInfo previewDirectory)
@@ -60,13 +58,9 @@ public static class ThumbnailCache
                 return null;
             }
 
-            using var input = EncryptedPreviewCache.OpenRead(file);
-            var bytes = new byte[checked((int)input.Length)];
-            input.ReadExactly(bytes);
-
-            var dataUrl = "data:" + DetectImageMime(bytes) + ";base64," + Convert.ToBase64String(bytes);
-            Remember(threadId, dataUrl);
-            return dataUrl;
+            var url = ResourceUrl(threadId, file);
+            Remember(threadId, url);
+            return url;
         }
         catch
         {
@@ -96,7 +90,6 @@ public static class ThumbnailCache
         {
             Memory.Clear();
             MemoryOrder.Clear();
-            MemoryCharacters = 0;
         }
     }
 
@@ -105,10 +98,8 @@ public static class ThumbnailCache
         lock (MemorySync)
         {
             RemoveFromMemory(key);
-            if (value.Length > MemoryCharacterLimit) return;
             Memory[key] = (value, MemoryOrder.AddLast(key));
-            MemoryCharacters += value.Length;
-            while (Memory.Count > MemoryEntryLimit || MemoryCharacters > MemoryCharacterLimit)
+            while (Memory.Count > MemoryEntryLimit)
                 RemoveFromMemory(MemoryOrder.First!.Value);
         }
     }
@@ -117,7 +108,6 @@ public static class ThumbnailCache
     {
         if (!Memory.Remove(key, out var value)) return;
         MemoryOrder.Remove(value.Node);
-        MemoryCharacters -= value.Value.Length;
     }
 
     public static string? GenerateAndStore(string threadId, byte[] bytes)
@@ -184,14 +174,11 @@ public static class ThumbnailCache
         try
         {
             var file = ThumbnailFile(threadId, createDirectory: true);
-            if (file != null)
-            {
-                EncryptedPreviewCache.Store(file, imageBytes);
-            }
-
-            var dataUrl = "data:" + DetectImageMime(imageBytes) + ";base64," + Convert.ToBase64String(imageBytes);
-            Remember(threadId, dataUrl);
-            return dataUrl;
+            if (file == null) return null;
+            EncryptedPreviewCache.Store(file, imageBytes);
+            var url = ResourceUrl(threadId, file);
+            Remember(threadId, url);
+            return url;
         }
         catch
         {
@@ -240,7 +227,24 @@ public static class ThumbnailCache
         return new FileInfo(Path.Combine(dir.FullName, "thumb_" + safe + ".jpg"));
     }
 
-    private static string DetectImageMime(byte[] bytes)
+    private static string ResourceUrl(string key, FileInfo file) =>
+        $"https://{PreviewResourceRegistry.Host}/thumbnail/{SafeName(key)}?v={file.LastWriteTimeUtc.Ticks:x}";
+
+    internal static FileInfo? ResolveResource(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "https" ||
+            uri.Host != PreviewResourceRegistry.Host || !uri.IsDefaultPort) return null;
+        var parts = uri.AbsolutePath.Split('/');
+        if (parts.Length != 3 || parts[1] != "thumbnail" || parts[2].Length == 0 ||
+            parts[2] != SafeName(parts[2])) return null;
+        var file = ThumbnailFile(parts[2]) ?? LegacyThumbnailFile(parts[2]);
+        return file?.Exists == true && EncryptedPreviewCache.IsEncrypted(file) ? file : null;
+    }
+
+    private static string SafeName(string key) => string.IsNullOrWhiteSpace(key) ? "item" :
+        string.Concat(key.Select(ch => char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' ? ch : '_'));
+
+    internal static string DetectImageMime(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length >= 8 &&
             bytes[0] == 0x89 &&

@@ -16,6 +16,7 @@ public sealed class PreviewResourceRegistry : IDisposable
     public const string UrlFilter = "https://" + Host + "/*";
     private static readonly ArrayPool<byte> VideoResponseBuffers = ArrayPool<byte>.Create(VideoResponseBytes, 4);
     private readonly ConcurrentDictionary<string, Resource> _resources = new();
+    private bool _disposed;
     internal long BufferedResponseBytes => _resources.Values.Sum(resource => resource.Streams.Keys.OfType<AvailableMemoryStream>().Sum(stream => stream.BufferedBytes));
 
     public string Register(FileInfo file, string mime) => Register(new Resource(file, null, null, mime));
@@ -32,7 +33,15 @@ public sealed class PreviewResourceRegistry : IDisposable
 
     public async Task<PreviewResourceResponse> OpenAsync(string url, string method, string? range)
     {
+        if (_disposed) return Empty(410, "Gone");
         var resource = Find(url);
+        if (resource == null && ThumbnailCache.ResolveResource(url) is { } thumbnail)
+        {
+            using var input = EncryptedPreviewCache.OpenRead(thumbnail);
+            var header = new byte[12];
+            var headerBytes = input.Read(header);
+            resource = new Resource(thumbnail, null, null, ThumbnailCache.DetectImageMime(header.AsSpan(0, headerBytes)));
+        }
         if (resource == null) return Empty(404, "Not Found");
         if (method is not ("GET" or "HEAD")) return Empty(405, "Method Not Allowed");
         var length = resource.Video?.Length ?? resource.FileLength ?? resource.Bytes?.LongLength ?? 0;
@@ -125,6 +134,7 @@ public sealed class PreviewResourceRegistry : IDisposable
     }
     public void Dispose()
     {
+        _disposed = true;
         foreach (var pair in _resources.ToArray()) RemoveUrl($"https://{Host}/preview/{pair.Key}");
     }
     private sealed class Resource(FileInfo? file, byte[]? bytes, VideoStreamSession? video, string mime) : IDisposable

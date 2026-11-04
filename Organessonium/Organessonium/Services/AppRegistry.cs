@@ -197,11 +197,11 @@ public sealed partial class AppRegistry
 
         if (!forceRefresh && !string.IsNullOrEmpty(entry.Encryption?.Salt))
         {
-            var known = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId))
-                .FirstOrDefault(candidate => candidate.FileId == entry.FileId && candidate.MetadataMessageId == entry.MetadataMessageId &&
-                    candidate.ThreadId == entry.ThreadId && candidate.Encryption?.Salt == entry.Encryption?.Salt &&
-                    candidate.PreviewMessageId == entry.PreviewMessageId && candidate.LogicalChunkCount > 0);
-            if (known != null) { known.Path = entry.Path; return known; }
+            var known = _store.LoadCachedFileEntry(NormalizeFolderId(entry.ParentFolderId), entry.MetadataMessageId);
+            if (known != null && known.FileId == entry.FileId && known.ThreadId == entry.ThreadId &&
+                known.Encryption?.Salt == entry.Encryption.Salt && known.PreviewMessageId == entry.PreviewMessageId &&
+                known.LogicalChunkCount > 0)
+            { known.Path = entry.Path; return known; }
         }
         var channels = new List<string>();
         if (_mappings.TryGetValue(NormalizeFolderId(entry.ParentFolderId), out var mapping) &&
@@ -226,9 +226,7 @@ public sealed partial class AppRegistry
                     detailed.ParentFolderId = entry.ParentFolderId;
                     if (cacheDetails)
                     {
-                        var siblings = _store.LoadCachedEntriesForFolder(NormalizeFolderId(entry.ParentFolderId));
-                        ReplaceEntry(siblings, detailed);
-                        _store.CacheFolderEntries(NormalizeFolderId(entry.ParentFolderId), siblings);
+                        _store.CacheFileDetails(detailed);
                     }
                     return detailed;
                 }

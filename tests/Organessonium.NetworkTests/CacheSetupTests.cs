@@ -39,9 +39,19 @@ internal static partial class Program
                 RequireSync(range.Status == 206 && output.ToArray().SequenceEqual(bytes[65503..132002]), "o leitor cifrado não serviu a faixa exata do PDF");
             }
             var thumbnail = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jBzEAAAAASUVORK5CYII=");
-            var dataUrl = ThumbnailCache.Store("photo", thumbnail); ThumbnailCache.Clear();
-            RequireSync(dataUrl != null && ThumbnailCache.Get("photo") == dataUrl &&
+            var thumbnailUrl = ThumbnailCache.Store("photo", thumbnail); ThumbnailCache.Clear();
+            RequireSync(thumbnailUrl != null && ThumbnailCache.Get("photo") == thumbnailUrl &&
                 previews.GetFiles().All(EncryptedPreviewCache.IsEncrypted), "a miniatura não voltou do disco cifrado");
+            var image = await registry.OpenAsync(thumbnailUrl!, "GET", null);
+            await using (var content = image.Content!)
+            {
+                using var output = new MemoryStream(); await content.CopyToAsync(output);
+                RequireSync(image.Status == 200 && image.Headers.Contains("Content-Type: image/png") &&
+                    thumbnailUrl!.StartsWith("https://" + PreviewResourceRegistry.Host + "/thumbnail/") &&
+                    output.ToArray().SequenceEqual(thumbnail), "a miniatura não foi entregue como imagem binária autenticada");
+            }
+            var rejected = await registry.OpenAsync("https://" + PreviewResourceRegistry.Host + "/thumbnail/%2e%2e%2fsettings", "GET", null);
+            RequireSync(rejected.Status == 404, "a rota de miniaturas aceitou um caminho fora do cache");
             using var document = new MemoryStream();
             using (var zip = new ZipArchive(document, ZipArchiveMode.Create, leaveOpen: true))
             using (var writer = new StreamWriter(zip.CreateEntry("word/document.xml").Open()))
