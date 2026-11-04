@@ -35,6 +35,10 @@ internal static partial class Program
         await ((Task)typeof(AppController).GetMethod("RefreshServerIndexAsync", flags)!.Invoke(controller, [false])!).WaitAsync(TimeSpan.FromSeconds(10));
         RequireSync(!barrier.Started.Task.IsCompleted && readStates.SequenceEqual(new[] { true, false }),
             "atualizar pelos seriais iniciou uma varredura de metadados");
+        readStates.Clear();
+        await ((Task)typeof(AppController).GetMethod("LoadFolderAtPathAsync", flags)!.Invoke(controller, ["/", "[\"root\"]", false])!).WaitAsync(TimeSpan.FromSeconds(10));
+        RequireSync(!barrier.Started.Task.IsCompleted && readStates.SequenceEqual(new[] { true, false }),
+            "abrir a pasta paginou metadados apesar do serial válido");
         typeof(AppController).GetMethod("QueueRegistryMaintenance", flags)!.Invoke(controller, [registry]);
         await barrier.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         RequireSync(readStates.SequenceEqual(new[] { true, false }) && !h.Store.LoadCachedEntriesForFolder("root").Any(entry => entry.Name == unindexed.Name),

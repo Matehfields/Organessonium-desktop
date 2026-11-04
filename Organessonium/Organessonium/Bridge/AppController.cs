@@ -313,6 +313,7 @@ public sealed partial class AppController : IAsyncDisposable
             case "setEncryptionMode": return SetEncryptionModeAsync(ArgString(args, 0));
             case "exportCustomEncryptionKey": return ExportCustomEncryptionKeyAsync();
             case "importCustomEncryptionKey": return ImportCustomEncryptionKeyAsync();
+            case "setupEncryption": return SetupEncryptionAsync(ArgString(args, 0), ArgString(args, 1), ArgBool(args, 2, false));
             case "saveSettings": SaveSettings(args); return Task.CompletedTask;
             case "testProxy": return TestProxyAsync(args);
             case "applyWindowTheme": _onThemeChanged(ArgString(args, 0, _store.Load().Theme)); return Task.CompletedTask;
@@ -349,6 +350,12 @@ public sealed partial class AppController : IAsyncDisposable
 
         var settings = _store.Load();
         settings.BotToken = token;
+        settings.EncryptionMode = EncryptionModes.Normalize(ArgString(args, 7, settings.EncryptionMode));
+        if (settings.EncryptionMode == EncryptionModes.Custom && !_encryption.HasCustomKey)
+        {
+            await _bridge.CallAsync("_onSetupError", "Importe a chave de recuperação antes de abrir uma biblioteca com chave personalizada.");
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(proxyJson))
         {
             try
@@ -867,6 +874,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         var registry = Registry();
+        await using var navigationPriority = registry.SharedStorage.PrioritizeUploads();
         try
         {
             await _bridge.CallAsync("_onServerReadState", true);
@@ -970,7 +978,7 @@ public sealed partial class AppController : IAsyncDisposable
         try
         {
             var entries = refresh
-                ? await registry.RefreshFolderAsync(folderId, folderPath)
+                ? await registry.LoadFolderSerialAsync(folderId, folderPath)
                 : await registry.LoadCachedFolderAsync(folderId, folderPath);
             return new FolderLoadResult(folderId, entries);
         }
@@ -4405,6 +4413,18 @@ public sealed partial class AppController : IAsyncDisposable
         var file = await Downloader().DownloadAndAssembleAsync(image, tempDir, _ => { });
         var url = _previewResources.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
         await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, "organessonium-drive-image://" + imageThreadId, url);
+    }
+
+    private async Task SetupEncryptionAsync(string action, string passphrase, bool acknowledged)
+    {
+        try
+        {
+            if (action == "import") await ImportCustomEncryptionKeyAsync();
+            else if (action == "create") await Task.Run(() => ConfigureCustomEncryptionAsync(passphrase, acknowledged));
+            else throw new InvalidOperationException("Escolha importar ou criar uma chave.");
+        }
+        catch (Exception ex) { await _bridge.CallAsync("_onSetupEncryptionError", ex.Message); }
+        finally { await _bridge.CallAsync("_onSetupEncryptionIdle"); }
     }
 
     private async Task ConfigureCustomEncryptionAsync(string passphrase, bool acknowledged)

@@ -3,7 +3,7 @@
 Object.assign(I18N['pt-BR'], {
     makeCopy:'Fazer cópia', viewInformation:'Ver informações', versions:'Versões', makeDownload:'Fazer o download',
     addStarred:'Adicionar à pasta "Com estrela"', removeStarred:'Remover da pasta "Com estrela"',
-    fileInformation:'Informações do arquivo', detailsLoading:'Carregando informações...', detailsPending:'Carregando...',
+    fileInformation:'Informações do arquivo', folderInformation:'Informações da pasta', detailsFiles:'Quantidade de arquivos', detailsFolderSize:'Tamanho da pasta', detailsLoading:'Carregando informações...', detailsPending:'Carregando...',
     detailsType:'Tipo', detailsLocation:'Localização', detailsSize:'Tamanho do arquivo', detailsStorage:'Tamanho utilizado',
     detailsUploaded:'Data e hora de upload', detailsModified:'Última modificação', detailsChunks:'Quantidade de chunks',
     detailsCurrent:'Versão atual', detailsNoVersions:'Este arquivo não tem versões anteriores.',
@@ -15,7 +15,7 @@ Object.assign(I18N['pt-BR'], {
 Object.assign(I18N.en, {
     makeCopy:'Make a copy', viewInformation:'View information', versions:'Versions', makeDownload:'Download',
     addStarred:'Add to "Starred"', removeStarred:'Remove from "Starred"',
-    fileInformation:'File information', detailsLoading:'Loading information...', detailsPending:'Loading...',
+    fileInformation:'File information', folderInformation:'Folder information', detailsFiles:'File count', detailsFolderSize:'Folder size', detailsLoading:'Loading information...', detailsPending:'Loading...',
     detailsType:'Type', detailsLocation:'Location', detailsSize:'File size', detailsStorage:'Storage used',
     detailsUploaded:'Upload date and time', detailsModified:'Last modified', detailsChunks:'Chunk count',
     detailsCurrent:'Current version', detailsNoVersions:'This file has no previous versions.',
@@ -77,7 +77,7 @@ function ensureFileDetailsDialog() {
 function openFileDetails(app, versions) {
     ensureFileDetailsDialog();
     fileDetailsFocus = document.activeElement;
-    $('file-details-title').textContent = t(versions ? 'versions' : 'fileInformation');
+    $('file-details-title').textContent = t(versions ? 'versions' : isFolderApp(app) ? 'folderInformation' : 'fileInformation');
     $('file-details-name').textContent = app.name;
     $('file-details-close').setAttribute('aria-label', t('close'));
     if (versions) $('file-details-content').textContent = '';
@@ -129,13 +129,13 @@ function renderFileInformation(info, loading = false) {
     const rows = [
         [t('detailsType'), t(label) + (app.mimeType ? ' (' + app.mimeType + ')' : '')],
         [t('detailsLocation'), app.path || '/'],
-        [t('detailsSize'), isFolderApp(app) ? t('detailsUnknown') : fmtSize(app.sizeBytes)],
-        [t('detailsStorage'), isFolderApp(app) ? t('detailsUnknown') : fmtSize(info.storageBytes)],
+        [t(isFolderApp(app) ? 'detailsFolderSize' : 'detailsSize'), fmtSize(info.sizeBytes ?? app.sizeBytes)],
+        [t('detailsStorage'), fmtSize(info.storageBytes)],
         [t('detailsUploaded'), fileInformationDate(app.uploadedAt)],
         [t('detailsModified'), fileInformationDate(app.modifiedAt || app.uploadedAt)],
         ['threadId', app.threadId || t('detailsUnknown')],
         ['messageId', app.metadataMessageId || t('detailsUnknown')],
-        [t('detailsChunks'), String(info.chunkCount)]
+        [t(isFolderApp(app) ? 'detailsFiles' : 'detailsChunks'), String(isFolderApp(app) ? info.fileCount : info.chunkCount)]
     ];
     if (app.sha256) rows.push(['SHA-256', app.sha256]);
     $('file-details-content').innerHTML = '<dl class="file-information">' + rows.map(([key,value]) =>

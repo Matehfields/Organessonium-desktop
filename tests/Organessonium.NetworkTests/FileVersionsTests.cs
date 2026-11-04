@@ -242,6 +242,10 @@ internal static partial class Program
             controller.Bounds = new System.Drawing.Rectangle(0, 0, 800, 600);
             await view.ExecuteScriptAsync("openFileDetails(window.__entry,false);window._onFileInformation(window.__infoRequest,window.__info)");
             await Check("document.querySelector('.file-details-dialog').getBoundingClientRect().right<=window.innerWidth&&document.querySelector('.file-details-dialog').getBoundingClientRect().bottom<=window.innerHeight&&window.__errors.length===0", "dialog fora da tela ou erro JavaScript");
+            await view.ExecuteScriptAsync("closeFileDetails();window.__folder={name:'Fotos',type:'folder',folderId:'photos',metadataMessageId:'folder-metadata',path:'/'};openFileDetails(window.__folder,false);window._onFileInformation(window.__infoRequest,{entry:window.__folder,sizeBytes:300,storageBytes:375,fileCount:3})");
+            await Check("$('file-details-title').textContent==='Informações da pasta'&&$('file-details-content').textContent.includes('Quantidade de arquivos')&&!$('file-details-content').textContent.includes('chunks')&&[...document.querySelectorAll('.file-information dd')].some(el=>el.textContent==='300 B')&&[...document.querySelectorAll('.file-information dd')].some(el=>el.textContent==='375 B')", "o diálogo da pasta não exibiu contagem e os dois tamanhos");
+            await using (var capture = File.Create(Path.Combine(captures, "folder-information.png")))
+                await view.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

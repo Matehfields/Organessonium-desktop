@@ -73,6 +73,26 @@ input::placeholder{color:var(--setup-faint);}
 
 .hint{font-size:11px;color:var(--setup-faint);}
 
+.encryption-block{border:1px solid var(--setup-border);border-radius:12px;padding:16px;background:var(--setup-input);}
+.encryption-heading{display:flex;gap:10px;align-items:flex-start;color:var(--setup-secondary);}
+.encryption-heading .svg-icon{flex-shrink:0;margin-top:1px;}
+.encryption-heading h2{font-size:13px;font-weight:600;line-height:1.5;}
+.encryption-heading p,.encryption-help{font-size:12px;line-height:1.5;color:var(--setup-muted);}
+.encryption-modes{display:flex;gap:4px;margin-top:14px;padding:4px;border-radius:9px;background:var(--setup-card);}
+.encryption-modes button{flex:1;min-width:0;border:1px solid transparent;background:transparent;color:var(--setup-muted);font-size:12px;padding:9px 6px;border-radius:7px;cursor:pointer;}
+.encryption-modes button[aria-pressed="true"]{color:var(--setup-text);background:var(--setup-button);border-color:var(--setup-input-border);}
+.encryption-modes button:focus-visible,.encryption-block summary:focus-visible{outline:2px solid var(--setup-secondary);outline-offset:2px;}
+#setup-encryption-custom-fields{display:flex;flex-direction:column;gap:12px;margin-top:14px;}
+.encryption-block .btn-secondary{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;}
+.encryption-status{font-size:12px;line-height:1.5;color:var(--setup-secondary);}
+.encryption-status.error{color:#e57373;}
+html[data-theme="light"] .encryption-status.error{color:#b42318;}
+.encryption-block details{border-top:1px solid var(--setup-border);padding-top:12px;}
+.encryption-block summary{font-size:12px;color:var(--setup-secondary);cursor:pointer;}
+.encryption-block details[open]{display:flex;flex-direction:column;gap:12px;}
+.encryption-block details[open]>.encryption-help{margin-top:12px;}
+.encryption-block details>.field,.encryption-block details>.check-row,.encryption-block details>.btn-secondary{margin-top:12px;}
+
 .channel-fields{display:flex;flex-direction:column;gap:16px;}
 .channel-actions{display:flex;flex-direction:column;gap:8px;}
 

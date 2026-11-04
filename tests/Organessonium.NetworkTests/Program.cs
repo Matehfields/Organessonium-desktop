@@ -34,6 +34,7 @@ internal static partial class Program
         ("directDownloadMemoryAdmission", DirectDownloadMemoryAdmissionAsync),
         ("thumbnailViewportAndCrashRecoveryHidden", ThumbnailViewportAndCrashRecoveryHiddenAsync),
         ("thumbnailLargeFolderScrollHidden", ThumbnailLargeFolderScrollHiddenAsync),
+        ("folderInformationTotals", FolderInformationTotalsAsync),
         ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),
         ("serialFreshnessAndMetadataCache", SerialFreshnessAndMetadataCacheAsync),
         ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),

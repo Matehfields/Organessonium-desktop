@@ -108,6 +108,26 @@ internal static partial class Program
                 """);
             await Check("JSON.stringify(window.__refreshRequests)==='[false,false,true,false,false]'&&window.__specialReads===0",
                 "Atualizar/F5 iniciou reconstrução, Ctrl+F5 não a solicitou ou uma aba especial iniciou outra leitura");
+            await view.ExecuteScriptAsync("navigate('/',false,'root');window._onFolderLoadState('/',false);window._onAppsLoaded(window.__entries)");
+            var poolLeases = Enumerable.Range(0, 4).Select(_ => RamUploadBudget.Pool.Rent(16 * 1024 * 1024, 16 * 1024 * 1024, () => { })).ToArray();
+            foreach (var lease in poolLeases) lease.Dispose();
+            Array.Clear(poolLeases);
+            var pressureBytes = Math.Max(0, AppMemoryBudget.AdmissionBytes + 8L * 1024 * 1024 - AppMemoryBudget.CommittedBytes());
+            var pressure = pressureBytes > 0 ? System.Runtime.InteropServices.Marshal.AllocHGlobal((IntPtr)pressureBytes) : IntPtr.Zero;
+            try
+            {
+                using var control = new Microsoft.Web.WebView2.Wpf.WebView2();
+                var bridge = new Organessonium.Bridge.WebMessageBridge(control, async script => { await view.ExecuteScriptAsync(script); });
+                var photos = Enumerable.Range(0, fileCount).Select(index => new Organessonium.Models.AppEntry
+                    { Name = $"pressure-{index}.png", FileId = "pressure-" + index, ThreadId = "pool", MetadataMessageId = "pressure-" + index, ParentFolderId = "root", Path = "/" }).ToArray();
+                await bridge.CallAsync("_onAppsLoaded", (object)photos);
+                await Task.Delay(200);
+                Console.WriteLine("METRIC pressured-folder " + await view.ExecuteScriptAsync("JSON.stringify({path:currentPath,cards:document.querySelectorAll('.cards-grid .file-card').length,entries:allApps.length})") + " jobBytes=" + AppMemoryBudget.CommittedBytes());
+                await Check("document.querySelectorAll('.cards-grid .file-card').length>0&&allApps.length===window.__fileCount", "a abertura sob pressão perdeu os cards ou a coleção da pasta");
+                RequireSync(!processFailure.Task.IsCompleted && RamUploadBudget.Pool.AllocatedBytes == 0 && AppMemoryBudget.PeakCommittedBytes < AppMemoryBudget.LimitBytes,
+                    "a abertura conservou buffers ociosos ou derrubou o processo gráfico sob pressão");
+            }
+            finally { if (pressure != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(pressure); }
             for (var step = 0; step < 4; step++)
             {
                 await view.ExecuteScriptAsync("setView('list')"); await Task.Delay(50);

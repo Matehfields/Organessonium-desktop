@@ -161,6 +161,44 @@ internal static partial class Program
             RequireSync(ConnectionErrorClassifier.Classify(new HttpRequestException("", null, HttpStatusCode.Unauthorized)).Kind == ConnectionErrorKind.InvalidToken &&
                 ConnectionErrorClassifier.Classify(new HttpRequestException("", null, HttpStatusCode.NotFound)).Kind == ConnectionErrorKind.InvalidChannelConfiguration &&
                 ConnectionErrorClassifier.Classify(new TimeoutException()).Kind != ConnectionErrorKind.InvalidToken, "classificação de erros incorreta");
+            var keyStore = new SettingsStore(root.CreateSubdirectory("setup-key-data"));
+            using var setupControl = new WebView2();
+            var setupBridge = new WebMessageBridge(setupControl, async script => { await view.ExecuteScriptAsync(script); });
+            await using var setupController = new AppController(new System.Windows.Window(), keyStore, setupBridge, _ => Task.CompletedTask);
+            view.WebMessageReceived += async (_, args) =>
+            {
+                using var json = JsonDocument.Parse(args.WebMessageAsJson);
+                if (json.RootElement.GetProperty("method").GetString() == "setupEncryption")
+                    await setupController.HandleJsonMessageAsync(args.WebMessageAsJson);
+            };
+            await view.ExecuteScriptAsync("""
+                window.__keyRequests=[];window.__connectRequests=[];window.__setupKeyCommand=window.bridge.setupEncryption;
+                window.bridge.setupEncryption=(action,...args)=>{window.__keyRequests.push(action);if(action==='create')window.__setupKeyCommand(action,...args)};
+                window.bridge.connect=(...args)=>window.__connectRequests.push(args);
+                document.getElementById('setup-encryption-custom').click();btnConnect.click();
+                """);
+            await Check("!document.getElementById('setup-encryption-custom-fields').classList.contains('hidden')&&window.__connectRequests.length===0&&errorBox.textContent.includes('chave')", "a configuração deixou conectar sem a chave personalizada");
+            await view.ExecuteScriptAsync("document.getElementById('setup-encryption-import').click();window._onSetupEncryptionIdle()");
+            await Check("window.__keyRequests[0]==='import'&&!document.getElementById('setup-encryption-import').disabled", "a importação não está acessível antes de conectar");
+            await view.ExecuteScriptAsync("document.getElementById('setup-key-password').value='setup-fixture-passphrase';document.getElementById('setup-key-confirm').value='setup-fixture-passphrase';document.getElementById('setup-key-acknowledge').checked=true;document.getElementById('setup-key-create').click()");
+            for (var attempt = 0; attempt < 100 && await view.ExecuteScriptAsync("setupCustomKeyAvailable&&!setupEncryptionBusy") != "true"; attempt++) await Task.Delay(50);
+            await Check("setupCustomKeyAvailable&&!setupEncryptionBusy&&document.getElementById('setup-encryption-status').textContent.includes('disponível')&&document.getElementById('setup-key-password').value==='';", "a chave criada antes da conexão não ficou disponível na tela inicial");
+            RequireSync(!setupController.HasSession && keyStore.Load().EncryptionMode == "custom", "a criação da chave dependeu de uma sessão conectada");
+            var sourceCrypto = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(keyStore));
+            var recovery = Path.Combine(root.FullName, "fixture.organessonium-key");
+            await sourceCrypto.ExportCustomKeyAsync(recovery);
+            var restoredStore = new SettingsStore(root.CreateSubdirectory("restored-key-data"));
+            var restoredCrypto = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(restoredStore));
+            await restoredCrypto.ImportCustomKeyAsync(recovery);
+            var context = new EncryptedPayloadContext("setup-recovery", sourceCrypto.CreateFileEncryption("custom"), EncryptedPayloadRoles.Original, 0, 1);
+            RequireSync(restoredCrypto.DecryptBytes(sourceCrypto.EncryptBytes([1, 2, 3], context), context).SequenceEqual(new byte[] { 1, 2, 3 }), "a chave importada antes da conexão não abriu os arquivos existentes");
+            await view.ExecuteScriptAsync("btnConnect.click()");
+            await Check("window.__connectRequests.length===1&&window.__connectRequests[0][7]==='custom'", "a conexão não recebeu o modo de proteção escolhido");
+            await view.ExecuteScriptAsync("inpToken.value='';inpToken.type='password';document.documentElement.dataset.theme='dark';document.querySelector('.page').scrollTop=0");
+            await Task.Delay(200);
+            var setupCaptures = Directory.CreateDirectory(Path.Combine(AppContext.BaseDirectory, "ui-captures"));
+            await using (var capture = File.Create(Path.Combine(setupCaptures.FullName, "setup-encryption.png")))
+                await view.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
             await Navigate("index.html");
             var store = new SettingsStore(root.CreateSubdirectory("data"));
             var file = store.GetPreviewCacheFile("photo", "full", "photo.png");

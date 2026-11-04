@@ -21,9 +21,13 @@ public sealed partial class AppController
         try
         {
             var entry = await FindDetailedFileAsync(metadataMessageId);
+            var folder = entry.Type == "folder"
+                ? await Registry().GetFolderInformationAsync(entry.FolderId, PathRules.ChildPath(entry)) : null;
             await _bridge.CallAsync("_onFileInformation", requestId, new
             {
-                entry, storageBytes = FileVersioning.StorageBytes(entry), chunkCount = entry.LogicalChunkCount
+                entry, sizeBytes = folder?.SizeBytes ?? entry.SizeBytes,
+                storageBytes = folder?.StorageBytes ?? FileVersioning.StorageBytes(entry),
+                fileCount = folder?.FileCount, chunkCount = entry.LogicalChunkCount
             });
         }
         catch (Exception ex)

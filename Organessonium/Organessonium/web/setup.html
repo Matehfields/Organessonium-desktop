@@ -22,6 +22,26 @@
                 </div>
                 <span class="hint">Developer Portal → Seu App → Bot → Reset Token</span>
             </div>
+            <section class="encryption-block" aria-labelledby="setup-encryption-title">
+                <div class="encryption-heading"><span data-icon="lock" data-size="22"></span><div><h2 id="setup-encryption-title">Proteção da biblioteca</h2><p id="setup-encryption-description">Configure a chave antes de abrir seus arquivos.</p></div></div>
+                <div class="encryption-modes" role="group" aria-labelledby="setup-encryption-title">
+                    <button id="setup-encryption-standard" type="button" aria-pressed="true">Padrão</button>
+                    <button id="setup-encryption-custom" type="button" aria-pressed="false">Chave personalizada</button>
+                </div>
+                <div id="setup-encryption-custom-fields" class="hidden">
+                    <p id="setup-encryption-help" class="encryption-help">Já tem arquivos protegidos? Importe a chave de recuperação usada nessa biblioteca.</p>
+                    <button id="setup-encryption-import" class="btn-secondary" type="button">Importar chave de recuperação</button>
+                    <p id="setup-encryption-status" class="encryption-status" role="status" aria-live="polite"></p>
+                    <details id="setup-encryption-create">
+                        <summary id="setup-encryption-create-title">Criar uma nova chave</summary>
+                        <p id="setup-encryption-create-help" class="encryption-help">Uma chave nova não abre arquivos protegidos por outra chave. Para recuperar uma biblioteca, importe o arquivo de recuperação.</p>
+                        <div class="field"><label id="setup-key-password-label" for="setup-key-password">Senha da nova chave</label><input id="setup-key-password" type="password" autocomplete="new-password"/></div>
+                        <div class="field"><label id="setup-key-confirm-label" for="setup-key-confirm">Confirmar senha</label><input id="setup-key-confirm" type="password" autocomplete="new-password"/></div>
+                        <label class="check-row"><input id="setup-key-acknowledge" type="checkbox"/><span id="setup-key-acknowledge-label">Vou exportar e guardar a chave de recuperação em um local seguro.</span></label>
+                        <button id="setup-key-create" class="btn-secondary" type="button">Criar chave</button>
+                    </details>
+                </div>
+            </section>
             <button id="btn-custom-channel-names" class="guide-link" type="button">
                 Usar nomes diferentes para os canais
             </button>

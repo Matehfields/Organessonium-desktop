@@ -15,6 +15,27 @@ internal static class AppMemoryBudget
     private static SafeFileHandle? _job;
     private static int[] _webViewIds = [];
     private static int[] _mediaWorkerIds = [];
+    private static readonly SemaphoreSlim UiReclaim = new(1, 1);
+    private static long _lastUiReclaim;
+
+    internal static async Task ReclaimBeforeLibraryRenderAsync()
+    {
+        if (CommittedBytes() < AdmissionBytes) return;
+        await UiReclaim.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (CommittedBytes() < AdmissionBytes || Environment.TickCount64 - _lastUiReclaim < 1000) return;
+            await Task.Run(() =>
+            {
+                RamUploadBudget.Pool.TrimFreeBuffers();
+                ThumbnailCache.Clear();
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            }).ConfigureAwait(false);
+            _lastUiReclaim = Environment.TickCount64;
+        }
+        finally { UiReclaim.Release(); }
+    }
 
     internal static IDisposable RegisterMediaWorker(Process process)
     {

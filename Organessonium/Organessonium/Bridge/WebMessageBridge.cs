@@ -40,12 +40,14 @@ public sealed class WebMessageBridge
             $"if(typeof window._onDiagnosticStatus==='function')window._onDiagnosticStatus({status});");
     }
 
-    public Task CallAsync(string functionName, params object?[] args)
+    public async Task CallAsync(string functionName, params object?[] args)
     {
+        if (functionName is "_onAppsLoaded" or "_onCachedAppsLoaded" or "_onAppsBatch" or "_onSpecialItemsLoaded")
+            await AppMemoryBudget.ReclaimBeforeLibraryRenderAsync();
         Services.Diagnostics.DevelopmentDiagnostics.Signal("ui.callback", functionName);
         var name = JsonSerializer.Serialize(functionName, JsonOptions.Web);
         var jsonArgs = JsonSerializer.Serialize(args, JsonOptions.Web);
-        return ExecuteAsync($"var f=window[{name}];if(typeof f==='function')f(...{jsonArgs});");
+        await ExecuteAsync($"var f=window[{name}];if(typeof f==='function')f(...{jsonArgs});");
     }
 
     public Task SetThumbAsync(string threadId, string dataUrl)

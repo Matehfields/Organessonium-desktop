@@ -154,6 +154,32 @@ const SETUP_I18N = {
     }
 };
 
+Object.assign(SETUP_I18N['pt-BR'], {
+    encryptionTitle:'Proteção da biblioteca', encryptionDescription:'Configure a chave antes de abrir seus arquivos.',
+    encryptionStandard:'Padrão', encryptionCustom:'Chave personalizada', encryptionImport:'Importar chave de recuperação',
+    encryptionHelp:'Já tem arquivos protegidos? Importe a chave de recuperação usada nessa biblioteca.',
+    encryptionCreateTitle:'Criar uma nova chave', encryptionCreateHelp:'Uma chave nova não abre arquivos protegidos por outra chave. Para recuperar uma biblioteca, importe o arquivo de recuperação.',
+    encryptionPassword:'Senha da nova chave', encryptionConfirm:'Confirmar senha', encryptionCreate:'Criar chave',
+    encryptionAcknowledge:'Vou exportar e guardar a chave de recuperação em um local seguro.',
+    encryptionReady:'Chave disponível neste dispositivo. A biblioteca pode ser aberta.',
+    encryptionRequired:'Importe ou crie uma chave personalizada antes de conectar.',
+    encryptionPasswordRequired:'Informe e confirme a senha da nova chave.', encryptionPasswordMismatch:'As senhas não coincidem.',
+    encryptionAckRequired:'Confirme que vai guardar a chave de recuperação.', encryptionBusy:'Preparando a chave...'
+});
+Object.assign(SETUP_I18N.en, {
+    encryptionTitle:'Library protection', encryptionDescription:'Set up your key before opening your files.',
+    encryptionStandard:'Standard', encryptionCustom:'Custom key', encryptionImport:'Import recovery key',
+    encryptionHelp:'Already have protected files? Import the recovery key used by that library.',
+    encryptionCreateTitle:'Create a new key', encryptionCreateHelp:'A new key cannot open files protected by another key. Import the recovery file to restore a library.',
+    encryptionPassword:'New key password', encryptionConfirm:'Confirm password', encryptionCreate:'Create key',
+    encryptionAcknowledge:'I will export and keep the recovery key in a safe place.',
+    encryptionReady:'Key available on this device. You can open the library.',
+    encryptionRequired:'Import or create a custom key before connecting.',
+    encryptionPasswordRequired:'Enter and confirm the new key password.', encryptionPasswordMismatch:'Passwords do not match.',
+    encryptionAckRequired:'Confirm that you will keep the recovery key.', encryptionBusy:'Preparing key...'
+});
+
+let setupEncryptionMode = 'standard', setupCustomKeyAvailable = false, setupEncryptionBusy = false, setupEncryptionError = '';
 let setupLanguage = systemLanguage();
 let channelInputMode = 'auto';
 let setupThemeSetting = 'system';
@@ -201,8 +227,8 @@ function applySetupPreferences() {
     document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
     document.title = setupText('title');
 
-    const labels = document.querySelectorAll('.field label');
-    const hints = document.querySelectorAll('.hint');
+    const labels = document.querySelectorAll('#form-area > .field > label,#channel-fields .field > label');
+    const hints = document.querySelectorAll('#form-area > .field > .hint,#channel-fields .hint');
     document.querySelector('.subtitle').textContent = setupText('subtitle');
     labels[0].textContent = setupText('token');
     labels[1].innerHTML = setupText('names').replace('names', '<code>names</code>');
@@ -223,6 +249,9 @@ function applySetupPreferences() {
     applyProxyLabels();
     applyChannelFieldMode();
     renderSetupIcons();
+    setupEncryptionMode = saved.encryptionMode === 'custom' ? 'custom' : 'standard';
+    setupCustomKeyAvailable = saved.customKeyAvailable === true;
+    renderSetupEncryption();
 }
 
 function applyProxyLabels() {
@@ -510,12 +539,13 @@ if (!token)  { showErr(setupText('tokenRequired')); return; }
     if (!folders)  { showErr(setupText('foldersRequired')); return; }
     if (!forum)  { showErr(setupText('forumRequired')); return; }
     if (!serial)  { showErr(setupText('serialRequired')); return; }
-    window.bridge.connect(token, names, folders, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()));
+    if (setupEncryptionMode === 'custom' && !setupCustomKeyAvailable) { showErr(setupText('encryptionRequired')); return; }
+    window.bridge.connect(token, names, folders, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()), setupEncryptionMode);
 }
 
 function applyChannelFieldMode() {
-    const labels = document.querySelectorAll('.field label');
-    const hints = document.querySelectorAll('.hint');
+    const labels = document.querySelectorAll('#form-area > .field > label,#channel-fields .field > label');
+    const hints = document.querySelectorAll('#form-area > .field > .hint,#channel-fields .hint');
     const ids = channelInputMode === 'ids';
     labels[1].innerHTML = setupText(ids ? 'namesId' : 'names').replace('names', '<code>names</code>');
     labels[2].innerHTML = setupText(ids ? 'foldersId' : 'folders').replace('folders', '<code>folders</code>');
@@ -540,3 +570,52 @@ function showErr(msg) {
     errorBox.classList.remove('hidden');
     btnConnect.disabled = false;
 }
+
+function renderSetupEncryption() {
+    const labels = {
+        'setup-encryption-title':'encryptionTitle','setup-encryption-description':'encryptionDescription',
+        'setup-encryption-standard':'encryptionStandard','setup-encryption-custom':'encryptionCustom',
+        'setup-encryption-help':'encryptionHelp','setup-encryption-create-title':'encryptionCreateTitle',
+        'setup-encryption-create-help':'encryptionCreateHelp','setup-key-password-label':'encryptionPassword',
+        'setup-key-confirm-label':'encryptionConfirm','setup-key-acknowledge-label':'encryptionAcknowledge','setup-key-create':'encryptionCreate'
+    };
+    Object.entries(labels).forEach(([id,key])=>document.getElementById(id).textContent=setupText(key));
+    document.querySelector('.encryption-heading>[data-icon]').innerHTML=setupIcon('lock',22);
+    document.getElementById('setup-encryption-import').innerHTML=setupIcon('key',18)+'<span>'+setupText('encryptionImport')+'</span>';
+    ['standard','custom'].forEach(mode=>{
+        const button=document.getElementById('setup-encryption-'+mode);
+        button.setAttribute('aria-pressed',String(setupEncryptionMode===mode));
+        button.disabled=setupEncryptionBusy;
+    });
+    document.getElementById('setup-encryption-custom-fields').classList.toggle('hidden',setupEncryptionMode!=='custom');
+    ['setup-encryption-import','setup-key-create'].forEach(id=>document.getElementById(id).disabled=setupEncryptionBusy);
+    btnConnect.disabled=setupEncryptionBusy;
+    const status=document.getElementById('setup-encryption-status');
+    status.classList.toggle('error',!!setupEncryptionError);
+    status.textContent=setupEncryptionError || (setupEncryptionBusy ? setupText('encryptionBusy') : setupText(setupCustomKeyAvailable?'encryptionReady':'encryptionRequired'));
+}
+
+window._onEncryptionSettingsChanged=(mode,available)=>{
+    setupEncryptionMode=mode==='custom'?'custom':'standard';setupCustomKeyAvailable=available===true;setupEncryptionError='';
+    ['setup-key-password','setup-key-confirm'].forEach(id=>document.getElementById(id).value='');
+    document.getElementById('setup-key-acknowledge').checked=false;
+    document.getElementById('setup-encryption-create').open=false;
+    renderSetupEncryption();
+};
+window._onSetupEncryptionError=message=>{setupEncryptionError=message;renderSetupEncryption();};
+window._onSetupEncryptionIdle=()=>{setupEncryptionBusy=false;renderSetupEncryption();};
+['standard','custom'].forEach(mode=>document.getElementById('setup-encryption-'+mode).addEventListener('click',()=>{
+    setupEncryptionMode=mode;setupEncryptionError='';renderSetupEncryption();
+}));
+document.getElementById('setup-encryption-import').addEventListener('click',()=>{
+    setupEncryptionBusy=true;setupEncryptionError='';renderSetupEncryption();window.bridge.setupEncryption('import');
+});
+document.getElementById('setup-key-create').addEventListener('click',()=>{
+    const password=document.getElementById('setup-key-password').value;
+    const confirmation=document.getElementById('setup-key-confirm').value;
+    const acknowledged=document.getElementById('setup-key-acknowledge').checked;
+    setupEncryptionError=!password.trim() || !confirmation ? setupText('encryptionPasswordRequired') :
+        password!==confirmation ? setupText('encryptionPasswordMismatch') : !acknowledged ? setupText('encryptionAckRequired') : '';
+    if(setupEncryptionError){renderSetupEncryption();return;}
+    setupEncryptionBusy=true;renderSetupEncryption();window.bridge.setupEncryption('create',password,true);
+});
