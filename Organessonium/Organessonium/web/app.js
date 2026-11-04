@@ -377,7 +377,6 @@ const $ = id => document.getElementById(id);
 const libraryPageSize = 100;
 let libraryPageKey = '', libraryVisibleLimit = libraryPageSize, libraryItemCount = 0;
 let libraryRenderSignature = '', libraryPagingFrame = 0;
-let libraryFileItems = [];
 const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     emptyState  = $('empty-state'),  statusText     = $('status-text'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
@@ -1146,10 +1145,9 @@ function ensureThumbnailObserver() {
                 visibleThumbnailIds.add(tid);
                 const cached = window._thumbs && window._thumbs[tid];
                 if (cached) { touchThumbnailCache(tid); applyThumbnailElement(el, cached); }
-                else scheduleVisibleThumbnails();
+                else if (!el.querySelector('img')) scheduleVisibleThumbnails();
             } else {
                 visibleThumbnailIds.delete(tid);
-                if (el.querySelector('img')) resetThumbnailElement(el);
             }
         });
         trimThumbnailCache();
@@ -1199,7 +1197,7 @@ function requestVisibleThumbnails() {
     if (!settings.previewEnabled) return;
     if (!window.bridge || typeof window.bridge.loadVisibleThumbnails !== 'function') return;
     const ids = Array.from(visibleThumbnailIds)
-        .filter(id => id && !(window._thumbs && window._thumbs[id]));
+        .filter(id => id && !(window._thumbs && window._thumbs[id]) && !document.querySelector('[data-thumb="' + id + '"] img'));
     if (!ids.length) return;
     window.bridge.loadVisibleThumbnails(JSON.stringify(ids), activeLibraryView);
 }
@@ -3601,17 +3599,17 @@ function setupSmoothScroll() {
     // Native Chromium/WebView2 scrolling gives the same cadence as Chrome.
     const main = $('main-area');
     const requestNextPage = () => {
-        if (libraryPagingFrame || main.classList.contains('hidden')) return;
+        if (libraryPagingFrame || libraryVisibleLimit >= libraryItemCount || main.classList.contains('hidden')) return;
         const pageKey = libraryPageKey;
         libraryPagingFrame = requestAnimationFrame(() => {
             libraryPagingFrame = 0;
             if (pageKey !== libraryPageKey) return;
-            if (libraryVisibleLimit < libraryItemCount && main.scrollHeight - main.scrollTop - main.clientHeight <= 400)
-                libraryVisibleLimit += libraryPageSize;
+            if (main.scrollHeight - main.scrollTop - main.clientHeight > 400) return;
+            libraryVisibleLimit += libraryPageSize;
             render();
         });
     };
-    main.addEventListener('scroll', requestNextPage, { passive:true });
+    main.addEventListener('scroll', () => { if (main.scrollTop > 0) requestNextPage(); }, { passive:true });
     main.addEventListener('wheel', event => { if (event.deltaY > 0) requestNextPage(); }, { passive:true });
     main.addEventListener('keydown', event => {
         if (['PageDown','End','ArrowDown'].includes(event.key) && canUseGlobalShortcut(event)) requestNextPage();
@@ -5041,13 +5039,6 @@ function updateMarqueeSelection() {
         const hit = !(itemRect.right < rect.left || itemRect.left > rect.right || itemRect.bottom < rect.top || itemRect.top > rect.bottom);
         if (hit) next.add(el.dataset.key);
     });
-    const layout = viewMode === 'grid' ? fileGridLayout() : null;
-    if (layout) libraryFileItems.forEach((app, index) => {
-        const left = layout.bounds.left - mainRect.left + main.scrollLeft + (index % layout.columns) * layout.columnStride;
-        const top = layout.bounds.top - mainRect.top + main.scrollTop + Math.floor(index / layout.columns) * layout.rowStride;
-        if (left + layout.width >= rect.left && left <= rect.right && top + layout.height >= rect.top && top <= rect.bottom)
-            next.add(itemKey(app));
-    });
     selectedKeys = next;
     updateSelectionUI();
 }
@@ -6050,7 +6041,6 @@ function syncCardPreviewSize() {
         const size = Math.max(104, Math.min(360, Math.round(rect.width)));
         grid.style.setProperty('--card-preview-size', size + 'px');
     });
-    render();
     const previewElement = document.querySelector('.cards-grid [data-thumb]');
     const card = previewElement?.closest('.file-card');
     if (!card) return;
@@ -6339,6 +6329,10 @@ function syncRenderedItems(container, items, kind, create) {
                 JSON.stringify(previous.thumbnailRef) !== JSON.stringify(source.thumbnailRef);
             if ((changedSalt || changedThumbnail) && window._thumbs) delete window._thumbs[fileRequestId(source)];
             const replacement = create(item);
+            const oldPreview = node?.querySelector('[data-thumb]'), nextPreview = replacement.querySelector('[data-thumb]');
+            const previousImage = oldPreview?.querySelector('img');
+            if (!changedSalt && !changedThumbnail && previousImage && oldPreview.dataset.thumb === nextPreview?.dataset.thumb)
+                nextPreview.replaceChildren(previousImage);
             replacement.dataset.renderKey = key;
             replacement.dataset.renderSignature = signature;
             if (node) node.replaceWith(replacement);
@@ -6347,45 +6341,7 @@ function syncRenderedItems(container, items, kind, create) {
         if (container.children[position] !== node) container.insertBefore(node, container.children[position] || null);
         position++;
     }
-    existing.forEach(node => {
-        node.querySelectorAll('[data-thumb]').forEach(resetThumbnailElement);
-        node.remove();
-    });
-}
-
-function fileGridLayout() {
-    const grid = filesGrid.querySelector('.cards-grid');
-    const card = grid?.querySelector('.file-card');
-    if (!card) return null;
-    const style = getComputedStyle(grid), tracks = style.gridTemplateColumns.split(' ');
-    const bounds = card.getBoundingClientRect();
-    return { columns:tracks.length, bounds:grid.getBoundingClientRect(), width:bounds.width, height:bounds.height,
-        columnStride:parseFloat(tracks[0]) + (parseFloat(style.columnGap) || 0),
-        rowStride:bounds.height + (parseFloat(style.rowGap) || 0), gap:parseFloat(style.rowGap) || 0 };
-}
-
-function fileCardWindow(count) {
-    if (viewMode !== 'grid' || count <= libraryPageSize) return { start:0, end:count, before:0, after:0 };
-    const layout = fileGridLayout();
-    if (!layout || !layout.height) return { start:0, end:Math.min(count, libraryPageSize), before:0, after:0 };
-    const offset = $('main-area').getBoundingClientRect().top - layout.bounds.top;
-    const rows = Math.ceil(libraryPageSize / layout.columns);
-    const firstRow = Math.max(0, Math.floor(offset / layout.rowStride) - Math.floor(rows / 3));
-    const start = Math.min(firstRow * layout.columns, Math.floor((count - 1) / layout.columns) * layout.columns);
-    const end = Math.min(count, start + rows * layout.columns);
-    return { start, end, before:start ? start / layout.columns * layout.rowStride - layout.gap : 0,
-        after:end < count ? Math.ceil((count - end) / layout.columns) * layout.rowStride - layout.gap : 0 };
-}
-
-function syncFileCardSpacers(grid, window) {
-    for (const [side, height] of [['before', window.before], ['after', window.after]]) {
-        if (!height) continue;
-        const spacer = document.createElement('div');
-        spacer.className = 'library-spacer';
-        spacer.setAttribute('aria-hidden', 'true');
-        spacer.style.cssText = `grid-column:1/-1;height:${height}px;pointer-events:none`;
-        if (side === 'before') grid.prepend(spacer); else grid.appendChild(spacer);
-    }
+    existing.forEach(node => node.remove());
 }
 
 function render() {
@@ -6418,12 +6374,9 @@ function render() {
     libraryItemCount = total;
     folders = folders.slice(0, libraryVisibleLimit);
     files = files.slice(0, Math.max(0, libraryVisibleLimit - folders.length));
-    libraryFileItems = files;
-    const fileWindow = fileCardWindow(files.length);
-    files = files.slice(fileWindow.start, fileWindow.end);
     const loadingFolder = !searchQuery && (favoritesView
         ? folderLoadingPath === '/@favorites' : folderLoadingPath === currentPath);
-    const signature = JSON.stringify([pageKey, viewMode, fileWindow, resolveLanguage(), settings.previewEnabled,
+    const signature = JSON.stringify([pageKey, viewMode, resolveLanguage(), settings.previewEnabled,
         !total && loadingFolder,
         folders.map(folder => typeof folder === 'string'
             ? [folder, allApps.filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.name === folder)] : folder), files]);
@@ -6452,9 +6405,7 @@ function render() {
             let wrap = filesGrid.querySelector('.' + className);
             if (!items.length) { wrap?.remove(); continue; }
             if (!wrap) { wrap = document.createElement('div'); wrap.className = className; filesGrid.appendChild(wrap); }
-            wrap.querySelectorAll('.library-spacer').forEach(node => node.remove());
             syncRenderedItems(wrap, items, kind, create);
-            if (kind === 'file') syncFileCardSpacers(wrap, fileWindow);
         }
         const foldersWrap = filesGrid.querySelector('.folders-grid');
         if (foldersWrap && filesGrid.firstElementChild !== foldersWrap) filesGrid.prepend(foldersWrap);

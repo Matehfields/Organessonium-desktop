@@ -10,7 +10,8 @@ internal static class AppMemoryBudget
     internal const long LimitBytes = 1_000_000_000;
     internal const long AdmissionBytes = 800L * 1024 * 1024;
     internal const long NativeHeadroomBytes = 64L * 1024 * 1024;
-    private const uint JobMemoryLimit = 0x200;
+    private const uint ProcessMemoryLimit = 0x100;
+    private const uint SilentBreakaway = 0x1000;
     private static readonly object Sync = new();
     private static SafeFileHandle? _job;
     private static int[] _webViewIds = [];
@@ -44,7 +45,7 @@ internal static class AppMemoryBudget
             if (job.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
             try
             {
-                var limits = new ExtendedLimits { Basic = new BasicLimits { Flags = JobMemoryLimit }, JobMemory = (UIntPtr)LimitBytes };
+                var limits = new ExtendedLimits { Basic = new BasicLimits { Flags = ProcessMemoryLimit | SilentBreakaway }, ProcessMemory = (UIntPtr)LimitBytes };
                 if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<ExtendedLimits>()))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
                 using var process = Process.GetCurrentProcess();
@@ -58,30 +59,19 @@ internal static class AppMemoryBudget
     internal static void RegisterWebViewProcesses(IEnumerable<int> processIds)
     {
         Initialize();
-        var ids = processIds.Distinct().ToArray();
-        foreach (var id in ids)
-        {
-            try
-            {
-                using var process = Process.GetProcessById(id);
-                if (!IsProcessInJob(process.Handle, _job!, out var attached)) throw new Win32Exception(Marshal.GetLastWin32Error());
-                if (!attached && !AssignProcessToJobObject(_job!, process.Handle)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
-            catch (ArgumentException) { } // Process exited between the WebView notification and query.
-        }
-        Volatile.Write(ref _webViewIds, ids);
+        Volatile.Write(ref _webViewIds, processIds.Distinct().ToArray());
     }
 
     internal static long CommittedBytes()
     {
-        // Child processes can join/exit between WebView notifications. Read the same job
-        // accounting that enforces the hard limit, including children not yet in our lists.
+        // The backend and explicitly registered media workers share admission accounting.
+        // Browser processes are observed separately and never consume this process limit.
         var job = _job;
         if (job != null && QueryJobMemory(job, 28, out var usage, (uint)Marshal.SizeOf<MemoryUsage>(), IntPtr.Zero))
             return checked((long)usage.Current);
         using var current = Process.GetCurrentProcess();
         var bytes = current.PrivateMemorySize64;
-        foreach (var id in Volatile.Read(ref _webViewIds).Concat(Volatile.Read(ref _mediaWorkerIds)).Distinct())
+        foreach (var id in Volatile.Read(ref _mediaWorkerIds).Distinct())
         {
             if (id == current.Id) continue;
             try { using var child = Process.GetProcessById(id); bytes += child.PrivateMemorySize64; }
@@ -89,6 +79,27 @@ internal static class AppMemoryBudget
             catch (InvalidOperationException) { }
         }
         return bytes;
+    }
+
+    internal static long WebViewCommittedBytes()
+    {
+        long bytes = 0;
+        foreach (var id in Volatile.Read(ref _webViewIds))
+        {
+            try { using var process = Process.GetProcessById(id); bytes += process.PrivateMemorySize64; }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+        }
+        return bytes;
+    }
+
+    internal static long ApplicationPrivateWorkingSetBytes()
+    {
+        using var process = Process.GetCurrentProcess();
+        var size = (uint)Marshal.SizeOf<ProcessMemoryCounters>();
+        var counters = new ProcessMemoryCounters { Size = size };
+        return GetProcessMemoryInfo(process.Handle, ref counters, size)
+            ? checked((long)counters.PrivateWorkingSet.ToUInt64()) : process.WorkingSet64;
     }
 
     internal static long PeakCommittedBytes
@@ -104,6 +115,19 @@ internal static class AppMemoryBudget
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MemoryUsage { public ulong Current, Peak; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessMemoryCounters
+    {
+        public uint Size, PageFaults;
+        public UIntPtr PeakWorkingSet, WorkingSet, PeakPagedPool, PagedPool, PeakNonPagedPool, NonPagedPool,
+            Pagefile, PeakPagefile, PrivateUsage, PrivateWorkingSet;
+        public ulong SharedCommit;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "K32GetProcessMemoryInfo", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessMemoryInfo(IntPtr process, ref ProcessMemoryCounters counters, uint size);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BasicLimits

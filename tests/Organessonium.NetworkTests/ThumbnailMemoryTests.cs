@@ -92,29 +92,31 @@ internal static partial class Program
             await view.ExecuteScriptAsync("window.__outside={name:'other.png',fileId:'outside',threadId:'outside-thread',metadataMessageId:'outside-meta',type:'file',path:'/Other',parentFolderId:'other'};window._onAppsBatch([window.__outside]);window._onAppsRemoved([window.__outside]);");
             await Check("window.__firstCard===document.querySelector('.cards-grid .file-card')&&window.__firstImage===window.__firstCard.querySelector('img')",
                 "uma alteração em outra pasta recriou a imagem da pasta aberta");
-            await view.ExecuteScriptAsync("window.__firstCard.click()");
+            await view.ExecuteScriptAsync("window._onAppsBatch([{...window.__entries[0],sizeBytes:4096}]);window.__firstCard=document.querySelector('.cards-grid .file-card')");
+            await Check("window.__firstCard.querySelector('img')===window.__firstImage", "a atualização do metadata substituiu a miniatura já exibida");
+            await view.ExecuteScriptAsync("window.__firstImageSource=window.__firstImage.getAttribute('src');window.__firstCard.click()");
             for (var shown = 100; shown < fileCount; shown += 100)
             {
                 await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=document.getElementById('main-area').scrollHeight");
                 await Task.Delay(160);
-                await Check("document.querySelectorAll('.cards-grid .file-card').length<=128&&libraryVisibleLimit===" + Math.Min(shown + 100, fileCount),
-                    "a rolagem perdeu o próximo lote ou acumulou cards fora da janela visível");
+                await Check("document.querySelectorAll('.cards-grid .file-card').length===" + Math.Min(shown + 100, fileCount),
+                    "a rolagem não acrescentou os cards do próximo lote");
             }
             for (var step = 0; step <= 24; step++)
             {
                 await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=(document.getElementById('main-area').scrollHeight-innerHeight)*" + step + "/24");
                 await Task.Delay(160);
-                await Check("document.querySelectorAll('[data-thumb] img').length<=64&&Object.keys(window._thumbs||{}).length<=128",
-                    "a rolagem reteve imagens fora da tela ou ultrapassou o cache limitado");
+                await Check("window.__firstImage.isConnected&&window.__firstImage.getAttribute('src')===window.__firstImageSource&&Object.keys(window._thumbs||{}).length<=128",
+                    "a rolagem descarregou a primeira miniatura ou perdeu o limite do cache de URLs");
             }
-            await Check("window.__delivered.size>300&&!window.__firstCard.isConnected&&allApps.length===window.__fileCount&&document.querySelectorAll('.cards-grid .file-card').length<=128",
-                "o teste não percorreu a biblioteca, acumulou cards ou perdeu arquivos");
+            await Check("window.__delivered.size>300&&window.__firstCard.isConnected&&allApps.length===window.__fileCount&&document.querySelectorAll('.cards-grid .file-card').length===window.__fileCount",
+                "o teste não percorreu a biblioteca ou removeu cards ao sair da tela");
             RequireSync(!processFailure.Task.IsCompleted && !deliveryFailure.Task.IsCompleted, "o runtime ou a entrega binária falhou durante a rolagem");
             await Check("Object.values(window._thumbs).every(url=>url.startsWith('https://media.organessonium.local/thumbnail/'))&&document.querySelector('[data-thumb] img')?.naturalWidth===200",
                 "a miniatura usou Base64 ou não chegou à interface como imagem binária");
             await view.ExecuteScriptAsync("document.getElementById('main-area').scrollTop=0");
             await Task.Delay(300);
-            await Check("document.querySelector('.cards-grid .file-card')?.dataset.key===itemKey(window.__entries[0])&&document.querySelector('.cards-grid .file-card')?.classList.contains('selected')&&!!document.querySelector('.cards-grid .file-card img')",
+            await Check("document.querySelector('.cards-grid .file-card')?.dataset.key===itemKey(window.__entries[0])&&document.querySelector('.cards-grid .file-card')?.classList.contains('selected')&&document.querySelector('.cards-grid .file-card img')===window.__firstImage",
                 "voltar ao começo perdeu o primeiro arquivo, sua miniatura ou a seleção");
             await view.ExecuteScriptAsync("document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true}))");
             await Check("getSelectedApps().length===window.__fileCount&&!document.getElementById('selection-bar').classList.contains('hidden')",
@@ -144,7 +146,7 @@ internal static partial class Program
                 """);
             for (var attempt = 0; attempt < 30 && await view.ExecuteScriptAsync("window.__marqueeDone===true") != "true"; attempt++) await Task.Delay(50);
             await Check("getSelectedApps().length>128&&!document.getElementById('selection-bar').classList.contains('hidden')&&document.getElementById('selection-count').textContent.includes(String(getSelectedApps().length))",
-                "a seleção por arraste perdeu os arquivos fora da janela de cards");
+                "a seleção por arraste perdeu os arquivos fora da tela");
             await view.ExecuteScriptAsync("clearSelection();document.getElementById('main-area').scrollTop=0");
             await view.ExecuteScriptAsync("""
                 window.__refreshRequests=[];window.__specialReads=0;
@@ -160,14 +162,13 @@ internal static partial class Program
             await Check("JSON.stringify(window.__refreshRequests)==='[false,false,true,false,false]'&&window.__specialReads===0",
                 "Atualizar/F5 iniciou reconstrução, Ctrl+F5 não a solicitou ou uma aba especial iniciou outra leitura");
             await view.ExecuteScriptAsync("navigate('/',false,'root');window._onFolderLoadState('/',false);window._onAppsLoaded(window.__entries)");
-            await view.ExecuteScriptAsync("window.__maxGridCards=0;window.__gridObserver=new MutationObserver(()=>window.__maxGridCards=Math.max(window.__maxGridCards,document.querySelectorAll('.cards-grid .file-card').length));window.__gridObserver.observe(document.getElementById('files-grid'),{childList:true,subtree:true})");
+            await view.ExecuteScriptAsync("window.__cardsBeforeViewSwitch=document.querySelectorAll('.cards-grid .file-card').length");
             for (var step = 0; step < 4; step++)
             {
                 await view.ExecuteScriptAsync("setView('list')"); await Task.Delay(50);
                 await view.ExecuteScriptAsync("setView('grid')"); await Task.Delay(100);
             }
-            await Check("window.__maxGridCards<=128", "alternar lista/grade montou a pasta inteira antes de calcular a janela de cards");
-            await view.ExecuteScriptAsync("window.__gridObserver.disconnect()");
+            await Check("document.querySelectorAll('.cards-grid .file-card').length===window.__cardsBeforeViewSwitch", "alternar lista/grade perdeu cards já admitidos");
             await view.ExecuteScriptAsync("window._onAppsLoaded([])");
             await Task.Delay(100);
             await Check("!document.querySelector('[data-thumb]')&&visibleThumbnailIds.size===0&&window.__errors.length===0",

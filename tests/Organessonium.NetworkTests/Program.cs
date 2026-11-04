@@ -18,7 +18,7 @@ internal static partial class Program
         ("permanentDeletionBatchHidden", PermanentDeletionBatchHiddenAsync),
         ("encryptedLocalPreviewsAndLogout", EncryptedLocalPreviewsAndLogoutAsync),
         ("cachedSerialStatisticsAtStartup", CachedSerialStatisticsAtStartupAsync),
-        ("jobMemoryIncludesUnregisteredChildren", JobMemoryIncludesUnregisteredChildrenAsync),
+        ("browserMemoryIsSeparate", BrowserMemoryIsSeparateAsync),
         ("setupAndEncryptedPreviewHidden", SetupAndEncryptedPreviewHiddenAsync),
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),

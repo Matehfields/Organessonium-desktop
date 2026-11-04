@@ -196,8 +196,10 @@ internal sealed class DiagnosticSession : IDisposable
         using var process = Process.GetCurrentProcess();
         Record("runtime.sample", "runtime", new { privateBytes = process.PrivateMemorySize64,
             workingSetBytes = process.WorkingSet64, managedBytes = GC.GetTotalMemory(false),
+            privateWorkingSetBytes = AppMemoryBudget.ApplicationPrivateWorkingSetBytes(),
             committedGcBytes = GC.GetGCMemoryInfo().TotalCommittedBytes, cpuMilliseconds = process.TotalProcessorTime.TotalMilliseconds,
             jobCommittedBytes = AppMemoryBudget.CommittedBytes(),
+            webViewPrivateBytes = AppMemoryBudget.WebViewCommittedBytes(),
             threads = process.Threads.Count, threadPoolThreads = ThreadPool.ThreadCount,
             threadPoolPending = ThreadPool.PendingWorkItemCount, gen0 = GC.CollectionCount(0), gen1 = GC.CollectionCount(1), gen2 = GC.CollectionCount(2),
             observedExceptions = Interlocked.Exchange(ref _throws, 0), droppedEvents = Interlocked.Exchange(ref _dropped, 0),
