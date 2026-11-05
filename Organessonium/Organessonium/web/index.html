@@ -170,6 +170,268 @@
             </div>
         </main>
 
+<section id="settings-panel" class="settings-panel hidden" role="main" aria-labelledby="settings-title" aria-hidden="true">
+    <div class="settings-header"><div class="settings-heading"><span class="settings-heading-icon" data-icon="settings" data-size="30"></span><div><h2 id="settings-title">Configurações</h2><p data-settings-text="settingsIntro">Personalize a interface e gerencie seus arquivos.</p></div></div><button id="settings-close" class="btn-icon" type="button" title="Voltar" aria-label="Voltar"><span data-icon="arrow_back" data-size="20"></span></button></div>
+    <nav class="settings-categories" role="tablist" aria-label="Categorias de configurações"><button id="settings-tab-appearance" class="settings-category active" type="button" role="tab" aria-selected="true" aria-controls="settings-pane-appearance" tabindex="0" data-settings-category="appearance"><span data-icon="palette" data-size="18"></span><span data-settings-text="appearance"></span></button><button id="settings-tab-performance" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-performance" tabindex="-1" data-settings-category="performance"><span data-icon="speed" data-size="18"></span><span data-settings-text="performance"></span></button><button id="settings-tab-previews" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-previews" tabindex="-1" data-settings-category="previews"><span data-icon="image" data-size="18"></span><span data-settings-text="previews"></span></button><button id="settings-tab-uploads" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-uploads" tabindex="-1" data-settings-category="uploads"><span data-icon="upload" data-size="18"></span><span data-settings-text="uploads"></span></button><button id="settings-tab-downloads" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-downloads" tabindex="-1" data-settings-category="downloads"><span data-icon="download" data-size="18"></span><span data-settings-text="downloads"></span></button><button id="settings-tab-protection" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-protection" tabindex="-1" data-settings-category="protection"><span data-icon="shield" data-size="18"></span><span data-settings-text="encryptionTab"></span></button><button id="settings-tab-connection" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-connection" tabindex="-1" data-settings-category="connection"><span data-icon="lan" data-size="18"></span><span data-settings-text="connection"></span></button><button id="settings-tab-application" class="settings-category" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-application" tabindex="-1" data-settings-category="application"><span data-icon="desktop_windows" data-size="18"></span><span data-settings-text="settingsApplication"></span></button></nav>
+    <div class="settings-body"><div id="settings-pane-appearance" class="settings-category-pane" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-pane="appearance"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="palette" data-size="22"></span><div><h3 id="settings-appearance-title">Aparência</h3><p data-settings-text="settingsDescAppearance"></p></div></div>
+            <div class="setting-row">
+                <label id="setting-language-label" for="setting-language">Idioma</label>
+                <select id="setting-language" class="setting-select native-hidden" aria-hidden="true" tabindex="-1">
+                    <option value="system">Sistema</option>
+                    <option value="pt-BR">Português</option>
+                    <option value="en">English</option>
+                </select>
+                <div id="language-select" class="language-select" role="combobox" aria-expanded="false" aria-controls="language-menu" tabindex="0">
+                    <button id="language-select-button" class="language-select-button" type="button">
+                        <span id="language-current">Português</span>
+                        <span data-icon="expand_more" data-size="16"></span>
+                    </button>
+                    <div id="language-menu" class="language-menu hidden" role="listbox">
+                        <button type="button" data-language="system" role="option">Sistema</button>
+                        <button type="button" data-language="pt-BR" role="option">Português</button>
+                        <button type="button" data-language="en" role="option">English</button>
+                    </div>
+                </div>
+            </div>
+            <div class="setting-row">
+                <label id="setting-theme-label">Tema</label>
+                <div class="theme-btns">
+                    <button class="theme-btn active" data-theme-value="system"><span data-icon="settings" data-size="15"></span> <span id="theme-system-text">Sistema</span></button>
+                    <button class="theme-btn" data-theme-value="dark"><span  data-icon="dark_mode"  data-size="15"></span> <span id="theme-dark-text">Escuro</span></button>
+                    <button class="theme-btn"         data-theme-value="light"><span data-icon="light_mode" data-size="15"></span> <span id="theme-light-text">Claro</span></button>
+                </div>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-accent-label" for="setting-accent-mode">Cor de destaque</label>
+                <div class="settings-select-wrap"><select id="setting-accent-mode" class="setting-select">
+                    <option value="system" id="accent-system-text">Usar cor do Windows</option>
+                    <option value="preset" id="accent-preset-text">Padrões do Windows</option>
+                    <option value="custom" id="accent-custom-text">Personalizada</option>
+                </select><span data-icon="expand_more" data-size="18" aria-hidden="true"></span></div>
+                <div id="accent-presets" class="accent-presets hidden" role="group" aria-label="Cores padrão"></div>
+                <div id="accent-custom-controls" class="accent-custom-controls hidden">
+                    <input id="setting-accent-picker" type="color" value="#0078d4" aria-label="Escolher cor"/>
+                    <input id="setting-accent-hex" class="modal-input" value="#0078D4" maxlength="7" spellcheck="false" aria-label="Cor hexadecimal"/>
+                </div>
+                <small id="setting-accent-help">Afeta apenas o app. Tons muito claros ou escuros são ajustados para contraste.</small>
+            </div>
+            <div class="setting-row">
+                <label id="setting-card-size-label">Tamanho dos cards</label>
+                <div class="card-size-btns">
+                    <button class="card-size-btn" data-size="small"><span id="card-size-small-text">Pequeno</span></button>
+                    <button class="card-size-btn active" data-size="medium"><span id="card-size-medium-text">Médio</span></button>
+                    <button class="card-size-btn" data-size="large"><span id="card-size-large-text">Grande</span></button>
+                </div>
+            </div>
+        </section></div><div id="settings-pane-performance" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-performance" data-settings-pane="performance"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="speed" data-size="22"></span><div><h3 id="settings-performance-title">Desempenho</h3><p data-settings-text="settingsDescPerformance"></p></div></div>
+            <div class="setting-row">
+                <label id="setting-animations-label" for="setting-animations">Ativar animações</label>
+                <label class="toggle">
+                    <input type="checkbox" role="switch" id="setting-animations" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-hardware-label" for="setting-hardware">Aceleração por hardware</label>
+                    <small id="setting-hardware-help">Reinicie o app para aplicar.</small>
+                </div>
+                <label class="toggle">
+                    <input type="checkbox" role="switch" id="setting-hardware" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+        </section></div><div id="settings-pane-previews" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-previews" data-settings-pane="previews"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="image" data-size="22"></span><div><h3 id="settings-preview-title">Prévias</h3><p data-settings-text="settingsDescPreview"></p></div></div>
+            <div class="setting-row">
+                <label id="setting-preview-label" for="setting-preview">Ativar prévias</label>
+                <label class="toggle">
+                    <input type="checkbox" role="switch" id="setting-preview" checked/>
+                    <span class="toggle-track"></span>
+                </label>
+            </div>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-preview-threads"><span id="setting-preview-threads-label">Prévias simultâneas</span> <span id="preview-thr-val" class="setting-val">4</span></label>
+                <input id="setting-preview-threads" type="range" min="1" max="8" value="4" class="setting-range"/>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-video-preview-quality-label">Qualidade de vídeo</label>
+                <div class="card-size-btns" id="video-preview-quality-buttons">
+                    <button class="card-size-btn video-quality-btn" data-video-quality="low"><span id="video-preview-low-text">480p</span></button>
+                    <button class="card-size-btn video-quality-btn" data-video-quality="original"><span id="video-preview-original-text">Original</span></button>
+                </div>
+                <small id="setting-video-preview-quality-help">Usa a prévia 480p para carregar vídeos mais rápido.</small>
+            </div>
+            <div class="setting-row col">
+                <label class="threads-label" for="setting-video-prefetch"><span id="setting-video-prefetch-label">Chunks antecipados de vídeo</span> <span id="video-prefetch-val" class="setting-val">1</span></label>
+                <input id="setting-video-prefetch" type="range" min="0" max="6" value="1" class="setting-range"/>
+                <small id="setting-video-prefetch-help">Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.</small>
+            </div>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-cache-label">Cache</label>
+                    <small id="setting-cache-help">Limpa prévias e imagens salvas localmente.</small>
+                    <small id="setting-cache-size">0 B</small>
+                </div>
+                <button id="btn-clear-cache" class="btn-secondary" type="button">Limpar cache</button>
+            </div>
+        </section></div><div id="settings-pane-uploads" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-uploads" data-settings-pane="uploads"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="upload" data-size="22"></span><div><h3 id="settings-uploads-title">Uploads</h3><p data-settings-text="settingsDescUploads"></p></div></div>
+            <div class="setting-row">
+                <label id="setting-generate-video-previews-label" for="setting-generate-video-previews">Gerar prévias 480p dos vídeos</label>
+                <label class="toggle"><input type="checkbox" role="switch" id="setting-generate-video-previews" checked/><span class="toggle-track"></span></label>
+            </div>
+            <small id="setting-generate-video-previews-help">Desative para enviar vídeos mais rápido. Miniaturas e reprodução progressiva continuam disponíveis.</small>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-upload-files"><span id="setting-upload-files-label">Arquivos simultâneos</span> <span id="upload-files-val" class="setting-val">3</span></label>
+                <input id="setting-upload-files" type="range" min="1" max="16" value="3" class="setting-range"/>
+            </div>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-upload-threads"><span id="setting-upload-threads-label">Partes simultâneas</span> <span id="upload-thr-val" class="setting-val">4</span></label>
+                <input id="setting-upload-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
+            </div>
+            <div class="setting-row col setting-copy">
+                <button id="setting-force-upload" class="card-size-btn" type="button" aria-pressed="false" aria-describedby="setting-force-upload-help">Forçar 16 workers (RAM até 1 GB)</button>
+                <small id="setting-force-upload-help">Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.</small>
+            </div>
+        </section></div><div id="settings-pane-downloads" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-downloads" data-settings-pane="downloads"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="download" data-size="22"></span><div><h3 id="settings-downloads-title">Downloads</h3><p data-settings-text="settingsDescDownloads"></p></div></div>
+            <div class="setting-row">
+                <label class="threads-label" for="setting-threads"><span data-settings-text="simultaneousDownloadParts">Partes simultâneas</span> <span id="thr-val" class="setting-val">4</span></label>
+                <input id="setting-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
+            </div>
+            <div class="setting-row col">
+                <label id="setting-dlpath-label" for="setting-dlpath">Pasta de downloads</label>
+                <div class="path-row">
+                    <input id="setting-dlpath"  type="text" class="setting-input" placeholder="Padrão: Downloads do Windows" readonly/>
+                    <button id="btn-choose-dl"  class="btn-secondary">Escolher</button>
+                </div>
+            </div>
+
+        </section></div><div id="settings-pane-protection" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-protection" data-settings-pane="protection"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="shield" data-size="22"></span><div><h3 id="settings-encryption-title">Proteção dos arquivos</h3><p data-settings-text="settingsDescEncryption"></p></div></div>
+            <div class="encryption-overview" role="status" aria-live="polite">
+    <span class="encryption-overview-icon" data-icon="verified_user" data-size="28"></span>
+    <div><span class="settings-eyebrow" data-settings-text="encryptionCurrent">PROTEÇÃO ATUAL</span><h4 id="encryption-current-title">Proteção padrão ativa</h4><p id="encryption-current-detail"></p></div>
+    <span id="encryption-current-badge" class="encryption-state-badge">Ativa</span>
+</div>
+<div class="setting-row col encryption-mode-row">
+    <label id="setting-encryption-mode-label">Modo de proteção</label>
+    <div class="encryption-mode-buttons" role="radiogroup" aria-labelledby="setting-encryption-mode-label">
+        <button id="btn-encryption-standard" class="encryption-mode-card" type="button" role="radio" aria-checked="true">
+            <span class="encryption-radio" aria-hidden="true"></span><span class="encryption-mode-copy"><strong id="encryption-standard-name">Padrão</strong><small id="setting-encryption-standard-help">Gerenciada automaticamente pelo Organessônium.</small></span><span id="encryption-standard-state" class="encryption-mode-state">Em uso</span>
+        </button>
+        <button id="btn-encryption-custom" class="encryption-mode-card" type="button" role="radio" aria-checked="false">
+            <span class="encryption-radio" aria-hidden="true"></span><span class="encryption-mode-copy"><strong id="encryption-custom-name">Chave personalizada</strong><small data-settings-text="encryptionCustomDescription">Você guarda a chave de acesso aos arquivos.</small></span><span id="encryption-custom-state" class="encryption-mode-state hidden">Em uso</span>
+        </button>
+    </div>
+    <small data-settings-text="encryptionNewUploads">A escolha vale para os próximos uploads. Os arquivos existentes mantêm sua proteção.</small>
+</div>
+<div id="setting-custom-key" class="encryption-custom hidden"><div class="encryption-key-heading"><h4 data-settings-text="encryptionKeySetup">Sua chave personalizada</h4><span id="encryption-key-availability" class="encryption-key-availability"></span></div>
+                <div class="setting-row col">
+                    <label id="setting-custom-passphrase-label" for="setting-custom-passphrase">Senha da chave personalizada</label>
+                    <input id="setting-custom-passphrase" type="password" class="setting-input" autocomplete="new-password"/>
+                </div>
+                <p id="setting-custom-key-warning" class="encryption-warning">Arquivos protegidos com uma chave personalizada só poderão ser recuperados com essa chave. Guarde o arquivo de recuperação em local seguro.</p>
+                <label class="modal-check encryption-confirmation">
+                    <input id="setting-custom-key-confirmed" type="checkbox"/>
+                    <span id="setting-custom-key-confirmed-text">Entendo que perder a chave impede a recuperação dos arquivos.</span>
+                </label>
+                <div class="encryption-actions">
+                    <button id="btn-configure-custom-key" class="btn-primary" type="button">Ativar chave personalizada</button>
+                    <button id="btn-export-custom-key" class="btn-secondary" type="button">Exportar chave de recuperação</button>
+                    <button id="btn-import-custom-key" class="btn-secondary" type="button">Importar chave</button>
+                </div>
+                <small id="setting-custom-key-status" class="encryption-status"></small>
+            </div>
+        </section></div><div id="settings-pane-connection" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-connection" data-settings-pane="connection"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="lan" data-size="22"></span><div><h3 id="settings-network-title">Rede e proxy</h3><p data-settings-text="settingsDescNetwork"></p></div></div>
+            <div class="setting-row col">
+                <label id="setting-proxy-mode-label" for="setting-proxy-mode">Modo de conexão</label>
+                <div class="settings-select-wrap"><select id="setting-proxy-mode" class="setting-input">
+                    <option value="automatic">Automático (usar configuração do sistema)</option>
+                    <option value="disabled">Desativado (conexão direta)</option>
+                    <option value="manual">Manual</option>
+                </select><span data-icon="expand_more" data-size="18" aria-hidden="true"></span></div>
+                <small id="setting-proxy-mode-help">O proxy é usado para falar com o Discord. Mude aqui se estiver atrás de um firewall ou rede corporativa.</small>
+            </div>
+            <div id="setting-proxy-manual" class="proxy-manual hidden">
+                <div class="setting-row col">
+                    <label id="setting-proxy-host-label" for="setting-proxy-host">Endereço do proxy</label>
+                    <input id="setting-proxy-host" type="text" class="setting-input" placeholder="proxy.exemplo.com" autocomplete="off"/>
+                </div>
+                <div class="setting-row col">
+                    <label id="setting-proxy-port-label" for="setting-proxy-port">Porta</label>
+                    <input id="setting-proxy-port" type="number" class="setting-input" min="1" max="65535" placeholder="8080" autocomplete="off"/>
+                </div>
+                <div class="setting-row col">
+                    <label id="setting-proxy-protocol-label" for="setting-proxy-protocol">Protocolo</label>
+                    <div class="settings-select-wrap"><select id="setting-proxy-protocol" class="setting-input">
+                        <option value="auto">Detectar automaticamente</option>
+                        <option value="http">HTTP</option>
+                        <option value="https">HTTPS (CONNECT)</option>
+                        <option value="socks5">SOCKS5</option>
+                        <option value="socks4a">SOCKS4a</option>
+                        <option value="socks4">SOCKS4</option>
+                    </select><span data-icon="expand_more" data-size="18" aria-hidden="true"></span></div>
+                </div>
+                <div class="setting-row">
+                    <label id="setting-proxy-auth-label" for="setting-proxy-auth">Requer autenticação</label>
+                    <label class="toggle">
+                        <input type="checkbox" role="switch" id="setting-proxy-auth"/>
+                        <span class="toggle-track"></span>
+                    </label>
+                </div>
+                <div id="setting-proxy-auth-fields" class="proxy-auth hidden">
+                    <div class="setting-row col">
+                        <label id="setting-proxy-user-label" for="setting-proxy-user">Usuário</label>
+                        <input id="setting-proxy-user" type="text" class="setting-input" autocomplete="off"/>
+                    </div>
+                    <div class="setting-row col">
+                        <label id="setting-proxy-pass-label" for="setting-proxy-pass">Senha</label>
+                        <input id="setting-proxy-pass" type="password" class="setting-input" autocomplete="off"/>
+                    </div>
+                </div>
+                <div class="setting-row proxy-test-row">
+                    <button id="btn-test-proxy" class="btn-secondary" type="button">Testar conexão com o proxy</button>
+                    <div id="proxy-test-result" class="proxy-test-result hidden"></div>
+                </div>
+            </div>
+        </section><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="account_circle" data-size="22"></span><div><h3 id="settings-connection-title">Conexão</h3><p data-settings-text="settingsDescAccount"></p></div></div>
+            <div class="setting-row">
+                <div class="setting-copy">
+                    <label id="setting-logout-label">Sair do bot</label>
+                    <small id="setting-logout-help">Remove o token, os IDs e os dados locais.</small>
+                </div>
+                <button id="btn-logout" class="btn-danger" type="button">Sair</button>
+            </div>
+        </section></div><div id="settings-pane-application" class="settings-category-pane hidden" role="tabpanel" aria-labelledby="settings-tab-application" data-settings-pane="application"><section class="settings-section">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="desktop_windows" data-size="22"></span><div><h3 id="sync-settings-title" data-settings-text="settingsStartup">Sincronização em segundo plano</h3><p data-settings-text="settingsDescStartup"></p></div></div>
+            <div class="setting-row"><label for="sync-start-windows">Iniciar Organessônium com o Windows</label><label class="toggle"><input id="sync-start-windows" type="checkbox" role="switch"/><span class="toggle-track"></span></label></div>
+            <div class="setting-row col"><label for="sync-close-behavior">Ao fechar a janela</label>
+                <div class="settings-select-wrap"><select id="sync-close-behavior" class="modal-input"><option value="exit">Encerrar Organessônium</option><option value="tray">Minimizar para a área de notificação</option></select><span data-icon="expand_more" data-size="18" aria-hidden="true"></span></div>
+                <small id="sync-background-help">No modo background, a sincronização continua sem WebView2. A opção de fechamento só muda quando você a selecionar.</small>
+            </div>
+        </section><section class="settings-section"><div class="settings-section-heading"><span class="settings-section-icon" data-icon="hard_drive" data-size="22"></span><div><h3 id="settings-storage-title" data-settings-text="settingsStorage">Armazenamento local</h3><p data-settings-text="settingsDescStorage"></p></div></div><div class="setting-row col">
+                <label id="setting-datapath-label" for="setting-datapath">Pasta de dados</label>
+                <div class="path-row">
+                    <input id="setting-datapath" type="text" class="setting-input" placeholder="Padrão: AppData" readonly/>
+                    <button id="btn-choose-data" class="btn-secondary">Escolher</button>
+                </div>
+                <small id="setting-datapath-help">Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.</small>
+            </div></section><section class="settings-section" id="development-diagnostics">
+            <div class="settings-section-heading"><span class="settings-section-icon" data-icon="monitor_heart" data-size="22"></span><div><h3 id="settings-diagnostics-title" data-settings-text="settingsDiagnostics">Diagnóstico temporário</h3><p data-settings-text="settingsDescDiagnostics"></p></div></div>
+            <div class="setting-row col">
+                <span id="diagnostic-status" role="status">Aguardando estado do coletor...</span>
+                <small>Registra falhas e tempos de resposta, sem conteúdo dos arquivos ou credenciais.</small>
+                <code id="diagnostic-directory" style="overflow-wrap:anywhere;user-select:text"></code>
+            </div>
+        </section></div></div>
+</section>
+
         <div class="statusbar" role="status" aria-live="polite">
             <span id="status-text">Carregando...</span>
             <div id="status-loader" class="loader hidden"></div>
@@ -409,272 +671,7 @@
     </div>
 </div>
 
-<div id="settings-overlay" class="settings-overlay hidden"></div>
-<aside id="settings-panel" class="settings-panel hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true">
-    <div class="settings-header">
-        <h2 id="settings-title">Configurações</h2>
-        <button id="settings-close" class="ops-btn"><span data-icon="close" data-size="18"></span></button>
-    </div>
-    <div class="settings-body">
-        <section class="settings-section">
-            <h3 id="settings-appearance-title">Aparência</h3>
-            <div class="setting-row">
-                <label id="setting-language-label" for="setting-language">Idioma</label>
-                <select id="setting-language" class="setting-select native-hidden" aria-hidden="true" tabindex="-1">
-                    <option value="system">Sistema</option>
-                    <option value="pt-BR">Português</option>
-                    <option value="en">English</option>
-                </select>
-                <div id="language-select" class="language-select" role="combobox" aria-expanded="false" aria-controls="language-menu" tabindex="0">
-                    <button id="language-select-button" class="language-select-button" type="button">
-                        <span id="language-current">Português</span>
-                        <span data-icon="expand_more" data-size="16"></span>
-                    </button>
-                    <div id="language-menu" class="language-menu hidden" role="listbox">
-                        <button type="button" data-language="system" role="option">Sistema</button>
-                        <button type="button" data-language="pt-BR" role="option">Português</button>
-                        <button type="button" data-language="en" role="option">English</button>
-                    </div>
-                </div>
-            </div>
-            <div class="setting-row">
-                <label id="setting-theme-label">Tema</label>
-                <div class="theme-btns">
-                    <button class="theme-btn active" data-theme-value="system"><span data-icon="settings" data-size="15"></span> <span id="theme-system-text">Sistema</span></button>
-                    <button class="theme-btn" data-theme-value="dark"><span  data-icon="dark_mode"  data-size="15"></span> <span id="theme-dark-text">Escuro</span></button>
-                    <button class="theme-btn"         data-theme-value="light"><span data-icon="light_mode" data-size="15"></span> <span id="theme-light-text">Claro</span></button>
-                </div>
-            </div>
-            <div class="setting-row col">
-                <label id="setting-accent-label" for="setting-accent-mode">Cor de destaque</label>
-                <select id="setting-accent-mode" class="setting-select">
-                    <option value="system" id="accent-system-text">Usar cor do Windows</option>
-                    <option value="preset" id="accent-preset-text">Padrões do Windows</option>
-                    <option value="custom" id="accent-custom-text">Personalizada</option>
-                </select>
-                <div id="accent-presets" class="accent-presets hidden" role="group" aria-label="Cores padrão"></div>
-                <div id="accent-custom-controls" class="accent-custom-controls hidden">
-                    <input id="setting-accent-picker" type="color" value="#0078d4" aria-label="Escolher cor"/>
-                    <input id="setting-accent-hex" class="modal-input" value="#0078D4" maxlength="7" spellcheck="false" aria-label="Cor hexadecimal"/>
-                </div>
-                <small id="setting-accent-help">Afeta apenas o app. Tons muito claros ou escuros são ajustados para contraste.</small>
-            </div>
-            <div class="setting-row">
-                <label id="setting-card-size-label">Tamanho dos cards</label>
-                <div class="card-size-btns">
-                    <button class="card-size-btn" data-size="small"><span id="card-size-small-text">Pequeno</span></button>
-                    <button class="card-size-btn active" data-size="medium"><span id="card-size-medium-text">Médio</span></button>
-                    <button class="card-size-btn" data-size="large"><span id="card-size-large-text">Grande</span></button>
-                </div>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-preview-title">Prévias</h3>
-            <div class="setting-row">
-                <label id="setting-preview-label" for="setting-preview">Ativar prévias</label>
-                <label class="toggle">
-                    <input type="checkbox" id="setting-preview" checked/>
-                    <span class="toggle-track"></span>
-                </label>
-            </div>
-            <div class="setting-row">
-                <label class="threads-label" for="setting-preview-threads"><span id="setting-preview-threads-label">Prévias simultâneas</span> <span id="preview-thr-val" class="setting-val">4</span></label>
-                <input id="setting-preview-threads" type="range" min="1" max="8" value="4" class="setting-range"/>
-            </div>
-            <div class="setting-row col">
-                <label id="setting-video-preview-quality-label">Qualidade de vídeo</label>
-                <div class="card-size-btns" id="video-preview-quality-buttons">
-                    <button class="card-size-btn video-quality-btn" data-video-quality="low"><span id="video-preview-low-text">480p</span></button>
-                    <button class="card-size-btn video-quality-btn" data-video-quality="original"><span id="video-preview-original-text">Original</span></button>
-                </div>
-                <small id="setting-video-preview-quality-help">Usa a prévia 480p para carregar vídeos mais rápido.</small>
-            </div>
-            <div class="setting-row col">
-                <label class="threads-label" for="setting-video-prefetch"><span id="setting-video-prefetch-label">Chunks antecipados de vídeo</span> <span id="video-prefetch-val" class="setting-val">1</span></label>
-                <input id="setting-video-prefetch" type="range" min="0" max="6" value="1" class="setting-range"/>
-                <small id="setting-video-prefetch-help">Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.</small>
-            </div>
-            <div class="setting-row">
-                <div class="setting-copy">
-                    <label id="setting-cache-label">Cache</label>
-                    <small id="setting-cache-help">Limpa prévias e imagens salvas localmente.</small>
-                    <small id="setting-cache-size">0 B</small>
-                </div>
-                <button id="btn-clear-cache" class="btn-secondary" type="button">Limpar cache</button>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-performance-title">Desempenho</h3>
-            <div class="setting-row">
-                <label id="setting-animations-label" for="setting-animations">Ativar animações</label>
-                <label class="toggle">
-                    <input type="checkbox" id="setting-animations" checked/>
-                    <span class="toggle-track"></span>
-                </label>
-            </div>
-            <div class="setting-row">
-                <div class="setting-copy">
-                    <label id="setting-hardware-label" for="setting-hardware">Aceleração por hardware</label>
-                    <small id="setting-hardware-help">Reinicie o app para aplicar.</small>
-                </div>
-                <label class="toggle">
-                    <input type="checkbox" id="setting-hardware" checked/>
-                    <span class="toggle-track"></span>
-                </label>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-uploads-title">Uploads</h3>
-            <div class="setting-row">
-                <label id="setting-generate-video-previews-label" for="setting-generate-video-previews">Gerar prévias 480p dos vídeos</label>
-                <label class="toggle"><input type="checkbox" id="setting-generate-video-previews" checked/><span class="toggle-track"></span></label>
-            </div>
-            <small id="setting-generate-video-previews-help">Desative para enviar vídeos mais rápido. Miniaturas e reprodução progressiva continuam disponíveis.</small>
-            <div class="setting-row">
-                <label class="threads-label" for="setting-upload-files"><span id="setting-upload-files-label">Arquivos simultâneos</span> <span id="upload-files-val" class="setting-val">3</span></label>
-                <input id="setting-upload-files" type="range" min="1" max="16" value="3" class="setting-range"/>
-            </div>
-            <div class="setting-row">
-                <label class="threads-label" for="setting-upload-threads"><span id="setting-upload-threads-label">Partes simultâneas</span> <span id="upload-thr-val" class="setting-val">4</span></label>
-                <input id="setting-upload-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
-            </div>
-            <div class="setting-row col setting-copy">
-                <button id="setting-force-upload" class="card-size-btn" type="button" aria-pressed="false" aria-describedby="setting-force-upload-help">Forçar 16 workers (RAM até 1 GB)</button>
-                <small id="setting-force-upload-help">Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.</small>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-encryption-title">Proteção dos arquivos</h3>
-            <div class="setting-row col">
-                <label id="setting-encryption-mode-label">Modo de proteção</label>
-                <div class="theme-btns encryption-mode-buttons" role="group" aria-labelledby="setting-encryption-mode-label">
-                    <button id="btn-encryption-standard" class="theme-btn" type="button">Padrão</button>
-                    <button id="btn-encryption-custom" class="theme-btn" type="button">Chave personalizada</button>
-                </div>
-                <small id="setting-encryption-standard-help">Gerenciada automaticamente pelo Organessônium.</small>
-            </div>
-            <div id="setting-custom-key" class="encryption-custom hidden">
-                <div class="setting-row col">
-                    <label id="setting-custom-passphrase-label" for="setting-custom-passphrase">Senha da chave personalizada</label>
-                    <input id="setting-custom-passphrase" type="password" class="setting-input" autocomplete="new-password"/>
-                </div>
-                <p id="setting-custom-key-warning" class="encryption-warning">Arquivos protegidos com uma chave personalizada só poderão ser recuperados com essa chave. Guarde o arquivo de recuperação em local seguro.</p>
-                <label class="modal-check encryption-confirmation">
-                    <input id="setting-custom-key-confirmed" type="checkbox"/>
-                    <span id="setting-custom-key-confirmed-text">Entendo que perder a chave impede a recuperação dos arquivos.</span>
-                </label>
-                <div class="encryption-actions">
-                    <button id="btn-configure-custom-key" class="btn-primary" type="button">Ativar chave personalizada</button>
-                    <button id="btn-export-custom-key" class="btn-secondary" type="button">Exportar chave de recuperação</button>
-                    <button id="btn-import-custom-key" class="btn-secondary" type="button">Importar chave</button>
-                </div>
-                <small id="setting-custom-key-status" class="encryption-status"></small>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-downloads-title">Downloads</h3>
-            <div class="setting-row">
-                <label class="threads-label">Threads <span id="thr-val" class="setting-val">4</span></label>
-                <input id="setting-threads" type="range" min="1" max="16" value="4" class="setting-range"/>
-            </div>
-            <div class="setting-row col">
-                <label id="setting-dlpath-label" for="setting-dlpath">Pasta de downloads</label>
-                <div class="path-row">
-                    <input id="setting-dlpath"  type="text" class="setting-input" placeholder="Padrão: Downloads do Windows" readonly/>
-                    <button id="btn-choose-dl"  class="btn-secondary">Escolher</button>
-                </div>
-            </div>
-            <div class="setting-row col">
-                <label id="setting-datapath-label" for="setting-datapath">Pasta de dados</label>
-                <div class="path-row">
-                    <input id="setting-datapath" type="text" class="setting-input" placeholder="Padrão: AppData" readonly/>
-                    <button id="btn-choose-data" class="btn-secondary">Escolher</button>
-                </div>
-                <small id="setting-datapath-help">Usada na próxima inicialização. Os dados atuais são copiados sem apagar nada.</small>
-            </div>
-        </section>
-<section class="settings-section">
-            <h3 id="settings-network-title">Rede e proxy</h3>
-            <div class="setting-row col">
-                <label id="setting-proxy-mode-label" for="setting-proxy-mode">Modo de conexão</label>
-                <select id="setting-proxy-mode" class="setting-input">
-                    <option value="automatic">Automático (usar configuração do sistema)</option>
-                    <option value="disabled">Desativado (conexão direta)</option>
-                    <option value="manual">Manual</option>
-                </select>
-                <small id="setting-proxy-mode-help">O proxy é usado para falar com o Discord. Mude aqui se estiver atrás de um firewall ou rede corporativa.</small>
-            </div>
-            <div id="setting-proxy-manual" class="proxy-manual hidden">
-                <div class="setting-row col">
-                    <label id="setting-proxy-host-label" for="setting-proxy-host">Endereço do proxy</label>
-                    <input id="setting-proxy-host" type="text" class="setting-input" placeholder="proxy.exemplo.com" autocomplete="off"/>
-                </div>
-                <div class="setting-row col">
-                    <label id="setting-proxy-port-label" for="setting-proxy-port">Porta</label>
-                    <input id="setting-proxy-port" type="number" class="setting-input" min="1" max="65535" placeholder="8080" autocomplete="off"/>
-                </div>
-                <div class="setting-row col">
-                    <label id="setting-proxy-protocol-label" for="setting-proxy-protocol">Protocolo</label>
-                    <select id="setting-proxy-protocol" class="setting-input">
-                        <option value="auto">Detectar automaticamente</option>
-                        <option value="http">HTTP</option>
-                        <option value="https">HTTPS (CONNECT)</option>
-                        <option value="socks5">SOCKS5</option>
-                        <option value="socks4a">SOCKS4a</option>
-                        <option value="socks4">SOCKS4</option>
-                    </select>
-                </div>
-                <div class="setting-row">
-                    <label id="setting-proxy-auth-label" for="setting-proxy-auth">Requer autenticação</label>
-                    <label class="toggle">
-                        <input type="checkbox" id="setting-proxy-auth"/>
-                        <span class="toggle-track"></span>
-                    </label>
-                </div>
-                <div id="setting-proxy-auth-fields" class="proxy-auth hidden">
-                    <div class="setting-row col">
-                        <label id="setting-proxy-user-label" for="setting-proxy-user">Usuário</label>
-                        <input id="setting-proxy-user" type="text" class="setting-input" autocomplete="off"/>
-                    </div>
-                    <div class="setting-row col">
-                        <label id="setting-proxy-pass-label" for="setting-proxy-pass">Senha</label>
-                        <input id="setting-proxy-pass" type="password" class="setting-input" autocomplete="off"/>
-                    </div>
-                </div>
-                <div class="setting-row proxy-test-row">
-                    <button id="btn-test-proxy" class="btn-secondary" type="button">Testar conexão com o proxy</button>
-                    <div id="proxy-test-result" class="proxy-test-result hidden"></div>
-                </div>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="sync-settings-title">Sincronização em segundo plano</h3>
-            <div class="setting-row"><label for="sync-start-windows">Iniciar Organessônium com o Windows</label><input id="sync-start-windows" type="checkbox" /></div>
-            <div class="setting-row col"><label for="sync-close-behavior">Ao fechar a janela</label>
-                <select id="sync-close-behavior" class="modal-input"><option value="exit">Encerrar Organessônium</option><option value="tray">Minimizar para a área de notificação</option></select>
-                <small id="sync-background-help">No modo background, a sincronização continua sem WebView2. A opção de fechamento só muda quando você a selecionar.</small>
-            </div>
-        </section>
-        <section class="settings-section" id="development-diagnostics">
-            <h3>Diagnóstico temporário</h3>
-            <div class="setting-row col">
-                <span id="diagnostic-status" role="status">Aguardando estado do coletor...</span>
-                <small>Registra falhas e tempos de resposta, sem conteúdo dos arquivos ou credenciais.</small>
-                <code id="diagnostic-directory" style="overflow-wrap:anywhere;user-select:text"></code>
-            </div>
-        </section>
-        <section class="settings-section">
-            <h3 id="settings-connection-title">Conexão</h3>
-            <div class="setting-row">
-                <div class="setting-copy">
-                    <label id="setting-logout-label">Sair do bot</label>
-                    <small id="setting-logout-help">Remove o token, os IDs e os dados locais.</small>
-                </div>
-                <button id="btn-logout" class="btn-danger" type="button">Sair</button>
-            </div>
-        </section>
-    </div>
-</aside>
+
 
 <script src="bridge.js"></script>
 <script src="icons.js"></script>

@@ -57,6 +57,7 @@ internal static partial class Program
         ("fileVersionsLifecycle", FileVersionsLifecycleAsync),
         ("fileActionsHiddenBrowser", FileActionsHiddenBrowserAsync),
         ("appearanceHiddenBrowser", AppearanceHiddenBrowserAsync),
+        ("settingsPageHiddenBrowser", SettingsPageHiddenBrowserAsync),
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
         ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
         ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),

@@ -373,10 +373,96 @@ const I18N = {
     }
 };
 
+Object.assign(I18N['pt-BR'], {
+    "settingsIntro": "Personalize a interface e escolha como seus arquivos são enviados, baixados e protegidos.",
+    "settingsCategories": "Categorias de configurações",
+    "settingsApplication": "Aplicativo",
+    "settingsStorage": "Armazenamento local",
+    "settingsStartup": "Inicialização e segundo plano",
+    "settingsDiagnostics": "Diagnóstico",
+    "encryptionTab": "Proteção",
+    "account": "Conta",
+    "simultaneousDownloadParts": "Partes simultâneas",
+    "encryptionCurrent": "Proteção atual",
+    "encryptionStandardActive": "Proteção padrão ativa",
+    "encryptionCustomActive": "Chave personalizada ativa",
+    "encryptionMissingKey": "Chave personalizada não disponível",
+    "encryptionStandardDetail": "Os próximos uploads são criptografados automaticamente pelo app.",
+    "encryptionCustomDetail": "Os próximos uploads usam a chave personalizada deste dispositivo.",
+    "encryptionMissingDetail": "Importe ou configure a chave para continuar usando este modo.",
+    "encryptionCustomDescription": "Você guarda a chave de acesso aos arquivos.",
+    "encryptionNewUploads": "A escolha vale para os próximos uploads. Os arquivos existentes mantêm sua proteção.",
+    "encryptionInUse": "Em uso",
+    "encryptionActive": "Ativa",
+    "encryptionNeedsSetup": "Configuração necessária",
+    "encryptionKeySetup": "Sua chave personalizada",
+    "encryptionKeySaved": "Chave salva neste dispositivo",
+    "encryptionKeyAbsent": "Nenhuma chave configurada",
+    "encryptionKeyUse": "Usar chave salva",
+    "encryptionKeyIsActive": "Chave em uso",
+    "encryptionKeyApply": "Aplicar chave personalizada",
+    "settingEnabled": "Ativado",
+    "settingDisabled": "Desativado",
+    "settingsDescAppearance": "Idioma, tema, cores e tamanho dos cards.",
+    "settingsDescPreview": "Exibição de imagens, vídeos e prévias salvas no dispositivo.",
+    "settingsDescPerformance": "Animações e uso do hardware na interface.",
+    "settingsDescUploads": "Prévia de vídeo e quantidade de arquivos e partes enviados ao mesmo tempo.",
+    "settingsDescEncryption": "Escolha quem gerencia a chave usada nos próximos uploads.",
+    "settingsDescDownloads": "Paralelismo e destino dos arquivos baixados.",
+    "settingsDescNetwork": "Configure a conexão do app com o Discord.",
+    "settingsDescStartup": "Escolha como o app inicia e se comporta ao fechar.",
+    "settingsDescStorage": "Local usado para configurações, índices e caches do aplicativo.",
+    "settingsDescDiagnostics": "Informações técnicas para investigar falhas e tempos de resposta.",
+    "settingsDescAccount": "Gerencie a sessão conectada neste dispositivo."
+});
+Object.assign(I18N.en, {
+    "settingsIntro": "Personalize the interface and choose how your files are uploaded, downloaded and protected.",
+    "settingsCategories": "Settings categories",
+    "settingsApplication": "Application",
+    "settingsStorage": "Local storage",
+    "settingsStartup": "Startup and background",
+    "settingsDiagnostics": "Diagnostics",
+    "encryptionTab": "Protection",
+    "account": "Account",
+    "simultaneousDownloadParts": "Simultaneous parts",
+    "encryptionCurrent": "Current protection",
+    "encryptionStandardActive": "Standard protection active",
+    "encryptionCustomActive": "Custom key active",
+    "encryptionMissingKey": "Custom key unavailable",
+    "encryptionStandardDetail": "New uploads are encrypted automatically by the app.",
+    "encryptionCustomDetail": "New uploads use the custom key on this device.",
+    "encryptionMissingDetail": "Import or configure the key to continue using this mode.",
+    "encryptionCustomDescription": "You keep the key that grants access to your files.",
+    "encryptionNewUploads": "This choice applies to new uploads. Existing files keep their protection.",
+    "encryptionInUse": "In use",
+    "encryptionActive": "Active",
+    "encryptionNeedsSetup": "Setup required",
+    "encryptionKeySetup": "Your custom key",
+    "encryptionKeySaved": "Key saved on this device",
+    "encryptionKeyAbsent": "No key configured",
+    "encryptionKeyUse": "Use saved key",
+    "encryptionKeyIsActive": "Key in use",
+    "encryptionKeyApply": "Apply custom key",
+    "settingEnabled": "On",
+    "settingDisabled": "Off",
+    "settingsDescAppearance": "Language, theme, colors and card size.",
+    "settingsDescPreview": "Images, videos and previews stored on this device.",
+    "settingsDescPerformance": "Animations and hardware usage in the interface.",
+    "settingsDescUploads": "Video previews and simultaneous files and parts.",
+    "settingsDescEncryption": "Choose who manages the key for new uploads.",
+    "settingsDescDownloads": "Parallel downloads and destination folder.",
+    "settingsDescNetwork": "Configure how the app connects to Discord.",
+    "settingsDescStartup": "Choose how the app starts and behaves when closed.",
+    "settingsDescStorage": "Storage location for settings, indexes and app caches.",
+    "settingsDescDiagnostics": "Technical information for investigating failures and response times.",
+    "settingsDescAccount": "Manage the session connected on this device."
+});
+
 const $ = id => document.getElementById(id);
 const libraryPageSize = 100;
 let libraryPageKey = '', libraryVisibleLimit = libraryPageSize, libraryItemCount = 0;
 let libraryRenderSignature = '', libraryPagingFrame = 0;
+let activeSettingsCategory = 'appearance', encryptionSelection = null;
 const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     emptyState  = $('empty-state'),  statusText     = $('status-text'),
     statusLoader= $('status-loader'),storageDisp    = $('storage-display'),
@@ -384,7 +470,7 @@ const filesGrid   = $('files-grid'),   filesList      = $('files-list'),
     opsPanel    = $('ops-panel'),    opsList        = $('ops-list'),
     sortMenu    = $('sort-menu'),    typeFilterMenu = $('type-filter-menu'), dateFilterMenu = $('date-filter-menu'), ctxMenu = $('ctx-menu'),
     dragOverlay = $('drag-overlay'),
-    settingsPanel=$('settings-panel'), settingsOverlay=$('settings-overlay'),
+    settingsPanel=$('settings-panel'),
     folderOverlay=$('folder-overlay'), folderInput   =$('folder-name-input'),
     confirmOverlay=$('confirm-overlay'), uploadConflictOverlay=$('upload-conflict-overlay'),
     moveOverlay = $('move-overlay'), moveTree       = $('move-tree'),
@@ -591,8 +677,8 @@ function applyI18n() {
     setText('setting-hardware-help', 'requiresRestart');
     setText('settings-encryption-title', 'encryption');
     setText('setting-encryption-mode-label', 'encryptionMode');
-    setText('btn-encryption-standard', 'encryptionStandard');
-    setText('btn-encryption-custom', 'encryptionCustom');
+    setText('encryption-standard-name', 'encryptionStandard');
+    setText('encryption-custom-name', 'encryptionCustom');
     setText('setting-encryption-standard-help', 'encryptionStandardHelp');
     setText('setting-custom-passphrase-label', 'encryptionPassphrase');
     setText('setting-custom-key-warning', 'encryptionWarning');
@@ -613,7 +699,7 @@ function applyI18n() {
     setText('btn-choose-dl', 'choose');
     setText('btn-choose-tmp', 'choose');
     setText('btn-choose-data', 'choose');
-    setText('settings-connection-title', 'connection');
+    setText('settings-connection-title', 'account');
     setText('settings-network-title', 'network');
     setText('setting-proxy-mode-label', 'proxyMode');
     setText('setting-proxy-mode-help', 'proxyModeHelp');
@@ -684,6 +770,7 @@ function applyI18n() {
     syncSidebarChrome();
     refreshSidebarSummary();
     refreshOpenEditorsI18n();
+    syncSettingsPageLanguage();
 }
 
 function syncMotionPreference() {
@@ -780,12 +867,6 @@ function scheduleNativeTitleBarDragRegion(delay = 200) {
             window.bridge.setTitleBarDragRegion(...rectangles);
             return;
         }
-        if (!settingsPanel.classList.contains('hidden')) {
-            addHeaderGap(document.querySelector('.settings-header'), $('settings-close'));
-            if (rectangles.length > 0) window.bridge.setTitleBarDragRegion(...rectangles);
-            return;
-        }
-
         const region = $('titlebar-drag-region');
         if (!region) return;
         const rect = region.getBoundingClientRect();
@@ -2388,6 +2469,7 @@ window._onEncryptedMarkdownImageReady = (id, reference, url) => {
 };
 window._onEncryptionSettingsChanged = (mode, customKeyAvailable) => {
     settings.encryptionMode = mode === 'custom' ? 'custom' : 'standard';
+    encryptionSelection = settings.encryptionMode;
     settings.customKeyAvailable = customKeyAvailable === true;
     syncEncryptionSettings();
     setStatus(t('encryptionUpdated'), false);
@@ -2873,7 +2955,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     $('btn-grid').addEventListener('click', () => setView('grid'));
     $('btn-list').addEventListener('click', () => setView('list'));
-    $('search-input').addEventListener('input', e => { searchQuery = e.target.value.toLowerCase(); render(); });
+    $('search-input').addEventListener('input', e => { if (isSettingsOpen()) { closeSettings(); activateWorkspaceTab('files'); } searchQuery = e.target.value.toLowerCase(); render(); });
 
     btnBack.addEventListener('click',    goBack);
     btnForward.addEventListener('click', goForward);
@@ -3033,7 +3115,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Settings
     $('btn-settings')?.addEventListener('click',   openSettings);
     $('settings-close').addEventListener('click',  closeSettings);
-    settingsOverlay.addEventListener('click',      closeSettings);
     if ($('btn-save-settings')) $('btn-save-settings').addEventListener('click', saveSettings);
     if ($('btn-clear-cache')) $('btn-clear-cache').addEventListener('click', () => {
         setStatus(t('loading'), true);
@@ -3060,12 +3141,12 @@ document.addEventListener('DOMContentLoaded', () => {
         queueSettingsSave();
     });
     $('btn-encryption-standard')?.addEventListener('click', () => {
-        settings.encryptionMode = 'standard';
+        encryptionSelection = 'standard';
         syncEncryptionSettings();
         window.bridge.setEncryptionMode('standard');
     });
     $('btn-encryption-custom')?.addEventListener('click', () => {
-        settings.encryptionMode = 'custom';
+        encryptionSelection = 'custom';
         syncEncryptionSettings();
     });
     $('btn-configure-custom-key')?.addEventListener('click', () => {
@@ -3088,6 +3169,9 @@ document.addEventListener('DOMContentLoaded', () => {
     $('btn-import-custom-key')?.addEventListener('click', () => {
         askConfirm(t('encryptionImportTitle'), t('encryptionImportWarning'), () => window.bridge.importCustomEncryptionKey(), 'encryptionProceed');
     });
+    $('setting-custom-passphrase').addEventListener('input', syncEncryptionSettings);
+    $('setting-custom-key-confirmed').addEventListener('change', syncEncryptionSettings);
+    setupSettingsCategories();
     $('setting-proxy-mode').addEventListener('change', e => {
         settings.proxy.proxyMode = e.target.value;
         applyProxySettingsVisibility();
@@ -3149,9 +3233,9 @@ document.addEventListener('DOMContentLoaded', () => {
         setLanguage(btn.dataset.language);
         closeLanguageMenu();
     });
-    document.querySelectorAll('.theme-btn').forEach(btn => {
+    document.querySelectorAll('.theme-btn[data-theme-value]').forEach(btn => {
         btn.addEventListener('click', () => {
-            document.querySelectorAll('.theme-btn').forEach(b=>b.classList.remove('active'));
+            document.querySelectorAll('.theme-btn[data-theme-value]').forEach(b=>b.classList.remove('active'));
             btn.classList.add('active'); settings.theme=btn.dataset.themeValue; applyTheme(settings.theme); queueSettingsSave();
         });
     });
@@ -3212,6 +3296,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 resolveUploadConflict('skip');
                 return;
             }
+        }
+        if (isSettingsOpen()) {
+            if (e.key === 'Escape') {
+                if (!$('language-menu').classList.contains('hidden')) closeLanguageMenu(); else closeSettings();
+            }
+            if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); closeSettings(); }
+            if (e.key === 'F5') e.preventDefault();
+            return;
         }
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
             const activeEditor = activeWorkspaceTab !== 'files' ? markdownTabs.get(activeWorkspaceTab) : null;
@@ -3669,7 +3761,8 @@ function setupWorkspaceTabs() {
 }
 
 function activateWorkspaceTab(id) {
-    if (!workspaceTabs || !editorArea) return;
+    if (isSettingsOpen()) { closeSettings(false); if (isSettingsOpen()) return; }
+    if (!workspaceTabs || !editorArea) { $('main-area').classList.remove('hidden'); return; }
     const previousTab = activeWorkspaceTab;
     activeWorkspaceTab = id || 'files';
     $('main-area').classList.toggle('hidden', activeWorkspaceTab !== 'files');
@@ -5396,6 +5489,7 @@ function refreshServerIndex(rebuildSerials) {
     else window.bridge.loadApps();
 }
 function goBack() {
+    if (isSettingsOpen()) { closeSettings(); return; }
     if (!historyBack.length) return;
     historyForward.push({ path:currentPath, folderIds:[...currentFolderIds] });
     const previous = historyBack.pop(); navigate(previous.path, false, previous.folderIds);
@@ -5405,7 +5499,7 @@ function goForward() {
     historyBack.push({ path:currentPath, folderIds:[...currentFolderIds] });
     const next = historyForward.pop(); navigate(next.path, false, next.folderIds);
 }
-function updateNavButtons() { btnBack.disabled = !historyBack.length; btnForward.disabled = !historyForward.length; }
+function updateNavButtons() { btnBack.disabled = !isSettingsOpen() && !historyBack.length; btnForward.disabled = isSettingsOpen() || !historyForward.length; }
 
 // ─── Modais simples ───────────────────────────────────────────────────────────
 function openFolderModal()  { folderInput.value=''; folderOverlay.classList.remove('hidden'); setTimeout(()=>folderInput.focus(),50); }
@@ -5862,6 +5956,7 @@ function loadSettings() {
     settings.maxParallelUploads = Math.max(1, Math.min(16, Number(settings.maxParallelUploads) || 3));
     settings.encryptionMode = settings.encryptionMode === 'custom' ? 'custom' : 'standard';
     settings.customKeyAvailable = settings.customKeyAvailable === true;
+    encryptionSelection = settings.encryptionMode;
     settings.accentColorMode = ['system','preset','custom'].includes(settings.accentColorMode) ? settings.accentColorMode : 'system';
     settings.accentColor = normalizeAccentColor(settings.accentColor);
     applyTheme(settings.theme); applyCardSize(settings.cardSize); syncAccentControls();
@@ -5877,7 +5972,7 @@ function loadSettings() {
     $('setting-hardware').checked=settings.hardwareAcceleration!==false;
     loadProxySettings();
     syncEncryptionSettings();
-    document.querySelectorAll('.theme-btn').forEach(b=>b.classList.toggle('active',b.dataset.themeValue===settings.theme));
+    document.querySelectorAll('.theme-btn[data-theme-value]').forEach(b=>b.classList.toggle('active',b.dataset.themeValue===settings.theme));
     document.querySelectorAll('.card-size-btn[data-size]').forEach(b=>b.classList.toggle('active',b.dataset.size===(settings.cardSize||'medium')));
     document.querySelectorAll('.video-quality-btn').forEach(b=>b.classList.toggle('active',b.dataset.videoQuality===(settings.videoPreviewQuality||'low')));
     syncMotionPreference();
@@ -5892,18 +5987,34 @@ function syncUploadSettings() {
     $('upload-thr-val').textContent = workers;
     $('setting-force-upload').classList.toggle('active', forced);
     $('setting-force-upload').setAttribute('aria-pressed', String(forced));
+    $('setting-force-upload').dataset.stateLabel = t(forced ? 'settingEnabled' : 'settingDisabled');
 }
 function syncEncryptionSettings() {
-    const customMode = settings.encryptionMode === 'custom';
+    const actualCustom = settings.encryptionMode === 'custom';
     const customAvailable = settings.customKeyAvailable === true;
-    const customPanel = $('setting-custom-key');
-    if (customPanel) customPanel.classList.toggle('hidden', !customMode);
-    $('btn-encryption-standard')?.classList.toggle('active', !customMode);
-    $('btn-encryption-custom')?.classList.toggle('active', customMode);
-    const exportButton = $('btn-export-custom-key');
-    if (exportButton) exportButton.disabled = !customAvailable;
-    const status = $('setting-custom-key-status');
-    if (status) status.textContent = customAvailable ? t('encryptionReady') : t('encryptionNotReady');
+    const selectedCustom = (encryptionSelection || settings.encryptionMode) === 'custom';
+    $('setting-custom-key').classList.toggle('hidden', !selectedCustom);
+    ['standard', 'custom'].forEach(mode => {
+        const selected = mode === (selectedCustom ? 'custom' : 'standard');
+        const button = $('btn-encryption-' + mode);
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-checked', String(selected));
+        $('encryption-' + mode + '-state').classList.toggle('hidden', mode !== settings.encryptionMode);
+        $('encryption-' + mode + '-state').textContent = t('encryptionInUse');
+    });
+    const missing = actualCustom && !customAvailable;
+    $('encryption-current-title').textContent = t(missing ? 'encryptionMissingKey' : actualCustom ? 'encryptionCustomActive' : 'encryptionStandardActive');
+    $('encryption-current-detail').textContent = t(missing ? 'encryptionMissingDetail' : actualCustom ? 'encryptionCustomDetail' : 'encryptionStandardDetail');
+    $('encryption-current-badge').textContent = t(missing ? 'encryptionNeedsSetup' : 'encryptionActive');
+    $('encryption-current-badge').classList.toggle('needs-setup', missing);
+    $('encryption-key-availability').textContent = t(customAvailable ? 'encryptionKeySaved' : 'encryptionKeyAbsent');
+    $('btn-export-custom-key').disabled = !customAvailable;
+    const hasPassphrase = $('setting-custom-passphrase').value.length > 0;
+    const alreadyActive = actualCustom && customAvailable && !hasPassphrase;
+    const activate = $('btn-configure-custom-key');
+    activate.disabled = alreadyActive || !$('setting-custom-key-confirmed').checked || (!customAvailable && !hasPassphrase);
+    activate.textContent = t(alreadyActive ? 'encryptionKeyIsActive' : hasPassphrase && customAvailable ? 'encryptionKeyApply' : customAvailable ? 'encryptionKeyUse' : 'encryptionActivate');
+    $('setting-custom-key-status').textContent = t(customAvailable ? 'encryptionReady' : 'encryptionNotReady');
 }
 function loadProxySettings() {
     const proxy = settings.proxy || {};
@@ -5982,37 +6093,78 @@ function saveSettings(showStatus = true) {
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);
 }
-function openSettings()  {
-    settingsPanel.classList.remove('hidden');
-    settingsOverlay.classList.remove('hidden');
-    settingsPanel.setAttribute('aria-hidden', 'false');
-    syncSidebarSelection();
-    animateWorkspaceContent(settingsPanel.querySelector('.settings-body'));
-    if (window.bridge && window.bridge.getPreviewCacheSize) window.bridge.getPreviewCacheSize();
-    requestAnimationFrame(()=>{
-        settingsPanel.classList.add('open');
-        scheduleNativeTitleBarDragRegion(0);
-    });
-    setTimeout(() => {
-        const target = $('language-select-button') || $('settings-close');
-        if (target) target.focus();
-    }, 40);
+function isSettingsOpen() { return settingsPanel.getAttribute('aria-hidden') === 'false'; }
+function syncSettingsPageLanguage() {
+    document.querySelectorAll('[data-settings-text]').forEach(node => node.textContent = t(node.dataset.settingsText));
+    document.querySelector('.settings-categories')?.setAttribute('aria-label', t('settingsCategories'));
+    $('settings-close')?.setAttribute('aria-label', t('back'));
+    if ($('settings-close')) $('settings-close').title = t('back');
+    syncEncryptionSettings();
+    syncUploadSettings();
 }
-function closeSettings() {
-    if ($('btn-logout')?.disabled) return;
-    if (settingsSaveTimer) {
-        clearTimeout(settingsSaveTimer);
-        settingsSaveTimer = 0;
-        saveSettings(false);
-    }
+function selectSettingsCategory(category, focus = false) {
+    const button = settingsPanel.querySelector('[data-settings-category="' + category + '"]');
+    if (!button) return;
+    activeSettingsCategory = category;
+    settingsPanel.querySelectorAll('[data-settings-category]').forEach(tab => {
+        const active = tab === button;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+    });
+    settingsPanel.querySelectorAll('[data-settings-pane]').forEach(pane => pane.classList.toggle('hidden', pane.dataset.settingsPane !== category));
+    settingsPanel.querySelector('.settings-body').scrollTop = 0;
+    closeLanguageMenu();
+    animateWorkspaceContent($('settings-pane-' + category));
+    button.scrollIntoView({ block:'nearest', inline:'nearest' });
+    if (focus) button.focus({ preventScroll:true });
+}
+function setupSettingsCategories() {
+    const tabs = [...settingsPanel.querySelectorAll('[data-settings-category]')];
+    tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => selectSettingsCategory(tab.dataset.settingsCategory));
+        tab.addEventListener('keydown', event => {
+            if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            selectSettingsCategory(tabs[next].dataset.settingsCategory, true);
+        });
+    });
+}
+function openSettings() {
+    if (isSettingsOpen()) return;
+    settingsPanel.classList.remove('hidden');
+    settingsPanel.classList.add('open');
+    settingsPanel.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('settings-view');
+    $('main-area').classList.add('hidden');
+    editorArea?.classList.add('hidden');
+    $('btn-sidebar-new').disabled = true;
+    $('btn-sidebar-new').setAttribute('aria-disabled', 'true');
+    closeSidebarNewMenu(); hideCtx();
+    selectSettingsCategory(activeSettingsCategory);
+    syncSidebarSelection(); updateNavButtons();
+    if (window.bridge?.getPreviewCacheSize) window.bridge.getPreviewCacheSize();
+    scheduleNativeTitleBarDragRegion(0);
+    requestAnimationFrame(() => settingsPanel.querySelector('[aria-selected="true"]')?.focus());
+}
+function closeSettings(restoreWorkspace = true) {
+    if (!isSettingsOpen() || $('btn-logout')?.disabled) return;
+    if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = 0; saveSettings(false); }
     settingsPanel.classList.remove('open');
+    settingsPanel.classList.add('hidden');
     settingsPanel.setAttribute('aria-hidden', 'true');
-    syncSidebarSelection();
-    setTimeout(()=>{
-        settingsPanel.classList.add('hidden');
-        settingsOverlay.classList.add('hidden');
-        scheduleNativeTitleBarDragRegion(0);
-    }, motionMs(260));
+    document.body.classList.remove('settings-view');
+    closeLanguageMenu();
+    const create = $('btn-sidebar-new');
+    create.disabled = activeLibraryView !== 'files';
+    create.setAttribute('aria-disabled', String(create.disabled));
+    if (restoreWorkspace) {
+        $('main-area').classList.toggle('hidden', activeWorkspaceTab !== 'files');
+        editorArea?.classList.toggle('hidden', activeWorkspaceTab === 'files');
+    }
+    syncSidebarSelection(); updateNavButtons();
+    scheduleNativeTitleBarDragRegion(0);
 }
 function applyTheme(t) {
     const theme = resolveTheme(t);

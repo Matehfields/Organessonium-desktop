@@ -238,7 +238,7 @@ internal static partial class Program
             RequireSync(!JsonSerializer.Serialize(store.Load(), JsonOptions.Web).Contains("tempPath", StringComparison.Ordinal),
                 "a configuração temporária continua publicada na interface");
             await bridge.SetSettingsAsync(defaults);
-            await view.ExecuteScriptAsync("loadSettings();openSettings()");
+            await view.ExecuteScriptAsync("loadSettings();openSettings();selectSettingsCategory('downloads')");
             await Check("!document.getElementById('setting-tmppath')&&document.getElementById('setting-dlpath').offsetWidth>0&&document.getElementById('setting-dlpath').value===" +
                 JsonSerializer.Serialize(defaults.DownloadPath), "a tela não removeu a pasta temporária ou não exibiu Downloads como padrão");
             view.WebMessageReceived += async (_, args) =>
