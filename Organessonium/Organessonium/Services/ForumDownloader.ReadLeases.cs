@@ -11,7 +11,7 @@ public sealed partial class ForumDownloader
         if (_storageReads == null) return await download().ConfigureAwait(false);
         var scope = "download:" + (checkpoint?.TransferId ?? Guid.NewGuid().ToString("N"));
         var lease = await _storageReads.Manager.BeginReadAsync(scope, entry.FileId,
-            SharedStorageManager.Payloads(MetadataService.CreateFileMetadata(entry)).Take(1).ToList(), token);
+            SharedStorageManager.Payloads(MetadataService.CreateFileMetadata(entry)).Take(1).ToList(), token, registerOnly: true);
         try
         {
             var result = await download().ConfigureAwait(false);

@@ -11,6 +11,102 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static Task<TestOutcome> DownloadColdStartWithoutJournalHiddenAsync() => OnHiddenDispatcherAsync(async () =>
+    {
+        using var h = new SharedHarness();
+        var bytes = Enumerable.Range(0, 65536).Select(index => (byte)(index % 251)).ToArray();
+        var entry = (await h.UploadAsync([await h.PrepareAsync("cold-download.bin", bytes)])).Single();
+        var journal = await h.Registry.GetStorageJournalIndexAsync(default);
+        var store = new SettingsStore(h.Directory.CreateSubdirectory("other-pc"));
+        store.Save(h.Settings);
+        store.ReplaceFolderIndexMappings(h.Store.LoadFolderIndexMappings().Values);
+        using var handler = new RejectDownloadHistoryHandler(h.Server, h.Settings.NamesChannelId, journal.ThreadId);
+        using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(handler, false));
+        var registry = new AppRegistry(api, store, h.Settings);
+        var host = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        CoreWebView2Controller? browser = null;
+        MainWindow? window = null;
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        try
+        {
+            var environment = await CoreWebView2Environment.CreateAsync(null, store.WebViewDataDirectory.FullName);
+            browser = await environment.CreateCoreWebView2ControllerAsync(host);
+            browser.IsVisible = true; browser.Bounds = new System.Drawing.Rectangle(0, 0, 1200, 800);
+            var web = h.Directory.CreateSubdirectory("cold-web");
+            var assembly = typeof(AppRegistry).Assembly;
+            foreach (var resource in assembly.GetManifestResourceNames().Where(name => name.StartsWith("web/", StringComparison.Ordinal)))
+            {
+                var path = Path.Combine(web.FullName, resource[4..].Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                using var input = assembly.GetManifestResourceStream(resource)!;
+                await using var output = File.Create(path); await input.CopyToAsync(output);
+            }
+            var view = browser.CoreWebView2;
+            view.SetVirtualHostNameToFolderMapping("organessonium.local", web.FullName, CoreWebView2HostResourceAccessKind.Allow);
+            var loaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.NavigationCompleted += (_, _) => loaded.TrySetResult();
+            view.Navigate("https://organessonium.local/index.html"); await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            using var control = new WebView2();
+            var bridge = new WebMessageBridge(control, script => view.ExecuteScriptAsync(script));
+            window = new MainWindow(store);
+            typeof(MainWindow).GetField("_bridge", flags)!.SetValue(window, bridge);
+            await using var controller = new AppController(window, store, bridge, _ => Task.CompletedTask,
+                downloadClientFactory: () => new HttpClient(handler, false));
+            SetFixtureSession(controller, api, h.Settings, registry);
+            typeof(AppController).GetField("_loadedApps", flags)!.SetValue(controller, new[] { entry });
+            await bridge.SetSettingsAsync(h.Settings);
+            await view.ExecuteScriptAsync("window.onBridgeReady();window.__coldOp='';window.__coldAdd=window._opsAdd;window._opsAdd=(id,type,name)=>{window.__coldAdd(id,type,name);if(type==='download')window.__coldOp=id}");
+            await bridge.CallAsync("_onAppsLoaded", (object)new[] { entry });
+            var destination = h.Directory.CreateSubdirectory("cold-output");
+            await (Task)typeof(AppController).GetMethod("StartDownloadAsync", flags)!.Invoke(controller,
+                [entry.RequestId, entry.Name, destination, null])!;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (await view.ExecuteScriptAsync("document.getElementById('op-'+window.__coldOp)?.dataset.opStatus==='done'") != "true")
+            {
+                RequireSync(await view.ExecuteScriptAsync("document.getElementById('op-'+window.__coldOp)?.dataset.opStatus==='error'") != "true",
+                    "o download sem cache falhou antes de concluir na interface");
+                await Task.Delay(50, timeout.Token);
+            }
+            RequireSync(handler.HistoryReads == 0 && handler.ReferenceWrites >= 2 &&
+                (await File.ReadAllBytesAsync(Path.Combine(destination.FullName, entry.Name))).SequenceEqual(bytes) &&
+                !Directory.Exists(Path.Combine(store.DataDirectory.FullName, "StorageJournalCache")),
+                "o download dependeu do histórico, perdeu a referência de leitura ou alterou os bytes");
+            RequireSync(!window.IsVisible && !IsWindowVisible(host), "o teste exibiu uma janela");
+            Console.WriteLine("COLD_DOWNLOAD historyReads=0 readRegistration=True bytesVerified=True uiDone=True");
+            return TestOutcome.Pass();
+        }
+        finally
+        {
+            if (window != null)
+            {
+                window.Closing -= typeof(MainWindow).GetMethod("OnClosing", flags, null,
+                    [typeof(object), typeof(System.ComponentModel.CancelEventArgs)], null)!.CreateDelegate<System.ComponentModel.CancelEventHandler>(window);
+                window.Close();
+            }
+            browser?.Close(); DestroyWindow(host);
+        }
+    });
+
+    private sealed class RejectDownloadHistoryHandler(HttpMessageHandler inner, string names, string journal) : HttpMessageHandler
+    {
+        private readonly HttpMessageInvoker _next = new(inner, false);
+        internal int HistoryReads, ReferenceWrites;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (request.Method == HttpMethod.Get && (path.EndsWith("/channels/" + names + "/messages", StringComparison.Ordinal) ||
+                path.EndsWith("/channels/" + journal + "/messages", StringComparison.Ordinal)))
+            {
+                Interlocked.Increment(ref HistoryReads);
+                throw new InvalidOperationException("O histórico está indisponível neste teste de download.");
+            }
+            if (request.Method == HttpMethod.Post && path.EndsWith("/channels/" + journal + "/messages", StringComparison.Ordinal))
+                Interlocked.Increment(ref ReferenceWrites);
+            return _next.SendAsync(request, token);
+        }
+        protected override void Dispose(bool disposing) { if (disposing) _next.Dispose(); base.Dispose(disposing); }
+    }
+
     private static Task<TestOutcome> DownloadOfflineRecoveryHiddenAsync() => OnHiddenDispatcherAsync(async () =>
     {
         using var h = new SharedHarness();

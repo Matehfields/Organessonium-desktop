@@ -14,7 +14,8 @@ internal sealed partial class SharedStorageManager
 {
     private static readonly ConcurrentDictionary<string, byte> ActiveReads = new(StringComparer.Ordinal);
 
-    internal async Task<StorageReadLease> BeginReadAsync(string scope, string fileId, List<StoragePayloadVersion> payloads, CancellationToken token)
+    internal async Task<StorageReadLease> BeginReadAsync(string scope, string fileId, List<StoragePayloadVersion> payloads,
+        CancellationToken token, bool registerOnly = false)
     {
         await using var priority = PrioritizeUploads();
         ActiveReads[scope] = 0;
@@ -24,12 +25,16 @@ internal sealed partial class SharedStorageManager
         try
         {
             journalWrite = await HoldJournalWriteAsync(token);
-            await RefreshJournalAsync(token);
+            if (!registerOnly) await RefreshJournalAsync(token);
             var continuing = _references.TryGetValue(scope, out var previous) && previous.State == "live" && previous.OwnerId == OwnerId && previous.FileId == fileId &&
                 previous.Payloads.Count == payloads.Count && previous.Payloads.SelectMany(payload => payload.Attachments)
                     .ToHashSet().SetEquals(payloads.SelectMany(payload => payload.Attachments));
             await PublishReferenceAsync(scope, fileId, payloads, "", "", token);
-            await RefreshJournalAsync(token);
+            if (!registerOnly) await RefreshJournalAsync(token);
+            else _references[scope] = new StorageReferenceRecord
+            {
+                Scope = scope, FileId = fileId, Payloads = payloads, OwnerId = OwnerId
+            };
             if (!continuing && (_deletionFences.Contains(fileId) || _cleanups.Values.Any(cleanup => !_appliedCleanups.Contains(cleanup.OperationId) &&
                 cleanup.Payloads.Any(candidate => payloads.Any(payload => payload.ThreadId == candidate.ThreadId &&
                     (payload.VersionId == candidate.VersionId || payload.Attachments.Intersect(candidate.Attachments).Any()))))))

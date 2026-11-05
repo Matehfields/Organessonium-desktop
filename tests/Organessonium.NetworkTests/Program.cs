@@ -42,6 +42,7 @@ internal static partial class Program
         ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),
         ("resumedTransfersAndNetworkHidden", ResumedTransfersAndNetworkHiddenAsync),
         ("downloadOfflineRecoveryHidden", DownloadOfflineRecoveryHiddenAsync),
+        ("downloadColdStartWithoutJournalHidden", DownloadColdStartWithoutJournalHiddenAsync),
         ("fileChecksumsTransferAndResume", FileChecksumsTransferAndResumeAsync),
         ("uploadChecksumOverlapsNetworkAndResumes", UploadChecksumOverlapsNetworkAndResumesAsync),
         ("uploadPreemptsBackgroundCleanup", UploadPreemptsBackgroundCleanupAsync),
