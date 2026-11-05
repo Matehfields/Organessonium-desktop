@@ -328,6 +328,9 @@ public sealed class EncryptionService
     }
 
     public byte[] DecryptBytes(ReadOnlySpan<byte> payload, EncryptedPayloadContext context)
+        => DecryptBytes(payload, context, null);
+
+    internal byte[] DecryptBytes(ReadOnlySpan<byte> payload, EncryptedPayloadContext context, byte[]? plaintextBuffer)
     {
         if (payload.Length < EnvelopeOverheadBytes || !LooksLikeEncryptedEnvelope(payload))
         {
@@ -370,8 +373,10 @@ public sealed class EncryptionService
                 throw new EncryptedPayloadFormatException("O salt do envelope não corresponde aos metadados do arquivo.");
             }
 
+            if (plaintextBuffer != null && plaintextBuffer.Length != ciphertextLength)
+                throw new EncryptedPayloadFormatException("O buffer de destino não corresponde ao tamanho autenticado do payload.");
             var fileKey = DeriveFileKey(context.FileId, context.Encryption, salt);
-            var plaintext = new byte[ciphertextLength];
+            var plaintext = plaintextBuffer ?? new byte[ciphertextLength];
             try
             {
                 using var aes = new AesGcm(fileKey, AuthenticationTagBytes);

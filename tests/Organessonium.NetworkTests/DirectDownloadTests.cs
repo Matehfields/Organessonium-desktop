@@ -381,6 +381,30 @@ internal static partial class Program
         return TestOutcome.Pass();
     }
 
+    private static async Task<TestOutcome> DirectDownloadReusesPayloadBuffersAsync()
+    {
+        const int mib = 1024 * 1024;
+        using var h = new DirectDownloadFixture(lengths: Enumerable.Repeat(mib, 32).ToArray());
+        h.Body = index => new MemoryStream(h.Wire[index], false);
+        var state = await h.Transfers.CreateDownloadAsync(h.Entry, h.Destination);
+        RamUploadBudget.Pool.TrimFreeBuffers();
+        GC.Collect();
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var file = await h.Run(state);
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        RequireSync(allocated < 80L * mib, "o download continua criando ciphertext e plaintext novos a cada chunk");
+        await using var input = file.OpenRead();
+        var buffer = new byte[mib];
+        foreach (var expected in h.Plain)
+        {
+            await input.ReadExactlyAsync(buffer);
+            RequireSync(buffer.SequenceEqual(expected), "a reutilização dos buffers alterou o conteúdo autenticado");
+        }
+        RequireSync(input.Position == input.Length, "o download reutilizado contém bytes extras");
+        Console.WriteLine($"DOWNLOAD_ALLOCATIONS payloadMiB=32 allocatedMiB={allocated / mib}");
+        return TestOutcome.Pass();
+    }
+
     private static async Task<TestOutcome> DirectDownloadSparseRegionsAsync()
     {
         var root = Directory.CreateTempSubdirectory("organessonium-sparse-download-");

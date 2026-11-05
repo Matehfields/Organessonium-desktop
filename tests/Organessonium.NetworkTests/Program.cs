@@ -23,6 +23,7 @@ internal static partial class Program
         ("embeddedMediaRuntime", EmbeddedMediaRuntimeAsync),
         ("directDownloadOutOfOrder", DirectDownloadOutOfOrderAsync),
         ("directDownloadSparseRegions", DirectDownloadSparseRegionsAsync),
+        ("directDownloadReusesPayloadBuffers", DirectDownloadReusesPayloadBuffersAsync),
         ("directDownloadCheckpointScheduling", DirectDownloadCheckpointSchedulingAsync),
         ("directDownloadIncrementalDiscovery", DirectDownloadIncrementalDiscoveryAsync),
         ("directDownloadLegacyLayouts", DirectDownloadLegacyLayoutsAsync),

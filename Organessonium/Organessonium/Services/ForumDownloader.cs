@@ -1042,9 +1042,11 @@ public sealed partial class ForumDownloader
                 {
                     if (encryption != null && (part.Size <= 0 || part.Size > 64L * 1024 * 1024))
                         throw new InvalidDataException("O chunk criptografado excede o limite seguro de memória ou possui tamanho inválido.");
-                    using var reservation = encryption == null ? null : await RamUploadBudget.ReserveExternalBytesAsync(
-                        checked(part.Size * 2 + DownloadBufferSize), checked(part.Size * 2 + DownloadBufferSize), cancellationToken);
-                    using var encryptedMemory = encryption == null ? null : new MemoryStream(checked((int)part.Size));
+                    using var reservation = encryption == null ? null : await RamUploadBudget.ReserveBytesAsync(
+                        checked(part.Size * 2 + DownloadBufferSize), cancellationToken);
+                    using var buffers = encryption == null ? null : RamUploadBudget.Pool.Rent(
+                        checked((int)logicalLength), checked((int)part.Size), static () => { }, exactSize: true);
+                    using var encryptedMemory = buffers?.OpenCiphertextWriteStream();
                     try
                     {
                         using var plainHash = encryption == null ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
@@ -1103,7 +1105,7 @@ public sealed partial class ForumDownloader
                         if (encryption != null)
                         {
                             var plaintext = _encryption.DecryptBytes(encryptedMemory!.GetBuffer().AsSpan(0, checked((int)countedBytes)),
-                                encryption.WithChunkIndex(part.Index));
+                                encryption.WithChunkIndex(part.Index), buffers!.PlaintextArray);
                             try
                             {
                                 if (encryption.Checksums == null) checksums?.VerifyChunk(part.Index, plaintext);

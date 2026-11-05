@@ -79,7 +79,10 @@ internal static class RamUploadBudget
                     else _reserved += bytes;
                     return new Reservation(bytes, managedBytes, external);
                 }
-                Pool.TrimFreeBuffers();
+                // A completed payload returns its buffers just before releasing the reservation.
+                // Keep them reusable while payloads drain instead of turning the pool into GC debt.
+                if (_reserved == 0 && _externalNativeReserved == 0 && _externalManagedReserved == 0)
+                    Pool.TrimFreeBuffers();
                 if (_reserved == 0 && _externalNativeReserved == 0 && _externalManagedReserved == 0)
                 {
                     if (emptySince == 0) emptySince = Environment.TickCount64;

@@ -322,6 +322,16 @@ internal sealed class UploadChunkBufferLease : IDisposable
 
     public Memory<byte> Ciphertext => (_ciphertext ?? throw new ObjectDisposedException(nameof(UploadChunkBufferLease))).AsMemory();
 
+    internal byte[] PlaintextArray => _plaintext ?? throw new ObjectDisposedException(nameof(UploadChunkBufferLease));
+
+    internal MemoryStream OpenCiphertextWriteStream()
+    {
+        var buffer = _ciphertext ?? throw new ObjectDisposedException(nameof(UploadChunkBufferLease));
+        var stream = new MemoryStream(buffer, 0, buffer.Length, writable: true, publiclyVisible: true);
+        stream.SetLength(0);
+        return stream;
+    }
+
     public Stream OpenCiphertextStream(int length)
     {
         var buffer = _ciphertext ?? throw new ObjectDisposedException(nameof(UploadChunkBufferLease));
