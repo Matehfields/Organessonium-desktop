@@ -17,7 +17,7 @@ public partial class App : Application
         {
             AppLogger.Error("App.DispatcherUnhandledException", args.Exception);
             args.Handled = true;
-            if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync();
+            if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync(args.Exception);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
@@ -35,7 +35,7 @@ public partial class App : Application
             AppLogger.Error("App.UnobservedTaskException", args.Exception);
             args.SetObserved();
             if (!Dispatcher.HasShutdownStarted)
-                Dispatcher.BeginInvoke(new Action(() => { if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync(); }));
+                Dispatcher.BeginInvoke(new Action(() => { if (MainWindow is MainWindow window) _ = window.NotifyUnexpectedErrorAsync(args.Exception); }));
         };
 
         if (e.Args.Any(arg => arg.Equals("--debug-names", StringComparison.OrdinalIgnoreCase)))

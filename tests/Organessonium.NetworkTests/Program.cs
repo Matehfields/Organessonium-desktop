@@ -39,6 +39,7 @@ internal static partial class Program
         ("serialFreshnessAndMetadataCache", SerialFreshnessAndMetadataCacheAsync),
         ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),
         ("resumedTransfersAndNetworkHidden", ResumedTransfersAndNetworkHiddenAsync),
+        ("downloadOfflineRecoveryHidden", DownloadOfflineRecoveryHiddenAsync),
         ("fileChecksumsTransferAndResume", FileChecksumsTransferAndResumeAsync),
         ("uploadChecksumOverlapsNetworkAndResumes", UploadChecksumOverlapsNetworkAndResumesAsync),
         ("uploadPreemptsBackgroundCleanup", UploadPreemptsBackgroundCleanupAsync),

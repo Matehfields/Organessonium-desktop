@@ -1105,6 +1105,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         Func<TimeSpan, Task>? onRateLimitWait,
         CancellationToken cancellationToken)
     {
+        NetworkRetryPolicy.ReportNetworkWait();
         var delayMs = Math.Min(8000, 500 * Math.Pow(2, Math.Min(attempt, 4)));
         return WaitWithProgressAsync(TimeSpan.FromMilliseconds(delayMs), onRateLimitWait, cancellationToken);
     }

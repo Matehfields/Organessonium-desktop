@@ -84,6 +84,9 @@ public sealed partial class AppController
         Func<CancellationToken, Task> attempt)
     {
         using var pause = RegisterTransferPause(op, lifetime);
+        using var networkWait = NetworkRetryPolicy.TransferScope(lifetime,
+            () => { if (!pause.Requested && !lifetime.IsCancellationRequested) _ = OpsUpdateAsync(op, "active", "Aguardando rede..."); });
+        var networkAttempt = 0;
         try
         {
             while (true)
@@ -98,6 +101,12 @@ public sealed partial class AppController
                     await pause.ResumeAsync();
                     await _bridge.CallAsync("_opsTransferResumed", op, -1);
                     await OpsUpdateAsync(op, "active", "Retomando...");
+                }
+                catch (Exception error) when (!lifetime.IsCancellationRequested && !pause.Requested && NetworkRetryPolicy.IsTransient(error))
+                {
+                    await OpsUpdateAsync(op, "active", "Aguardando rede...");
+                    try { await NetworkRetryPolicy.DelayAsync(++networkAttempt, pause.Token); }
+                    catch (OperationCanceledException) when (!lifetime.IsCancellationRequested && pause.Requested) { }
                 }
             }
         }

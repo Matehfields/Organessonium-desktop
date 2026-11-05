@@ -126,6 +126,7 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly VideoPlaybackTracker _videoProgress;
     public PreviewResourceRegistry PreviewResources => _previewResources;
     private readonly Action<bool> _onSplashChanged;
+    private readonly Func<HttpClient>? _downloadClientFactory;
     private IReadOnlyList<AppEntry> _loadedApps = [];
     private IReadOnlyList<AppEntry> _favoriteApps = [];
     private IReadOnlyList<AppEntry> _deviceApps = [];
@@ -143,7 +144,8 @@ public sealed partial class AppController : IAsyncDisposable
         WebMessageBridge bridge,
         Func<DiscordSession, Task> onConnected,
         Action<string>? onThemeChanged = null,
-        Action<bool>? onSplashChanged = null)
+        Action<bool>? onSplashChanged = null,
+        Func<HttpClient>? downloadClientFactory = null)
     {
         _owner = owner;
         _store = store;
@@ -151,6 +153,7 @@ public sealed partial class AppController : IAsyncDisposable
         _onConnected = onConnected;
         _onThemeChanged = onThemeChanged ?? (_ => { });
         _onSplashChanged = onSplashChanged ?? (_ => { });
+        _downloadClientFactory = downloadClientFactory;
         _transferManager = new TransferManager(new TransferStateRepository(store.TransfersDirectory));
         _encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
         var playbackStore = new VideoPlaybackProgressStore(store.DatabasePath);
@@ -3382,6 +3385,8 @@ public sealed partial class AppController : IAsyncDisposable
         await OpsAddAsync(opId, "download", name);
         _ = RunAsync(async () =>
         {
+            using var networkStatus = NetworkRetryPolicy.TransferScope(cancellationToken,
+                () => { if (!cancellationToken.IsCancellationRequested) _ = OpsUpdateAsync(opId, "active", "Aguardando rede..."); });
             TransferState? transferState = null;
             long totalDownloadBytes = 0;
             long totalReceivedBytes = 0;
@@ -4640,7 +4645,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private ForumDownloader Downloader()
     {
-        return new ForumDownloader(RequireApi(), _store.Load(), _encryption, storageReads: new StorageReadContext(Registry().SharedStorage));
+        return new ForumDownloader(RequireApi(), _store.Load(), _encryption, _downloadClientFactory, new StorageReadContext(Registry().SharedStorage));
     }
 
     private DiscordApiClient RequireApi()
@@ -4662,7 +4667,7 @@ public sealed partial class AppController : IAsyncDisposable
         catch (Exception ex)
         {
             AppLogger.Error("RunAsync", ex);
-            if (!_loggingOut) await ErrorAsync(ex.Message);
+            if (!_loggingOut && !NetworkRetryPolicy.IsTransient(ex)) await ErrorAsync(ex.Message);
         }
         finally { if (accountWork) _accountWork.TryRemove(id, out _); completion.TrySetResult(); }
     }

@@ -62,8 +62,9 @@ public partial class MainWindow : Window
 
     public MainWindow() : this(null) { }
 
-    internal async Task NotifyUnexpectedErrorAsync()
+    internal async Task NotifyUnexpectedErrorAsync(Exception error)
     {
+        if (NetworkRetryPolicy.IsTransient(error)) return;
         if (_shutdownInProgress || _bridge == null) return;
         try
         {

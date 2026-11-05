@@ -1053,7 +1053,7 @@ public sealed partial class ForumDownloader
                         {
                             using var request = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
                             request.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
-                            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                            using var response = await NetworkRetryPolicy.SendDownloadAsync(http, request, cancellationToken);
                             response.EnsureSuccessStatusCode();
                             if (part.Size > 0 && response.Content.Headers.ContentLength == 0)
                             {
@@ -1067,7 +1067,7 @@ public sealed partial class ForumDownloader
                                 while (true)
                                 {
                                     await VideoNetworkPriority.YieldAsync(cancellationToken);
-                                    var read = await inStream.ReadAsync(buffer, cancellationToken);
+                                    var read = await NetworkRetryPolicy.ReadDownloadAsync(inStream, buffer, cancellationToken);
                                     if (read <= 0)
                                     {
                                         break;
@@ -1144,7 +1144,7 @@ public sealed partial class ForumDownloader
                         : 250 * attempt * attempt;
                     if (NetworkRetryPolicy.IsTransient(ex))
                     {
-                        onProgress($"Conexão indisponível; aguardando retomada ({part.Name})...");
+                        onProgress("Aguardando rede...");
                         networkRetryCount++;
                         attempt--;
                         await NetworkRetryPolicy.DelayAsync(networkRetryCount, cancellationToken);
@@ -1204,7 +1204,7 @@ public sealed partial class ForumDownloader
         while (true)
         {
             await VideoNetworkPriority.YieldAsync(cancellationToken);
-            var read = await input.ReadAsync(buffer, cancellationToken);
+            var read = await NetworkRetryPolicy.ReadDownloadAsync(input, buffer, cancellationToken);
             if (read <= 0)
             {
                 return downloaded;
