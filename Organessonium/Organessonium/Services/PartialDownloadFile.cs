@@ -45,6 +45,7 @@ internal sealed class PartialDownloadFile : IDisposable
                 throw new IOException("O arquivo parcial não pode ser um link.");
             _handle = File.OpenHandle(path, resume ? FileMode.OpenOrCreate : FileMode.CreateNew,
                 FileAccess.ReadWrite, FileShare.Read, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            TryEnableSparseFile();
         }
         catch { Active.TryRemove(_destination, out _); throw; }
     }
@@ -53,6 +54,31 @@ internal sealed class PartialDownloadFile : IDisposable
     internal long Length => RandomAccess.GetLength(_handle!);
     internal void Flush() => RandomAccess.FlushToDisk(_handle!);
     internal void CloseWriter() { _handle?.Dispose(); _handle = null; }
+
+    private void TryEnableSparseFile()
+    {
+        // Out-of-order writes must not physically zero the regions still awaiting the network.
+        // The low event bit keeps this control request out of the .NET I/O completion port.
+        using var completed = new EventWaitHandle(false, EventResetMode.ManualReset);
+        var overlapped = new NativeOverlapped
+        {
+            EventHandle = new IntPtr(completed.SafeWaitHandle.DangerousGetHandle().ToInt64() | 1)
+        };
+        if (!DeviceIoControl(_handle!, 0x000900C4 /* FSCTL_SET_SPARSE */, IntPtr.Zero, 0,
+                IntPtr.Zero, 0, out _, ref overlapped) && Marshal.GetLastWin32Error() == 997 /* ERROR_IO_PENDING */)
+            _ = GetOverlappedResult(_handle!, ref overlapped, out _, true);
+        // Filesystems without sparse support retain the previous allocation behavior.
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControl(SafeFileHandle file, uint code, IntPtr input, uint inputSize,
+        IntPtr output, uint outputSize, out uint returned, ref NativeOverlapped overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetOverlappedResult(SafeFileHandle file, ref NativeOverlapped overlapped,
+        out uint transferred, [MarshalAs(UnmanagedType.Bool)] bool wait);
 
     internal async Task<bool> MatchesAsync(DownloadRegion region, string? digest, CancellationToken token)
     {

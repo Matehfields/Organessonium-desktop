@@ -381,6 +381,38 @@ internal static partial class Program
         return TestOutcome.Pass();
     }
 
+    private static async Task<TestOutcome> DirectDownloadSparseRegionsAsync()
+    {
+        var root = Directory.CreateTempSubdirectory("organessonium-sparse-download-");
+        try
+        {
+            const int mib = 1024 * 1024;
+            var layout = new DownloadFileLayout(new[] { (0, 512L * mib), (1, 8L * mib) }, false, null);
+            var partial = Path.Combine(root.FullName, "content.part");
+            var payload = Enumerable.Repeat((byte)173, 8 * mib).ToArray();
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            using (var file = new PartialDownloadFile(partial, Path.Combine(root.FullName, "content.bin"), layout, false))
+            {
+                await using (var region = file.OpenRegion(1)) await region.WriteAsync(payload);
+                file.Flush();
+                var allocated = PartialDownloadFile.AllocatedBytes(partial);
+                RequireSync(file.Length == 520L * mib, "a escrita fora de ordem alterou o tamanho do parcial");
+                if (new DriveInfo(Path.GetPathRoot(root.FullName)!).DriveFormat is "NTFS" or "ReFS")
+                    RequireSync(allocated <= 9L * mib, "o download gravou regiões vazias além do payload recebido");
+                await using var input = new FileStream(partial, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                var probe = new byte[4096];
+                input.Position = 256L * mib;
+                await input.ReadExactlyAsync(probe);
+                RequireSync(probe.All(value => value == 0), "uma região pendente expôs dados diferentes de zero");
+                RequireSync(await file.MatchesAsync(layout.Regions[1], Convert.ToHexStringLower(SHA256.HashData(payload)), default),
+                    "a alocação esparsa alterou o payload recebido");
+                Console.WriteLine($"SPARSE_DOWNLOAD payloadMiB=8 logicalMiB=520 allocatedBytes={allocated} elapsedMs={watch.ElapsedMilliseconds}");
+            }
+        }
+        finally { root.Delete(true); }
+        return TestOutcome.Pass();
+    }
+
     private static Task<TestOutcome> DirectDownloadLargeOffsetsAsync()
     {
         var before = GC.GetAllocatedBytesForCurrentThread();
