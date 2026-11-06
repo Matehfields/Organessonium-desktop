@@ -15,6 +15,8 @@ internal sealed partial class SharedStorageManager
         ResumeDeferredMaintenance();
     }
 
+    internal void ResumePendingCleanup() => ResumeDeferredMaintenance();
+
     private bool NotifyCleanup(CleanupUpdate update)
     {
         Func<CleanupUpdate, bool>? observers;

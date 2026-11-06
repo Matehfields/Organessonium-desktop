@@ -4,6 +4,7 @@
 let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
 let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
 let currentFolderIds = ['root'];
+let libraryReconciliationPending = false;
 let activeLibraryView = 'files', specialItems = [], deviceItems = [];
 let favoritesLoaded = false, devicesLoaded = false;
 let serverReadDepth = 0;
@@ -682,7 +683,6 @@ function applyI18n() {
     setText('setting-encryption-standard-help', 'encryptionStandardHelp');
     setText('setting-custom-passphrase-label', 'encryptionPassphrase');
     setText('setting-custom-key-warning', 'encryptionWarning');
-    setText('setting-custom-key-confirmed-text', 'encryptionConfirm');
     setText('btn-configure-custom-key', 'encryptionActivate');
     setText('btn-export-custom-key', 'encryptionExport');
     setText('btn-import-custom-key', 'encryptionImport');
@@ -1072,6 +1072,17 @@ window._onAppsLoaded = apps => {
 window._onTrashEmptying = active => {
     trashEmptying = active === true;
     $('btn-empty-trash').disabled = trashEmptying;
+};
+window._onFolderIndexReconciled = (folderId, entries) => {
+    if (!Array.isArray(entries)) return;
+    const id = String(folderId || 'root').toLowerCase();
+    allApps = allApps.filter(entry => String(entry.parentFolderId || 'root').toLowerCase() !== id).concat(entries);
+    syncOpenMarkdownApps();
+    if (activeLibraryView !== 'files' || (!searchQuery && !currentFolderIds.some(folder => String(folder).toLowerCase() === id))) return;
+    if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
+    render();
+    refreshSidebarSummary();
+    scheduleVisibleThumbnails();
 };
 window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
@@ -3150,18 +3161,15 @@ document.addEventListener('DOMContentLoaded', () => {
         syncEncryptionSettings();
     });
     $('btn-configure-custom-key')?.addEventListener('click', () => {
-        const confirmation = $('setting-custom-key-confirmed');
-        if (!confirmation?.checked) {
-            $('setting-custom-key-status').textContent = t('encryptionConfirm');
-            return;
-        }
-        const passphrase = $('setting-custom-passphrase').value;
-        if (!passphrase && settings.customKeyAvailable) {
-            window.bridge.setEncryptionMode('custom');
-            return;
-        }
-        window.bridge.configureCustomEncryption(passphrase, true);
-        $('setting-custom-passphrase').value = '';
+        const passphrase = settings.customKeyAvailable ? '' : $('setting-custom-passphrase').value;
+        askConfirm(t('encryptionActivate'), t('encryptionWarning') + '\n\n' + t('encryptionConfirm'), () => {
+            if (settings.customKeyAvailable) window.bridge.setEncryptionMode('custom');
+            else {
+                window.bridge.configureCustomEncryption(passphrase, true);
+                $('setting-custom-passphrase').value = '';
+                syncEncryptionSettings();
+            }
+        }, 'encryptionActivate');
     });
     $('btn-export-custom-key')?.addEventListener('click', () => {
         askConfirm(t('encryptionExportTitle'), t('encryptionExportWarning'), () => window.bridge.exportCustomEncryptionKey(), 'encryptionProceed');
@@ -3170,7 +3178,6 @@ document.addEventListener('DOMContentLoaded', () => {
         askConfirm(t('encryptionImportTitle'), t('encryptionImportWarning'), () => window.bridge.importCustomEncryptionKey(), 'encryptionProceed');
     });
     $('setting-custom-passphrase').addEventListener('input', syncEncryptionSettings);
-    $('setting-custom-key-confirmed').addEventListener('change', syncEncryptionSettings);
     setupSettingsCategories();
     $('setting-proxy-mode').addEventListener('change', e => {
         settings.proxy.proxyMode = e.target.value;
@@ -3761,6 +3768,7 @@ function setupWorkspaceTabs() {
 }
 
 function activateWorkspaceTab(id) {
+    if (id === 'files') flushLibraryReconciliation();
     if (isSettingsOpen()) { closeSettings(false); if (isSettingsOpen()) return; }
     if (!workspaceTabs || !editorArea) { $('main-area').classList.remove('hidden'); return; }
     const previousTab = activeWorkspaceTab;
@@ -6009,10 +6017,12 @@ function syncEncryptionSettings() {
     $('encryption-current-badge').classList.toggle('needs-setup', missing);
     $('encryption-key-availability').textContent = t(customAvailable ? 'encryptionKeySaved' : 'encryptionKeyAbsent');
     $('btn-export-custom-key').disabled = !customAvailable;
+    $('setting-custom-passphrase-row').classList.toggle('hidden', customAvailable);
+    if (customAvailable) $('setting-custom-passphrase').value = '';
     const hasPassphrase = $('setting-custom-passphrase').value.length > 0;
-    const alreadyActive = actualCustom && customAvailable && !hasPassphrase;
+    const alreadyActive = actualCustom && customAvailable;
     const activate = $('btn-configure-custom-key');
-    activate.disabled = alreadyActive || !$('setting-custom-key-confirmed').checked || (!customAvailable && !hasPassphrase);
+    activate.disabled = alreadyActive || (!customAvailable && !hasPassphrase);
     activate.textContent = t(alreadyActive ? 'encryptionKeyIsActive' : hasPassphrase && customAvailable ? 'encryptionKeyApply' : customAvailable ? 'encryptionKeyUse' : 'encryptionActivate');
     $('setting-custom-key-status').textContent = t(customAvailable ? 'encryptionReady' : 'encryptionNotReady');
 }
@@ -6093,6 +6103,11 @@ function saveSettings(showStatus = true) {
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);
 }
+function flushLibraryReconciliation() {
+    if (!libraryReconciliationPending) return;
+    libraryReconciliationPending = false;
+    render(); refreshSidebarSummary(); scheduleVisibleThumbnails();
+}
 function isSettingsOpen() { return settingsPanel.getAttribute('aria-hidden') === 'false'; }
 function syncSettingsPageLanguage() {
     document.querySelectorAll('[data-settings-text]').forEach(node => node.textContent = t(node.dataset.settingsText));
@@ -6162,6 +6177,7 @@ function closeSettings(restoreWorkspace = true) {
     if (restoreWorkspace) {
         $('main-area').classList.toggle('hidden', activeWorkspaceTab !== 'files');
         editorArea?.classList.toggle('hidden', activeWorkspaceTab === 'files');
+        if (activeWorkspaceTab === 'files') flushLibraryReconciliation();
     }
     syncSidebarSelection(); updateNavButtons();
     scheduleNativeTitleBarDragRegion(0);

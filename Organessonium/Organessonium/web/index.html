@@ -330,15 +330,11 @@
     <small data-settings-text="encryptionNewUploads">A escolha vale para os próximos uploads. Os arquivos existentes mantêm sua proteção.</small>
 </div>
 <div id="setting-custom-key" class="encryption-custom hidden"><div class="encryption-key-heading"><h4 data-settings-text="encryptionKeySetup">Sua chave personalizada</h4><span id="encryption-key-availability" class="encryption-key-availability"></span></div>
-                <div class="setting-row col">
+                <div id="setting-custom-passphrase-row" class="setting-row col">
                     <label id="setting-custom-passphrase-label" for="setting-custom-passphrase">Senha da chave personalizada</label>
                     <input id="setting-custom-passphrase" type="password" class="setting-input" autocomplete="new-password"/>
                 </div>
                 <p id="setting-custom-key-warning" class="encryption-warning">Arquivos protegidos com uma chave personalizada só poderão ser recuperados com essa chave. Guarde o arquivo de recuperação em local seguro.</p>
-                <label class="modal-check encryption-confirmation">
-                    <input id="setting-custom-key-confirmed" type="checkbox"/>
-                    <span id="setting-custom-key-confirmed-text">Entendo que perder a chave impede a recuperação dos arquivos.</span>
-                </label>
                 <div class="encryption-actions">
                     <button id="btn-configure-custom-key" class="btn-primary" type="button">Ativar chave personalizada</button>
                     <button id="btn-export-custom-key" class="btn-secondary" type="button">Exportar chave de recuperação</button>

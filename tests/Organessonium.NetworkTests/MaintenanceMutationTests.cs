@@ -106,6 +106,27 @@ internal static partial class Program
             RequireSync(probe.RootReads == 1 && h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 1,
                 $"a manutenção repetiu a prova remota por arquivo ou não concluiu o lote: leituras={probe.RootReads}");
         }
+        using (var h = new SharedHarness())
+        {
+            var entries = await h.UploadAsync(await Task.WhenAll(Enumerable.Range(0, 2)
+                .Select(index => h.PrepareAsync("retry-" + index + ".bin", [(byte)index]))));
+            await h.Storage.BeginCleanupAsync(entries[0], default);
+            await h.Registry.DeleteEntryAsync(entries[0], synchronizeSerials: false);
+            using var probe = new MaintenanceRootProbe(h.Server, blockFirst: false) { RejectRootProof = true };
+            using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(probe, false));
+            var registry = new AppRegistry(api, h.Store, h.Settings);
+            using var observer = registry.SharedStorage.ObserveCleanup(_ => true, api.PayloadLifetime);
+            try { await registry.SharedStorage.ReconcileAsync(); throw new InvalidOperationException("a falha de conferência não foi aplicada"); }
+            catch (DiscordApiException error) when (error.StatusCode == HttpStatusCode.Forbidden) { }
+            RequireSync(h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 2,
+                "a falha de conferência removeu conteúdo sem prova");
+            probe.RejectRootProof = false;
+            registry.SharedStorage.ResumePendingCleanup();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) != 1) await Task.Delay(25, timeout.Token);
+            RequireSync(h.Store.LoadCachedEntriesForFolder("root").Single(entry => entry.Type == "file").FileId == entries[1].FileId,
+                "a retomada periódica removeu o arquivo preservado");
+        }
         return TestOutcome.Pass();
     }
 
@@ -113,6 +134,7 @@ internal static partial class Program
     {
         private readonly HttpMessageInvoker _forward = new(inner, false);
         internal int RootReads;
+        internal bool RejectRootProof;
         internal System.Collections.Concurrent.ConcurrentDictionary<string, int> ArchiveChanges { get; } = new(StringComparer.Ordinal);
         internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -121,6 +143,8 @@ internal static partial class Program
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             var segments = request.RequestUri!.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (RejectRootProof && request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath.EndsWith("/channels/root-thread/messages", StringComparison.Ordinal))
+                return new(HttpStatusCode.Forbidden) { Content = new StringContent("{}") };
             if (request.Method == HttpMethod.Patch && segments.Length >= 2 && segments[^2] == "channels")
                 ArchiveChanges.AddOrUpdate(segments[^1], 1, (_, count) => count + 1);
             if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/channels/root-thread/messages", StringComparison.Ordinal) &&

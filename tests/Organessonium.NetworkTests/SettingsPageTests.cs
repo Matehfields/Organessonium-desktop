@@ -91,9 +91,15 @@ internal static partial class Program
             await view.ExecuteScriptAsync("$('sidebar-settings').click();$('settings-tab-protection').click();$('btn-encryption-custom').click()");
             await Check("settings.encryptionMode==='standard'&&settings.theme==='light'&&$('btn-encryption-custom').getAttribute('aria-checked')==='true'&&!$('encryption-standard-state').classList.contains('hidden')&&$('encryption-current-title').textContent.includes('padrão')&&$('btn-configure-custom-key').disabled&&$('setting-custom-key').offsetHeight>0", "selecionar a configuração da chave mudou o tema ou mostrou uma ativação inexistente");
             await Capture("protection-light-draft");
-            await view.ExecuteScriptAsync("$('setting-custom-passphrase').value='settings-fixture-passphrase';$('setting-custom-passphrase').dispatchEvent(new Event('input'));$('setting-custom-key-confirmed').click();$('btn-configure-custom-key').click()");
+            await Check("!$('setting-custom-key-confirmed')&&$('setting-custom-passphrase').offsetWidth>0", "a confirmação continuou na página ou a criação da chave perdeu o campo");
+            await view.ExecuteScriptAsync("$('setting-custom-passphrase').value='settings-fixture-passphrase';$('setting-custom-passphrase').dispatchEvent(new Event('input'));$('btn-configure-custom-key').click()");
+            await Check("!$('confirm-overlay').classList.contains('hidden')&&settings.encryptionMode==='standard'", "a chave foi ativada antes da confirmação");
+            await view.ExecuteScriptAsync("$('confirm-cancel').click()");
+            RequireSync(store.Load().EncryptionMode == "standard" && !store.Load().CustomKeyAvailable, "cancelar o diálogo criou ou ativou a chave");
+            await view.ExecuteScriptAsync("$('btn-configure-custom-key').click();$('confirm-ok').click()");
             await WaitFor("settings.encryptionMode==='custom'&&settings.customKeyAvailable===true&&$('encryption-current-title').textContent.includes('personalizada')", "a ativação real da chave não apareceu na interface");
             RequireSync(store.Load().EncryptionMode == "custom" && store.Load().CustomKeyAvailable && store.Load().Theme == "light", "a ativação da chave alterou o tema ou não persistiu");
+            await Check("$('setting-custom-passphrase').offsetWidth===0&&!$('setting-custom-key-confirmed')", "a chave salva ainda exige senha ou checkbox na página");
             await Check("$('encryption-current-badge').textContent==='Ativa'&&!$('encryption-custom-state').classList.contains('hidden')&&$('btn-configure-custom-key').disabled&&!$('btn-export-custom-key').disabled&&$('setting-custom-passphrase').value==='';", "o estado ativo da proteção não ficou explícito");
             foreach (var action in new[] { "export", "import" })
             {
@@ -106,6 +112,12 @@ internal static partial class Program
             await view.ExecuteScriptAsync("$('btn-encryption-standard').click()");
             await WaitFor("settings.encryptionMode==='standard'&&!$('encryption-standard-state').classList.contains('hidden')", "o retorno ao modo Padrão não atualizou a tela");
             RequireSync(store.Load().EncryptionMode == "standard" && store.Load().CustomKeyAvailable, "o modo Padrão removeu a chave salva");
+            await view.ExecuteScriptAsync("$('btn-encryption-custom').click();$('btn-configure-custom-key').click();$('confirm-cancel').click()");
+            RequireSync(store.Load().EncryptionMode == "standard", "cancelar a ativação da chave salva alterou a proteção");
+            await view.ExecuteScriptAsync("$('btn-configure-custom-key').click();$('confirm-ok').click()");
+            await WaitFor("settings.encryptionMode==='custom'&&$('setting-custom-passphrase').offsetWidth===0", "a chave salva não foi ativada sem repetir a senha");
+            await view.ExecuteScriptAsync("$('btn-encryption-standard').click()");
+            await WaitFor("settings.encryptionMode==='standard'", "o modo de teste não voltou ao Padrão");
 
             foreach (var width in new[] { 1920, 1366, 800 })
             {

@@ -58,7 +58,9 @@ internal sealed partial class SharedStorageManager
             .Select(payload => payload.ThreadId), token);
         // Keep the owner gate for one fresh reference proof shared by this batch.
         // CleanAsync still requires a durable release (or verifies that metadata was removed).
-        var live = await ReadCleanupReferencesAsync(token);
+        StoragePayloadVersion[] live;
+        using (Diagnostics.DevelopmentDiagnostics.Begin("maintenance", "cleanup.reference-proof"))
+            live = await ReadCleanupReferencesAsync(token);
         var journal = requests.Any(request => request.Payloads.Any(payload => payload.Storage?.Shared == true))
             ? await ReadJournalMessagesAsync(null, token) : null;
         var pools = new Dictionary<string, IReadOnlyList<DiscordMessageDto>>(StringComparer.Ordinal);
@@ -75,6 +77,7 @@ internal sealed partial class SharedStorageManager
             try { cleaned = await CleanAsync(request, token, live, journal, ReadPool); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception error) when (continueOnFailure) { AppLogger.Error("SharedStorage.BatchCleanup", error); }
+            Diagnostics.DevelopmentDiagnostics.Current?.Record("cleanup.result", "maintenance", new { cleaned });
             await onCompleted(request, cleaned);
         }
     }
@@ -106,6 +109,7 @@ internal sealed partial class SharedStorageManager
                 foreach (var applied in _cleanups.Values.Where(request => _appliedCleanups.Contains(request.OperationId)))
                     NotifyCleanup(new(Completed: applied.OperationId));
                 var pending = _cleanups.Values.Where(request => !_appliedCleanups.Contains(request.OperationId)).ToArray();
+                Diagnostics.DevelopmentDiagnostics.Current?.Record("cleanup.pending", "maintenance", new { count = pending.Length });
                 if (pending.Length > 0) NotifyCleanup(new(Pending: pending.Select(request => request.OperationId).ToArray()));
                 await CleanBatchAsync(pending, (request, cleaned) =>
                 {

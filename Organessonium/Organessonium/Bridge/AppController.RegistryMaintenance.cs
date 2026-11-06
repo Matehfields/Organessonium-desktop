@@ -36,7 +36,7 @@ public sealed partial class AppController
                             {
                                 if (_registry != registry || _loggingOut) return;
                                 ReplaceLoadedFolder(id, entries);
-                                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+                                await _bridge.CallAsync("_onFolderIndexReconciled", id, entries);
                             }));
                             if (_registry == registry && !_loggingOut) await PublishLibraryFileCountAsync(registry);
                             await registry.RunJanitorAsync(token);
@@ -44,6 +44,7 @@ public sealed partial class AppController
                     }
                     catch (OperationCanceledException) when (api.PayloadLifetime.IsCancellationRequested) { break; }
                     catch (Exception error) { AppLogger.Error("Registry.BackgroundMaintenance", error); }
+                    registry.SharedStorage.ResumePendingCleanup();
                     await state.Wake.WaitAsync(TimeSpan.FromMinutes(5), api.PayloadLifetime);
                 }
             }

@@ -21,6 +21,9 @@ internal static partial class Program
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(transport, false));
         var registry = new AppRegistry(api, h.Store, h.Settings);
         await registry.RefreshMappingsAsync();
+        var waitingCleanup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cleanupObserver = registry.SharedStorage.ObserveCleanup(update =>
+        { if (update.Waiting) waitingCleanup.TrySetResult(); return false; }, api.PayloadLifetime);
         var host = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 1280, 800, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         CoreWebView2Controller? browser = null;
         AppController? controller = null;
@@ -53,7 +56,16 @@ internal static partial class Program
             view.Navigate("https://organessonium.local/index.html");
             await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
             using var dummy = new WebView2();
-            var bridge = new WebMessageBridge(dummy, script => view.ExecuteScriptAsync(script));
+            var observeMaintenance = false;
+            long maintenanceScriptBytes = 0;
+            var maintenancePublished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bridge = new WebMessageBridge(dummy, async script =>
+            {
+                var publication = observeMaintenance && (script.Contains("_onFolderIndexReconciled") || script.Contains("_onAppsLoaded"));
+                if (publication) maintenanceScriptBytes += Encoding.UTF8.GetByteCount(script);
+                await view.ExecuteScriptAsync(script);
+                if (publication) maintenancePublished.TrySetResult();
+            });
             controller = new AppController(new System.Windows.Window(), h.Store, bridge, _ => Task.CompletedTask);
             var session = new DiscordSession();
             typeof(DiscordSession).GetProperty("Api")!.SetValue(session, api);
@@ -90,16 +102,17 @@ internal static partial class Program
             phase = "fresh reference proof";
             await transport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
             await task.WaitAsync(TimeSpan.FromSeconds(5));
-            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'&&!!document.querySelector('.op-item[data-op-type=cleanup].op-cleanup-indeterminate')") == "true",
-                "a remoção do índice aguardou a limpeza física ou não exibiu a operação de segundo plano");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'&&!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "a remoção do índice aguardou a limpeza física ou mostrou a manutenção silenciosa");
             RequireSync(h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 10,
                 "a limpeza física ocorreu antes da conferência bloqueada");
             transport.ReleaseProof.TrySetResult();
             phase = "batch completion";
-            for (var attempt = 0; attempt < 150 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") != "true"; attempt++)
+            for (var attempt = 0; attempt < 150 && h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) != 2; attempt++)
                 await Task.Delay(50);
-            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") == "true",
-                "a limpeza física não chegou à conclusão visível no painel");
+            RequireSync(h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 2 &&
+                await view.ExecuteScriptAsync("!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "a limpeza física não concluiu silenciosamente");
             RequireSync(h.Server.MessagePages.GetValueOrDefault(journalThread) - journalReadsBefore == 2,
                 "a conferência de arquivos releu o journal técnico como uma pasta da biblioteca");
             RequireSync(await view.ExecuteScriptAsync("window.__browsingCard===document.querySelector('.cards-grid .file-card')&&window.__browsingCard.classList.contains('selected')&&document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
@@ -137,11 +150,10 @@ internal static partial class Program
             phase = "failed reference proof";
             await ((Task)delete.Invoke(controller, [JsonSerializer.Serialize(new[] { entries[8].MetadataMessageId }), true])!)
                 .WaitAsync(TimeSpan.FromSeconds(20));
-            for (var attempt = 0; attempt < 100 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup][data-op-status=waiting]')!==null") != "true"; attempt++)
-                await Task.Delay(50);
+            await waitingCleanup.Task.WaitAsync(TimeSpan.FromSeconds(10));
             RequireSync(h.Server.Messages(entries[8].ThreadId).Sum(message => message.Attachments.Count) == 2 &&
-                await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===1&&document.getElementById('ops-list').textContent.includes('pendente')") == "true",
-                "falha de conferência não preservou os payloads ou não apareceu no painel");
+                await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===1&&!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "falha de conferência não preservou os payloads ou exibiu uma notificação");
             phase = "close and reopen with pending cleanup";
             await controller.DisposeAsync(); controller = null;
             api.Dispose();
@@ -164,12 +176,12 @@ internal static partial class Program
             await bridge.SetSettingsAsync(reopenedStore.Load()); await bridge.NotifyReadyAsync();
             await ((Task)typeof(AppController).GetMethod("LoadAppsAsync", flags)!.Invoke(controller, [])!).WaitAsync(TimeSpan.FromSeconds(15));
             await reopenedTransport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
-            RequireSync(await view.ExecuteScriptAsync("!!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
-                "reabrir o app perdeu a operação pendente no painel");
+            RequireSync(await view.ExecuteScriptAsync("!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "reabrir o app mostrou a limpeza pendente no painel");
             reopenedTransport.ReleaseProof.TrySetResult();
-            for (var attempt = 0; attempt < 150 && await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") != "true"; attempt++)
+            for (var attempt = 0; attempt < 150 && h.Server.Messages(entries[9].ThreadId).Sum(message => message.Attachments.Count) != 1; attempt++)
                 await Task.Delay(50);
-            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=cleanup]')?.dataset.opStatus==='done'") == "true",
+            RequireSync(h.Server.Messages(entries[9].ThreadId).Sum(message => message.Attachments.Count) == 1,
                 "a operação pendente não retomou após reabrir o app");
             RequireSync(h.Server.Messages(entries[9].ThreadId).Sum(message => message.Attachments.Count) == 1 &&
                 h.Store.LoadCachedEntriesForFolder("root").Single(entry => entry.Type == "file").FileId == entries[9].FileId,
@@ -179,6 +191,28 @@ internal static partial class Program
                 .WaitAsync(TimeSpan.FromSeconds(10));
             RequireSync(await view.ExecuteScriptAsync("Array.from(document.querySelectorAll('#files-grid .folder-card')).some(card=>card.textContent.includes('Created after cleanup'))&&document.querySelectorAll('.cards-grid .file-card').length===1") == "true",
                 "a pasta criada não apareceu na interface ou substituiu o arquivo preservado");
+            phase = "large library reconciliation without hidden rendering";
+            var archivedFiles = Enumerable.Range(0, 6653).Select(index => new AppEntry
+            { Type = "file", Name = "archive-" + index + ".bin", FileId = "archive-" + index,
+                ThreadId = "archive-payload-" + index, MetadataMessageId = "archive-metadata-" + index,
+                ParentFolderId = "archive", Path = "/Archive", SizeBytes = 1024 }).ToArray();
+            var largeLibrary = reopenedStore.LoadCachedEntriesForFolder("root").Concat(archivedFiles).ToList();
+            typeof(AppController).GetField("_loadedApps", flags)!.SetValue(controller, largeLibrary);
+            await bridge.CallAsync("_onAppsLoaded", largeLibrary);
+            var external = AppEntry.File("Found during maintenance.bin", "external-thread", TransferState.Now(), 3, "/");
+            external.ChunkCount = 1; external.ChunkMessageIds = ["external-message"];
+            await new MetadataService(Organessonium.Services.MetadataEncryption.MetadataCodec.ForStore(reopenedStore), reopenedApi.DownloadAttachmentBytesAsync)
+                .SendEntryAsync(reopenedApi, "root-thread", external);
+            await view.ExecuteScriptAsync("openSettings();selectSettingsCategory('protection');window.__maintenanceMutations=0;window.__maintenanceObserver=new MutationObserver(records=>window.__maintenanceMutations+=records.length);window.__maintenanceObserver.observe($('main-area'),{subtree:true,childList:true,attributes:true});");
+            observeMaintenance = true;
+            typeof(AppController).GetMethod("QueueRegistryMaintenance", flags)!.Invoke(controller, [reopenedRegistry]);
+            await maintenancePublished.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            RequireSync(maintenanceScriptBytes < 64 * 1024 && await view.ExecuteScriptAsync("isSettingsOpen()&&window.__maintenanceMutations===0&&allApps.some(entry=>entry.name==='Found during maintenance.bin')&&allApps.some(entry=>entry.fileId==='archive-6652')") == "true",
+                "a manutenção reenviou toda a biblioteca, alterou cards ocultos ou perdeu os demais arquivos");
+            await view.ExecuteScriptAsync("window.__maintenanceObserver.disconnect();$('settings-tab-downloads').click();$('setting-threads').value=6;$('setting-threads').dispatchEvent(new Event('input'));$('settings-close').click()");
+            RequireSync(await view.ExecuteScriptAsync("!isSettingsOpen()&&$('thr-val').textContent==='6'&&document.querySelector('#files-grid').textContent.includes('Found during maintenance.bin')&&!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+                "a interface deixou de responder durante a manutenção ou não aplicou os dados ao retornar");
+            Console.WriteLine("MAINTENANCE_UI_RESULT libraryFiles=6653 fullLibraryBytes=" + Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(largeLibrary, JsonOptions.Web)) + " publicationBytes=" + maintenanceScriptBytes + " hiddenMutations=0");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }
