@@ -9,6 +9,36 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static async Task<TestOutcome> SharedSingleUploadStartsImmediatelyAsync()
+    {
+        using var h = new SharedHarness();
+        var state = await h.PrepareAsync("single.bin", [1, 2, 3]);
+        var reservation = await h.Storage.ReserveAsync(state.FileId, state.TransferId, default);
+        using var memory = new UploadMemoryCoordinator(1);
+        var context = new EncryptedPayloadContext(state.FileId, state.Encryption!, EncryptedPayloadRoles.Original, 0, 1);
+        using var part = await memory.PreparePartAsync(h.Encryption, new FileInfo(state.SourcePath), 3, 3, context, default, deferBuffers: true);
+        using var expectation = h.Storage.Batcher.ExpectProduction(reservation, EncryptedPayloadRoles.Original, default);
+        using var diagnostics = Organessonium.Services.Diagnostics.DevelopmentDiagnostics.Start([], h.Directory.CreateSubdirectory("dispatch-diagnostics"));
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var sent = await h.Storage.Batcher.SendAsync(reservation, context, part, null, default).WaitAsync(TimeSpan.FromSeconds(3));
+        var totalMilliseconds = watch.ElapsedMilliseconds;
+        RequireSync(diagnostics != null && diagnostics.Flush(TimeSpan.FromSeconds(3)), "o diagnóstico de despacho não foi gravado");
+        diagnostics!.Dispose();
+        double? dispatchWait = null;
+        foreach (var line in diagnostics!.Directory.EnumerateFiles("trace-*.jsonl").SelectMany(file => File.ReadLines(file.FullName)))
+        {
+            using var json = System.Text.Json.JsonDocument.Parse(line);
+            if (json.RootElement.GetProperty("kind").GetString() == "upload.batch")
+                dispatchWait = json.RootElement.GetProperty("data").GetProperty("waitMilliseconds").GetDouble();
+        }
+        var message = h.Server.Messages(reservation.ThreadId).Single(message => message.Id == sent.MessageId);
+        var restored = h.Encryption.DecryptBytes(await h.Api.DownloadAttachmentBytesAsync(message.Attachments.Single()), context);
+        RequireSync(dispatchWait is >= 0 and < 125 && restored.SequenceEqual(new byte[] { 1, 2, 3 }),
+            "o arquivo individual esperou a janela de agrupamento ou perdeu conteúdo: " + dispatchWait);
+        Console.WriteLine("SINGLE_UPLOAD_RESULT dispatchWaitMs=" + dispatchWait + " confirmedMilliseconds=" + totalMilliseconds);
+        return TestOutcome.Pass();
+    }
+
     private static Task<TestOutcome> SharedStoragePublicationPipelineAsync() => OnHiddenDispatcherAsync(async () =>
     {
         using var h = new SharedHarness();
@@ -47,7 +77,8 @@ internal static partial class Program
             journalThread = h.Store.LoadFolderIndexMappings()["storage-v2"].ThreadId;
             transport.Archives.Clear();
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            while (h.Server.FileThreads().SelectMany(h.Server.Messages).Sum(message => message.Attachments.Count) < 30)
+            // Publication occupies the 16 file slots; only a full message must finish before it is released.
+            while (h.Server.FileThreads().SelectMany(h.Server.Messages).Sum(message => message.Attachments.Count) < 10)
                 await Task.Delay(25, timeout.Token);
             await Task.Delay(DiscordLimits.SharedProducerStallMilliseconds + 500, timeout.Token);
             RequireSync(h.Server.FileThreads().SelectMany(h.Server.Messages).Where(message => message.Attachments.Count > 0)

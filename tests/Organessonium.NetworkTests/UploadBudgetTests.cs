@@ -111,7 +111,9 @@ internal static partial class Program
             await Check("document.getElementById('setting-force-upload').textContent.includes('1 GB')", "o limite de RAM não apareceu no botão");
             await view.ExecuteScriptAsync("document.getElementById('setting-force-upload').click()");
             await Check("document.getElementById('setting-force-upload').getAttribute('aria-pressed')==='true'&&document.getElementById('setting-upload-threads').disabled&&document.getElementById('upload-thr-val').textContent==='16'", "o botão não mostrou 16 workers");
-            await view.ExecuteScriptAsync("document.getElementById('setting-force-upload').click();closeSettings();window._opsAdd('budget','upload','source.bin');window._opsUploadBatch('budget',['source.bin']);window._opsTransferMetrics('budget','upload',0,1,0,1000000,0,0);window._opsTransferMetrics('budget','upload',0,1,100000,1000000,2,400000);");
+            await view.ExecuteScriptAsync("document.getElementById('setting-force-upload').click();closeSettings();window._opsAdd('budget','upload','source.bin');window._opsUploadBatch('budget',['source.bin']);window._opsTransferMetrics('budget','upload',0,1,0,1000000,0,0);");
+            await Task.Delay(1100);
+            await view.ExecuteScriptAsync("window._opsTransferMetrics('budget','upload',0,1,100000,1000000,2,400000)");
             await Check("document.getElementById('op-budget').dataset.metricSpeed!=='0 B/s'&&!document.getElementById('op-eta-budget').classList.contains('hidden')", "a UI não mostrou velocidade e estimativa durante o envio");
             await view.ExecuteScriptAsync("window._opsUploadFileProgress('budget',0,'active',50,'100 KB / 976 KB enviados');");
             await Check("document.getElementById('op-budget').dataset.progress==='50'&&document.getElementById('op-file-detail-budget-0').textContent.includes('KB')", "o progresso do lote não ponderou a etapa individual ou perdeu os bytes transmitidos");
@@ -128,6 +130,12 @@ internal static partial class Program
             await Check("document.getElementById('op-percent-finished').textContent==='99%'", "o lote chegou a 100% antes de concluir todos os arquivos");
             await view.ExecuteScriptAsync("window._opsUploadFileProgress('finished',1,'done',100,'Concluído');window._opsTransferMetrics('finished','upload',2,2,990000,1000000,2,990000);");
             await Check("document.getElementById('op-percent-finished').textContent==='100%'&&document.getElementById('op-file-percent-finished-1').textContent==='100%'", "o lote concluído ficou abaixo de 100% com métricas atrasadas");
+            await view.ExecuteScriptAsync("window._opsUploadBatch('eta-wall',Array(100).fill('image.jpg'));window._opsTransferMetrics('eta-wall','upload',0,100,0,100000000,0,0)");
+            await Task.Delay(1100);
+            await view.ExecuteScriptAsync("window._opsTransferMetrics('eta-wall','upload',10,100,90000000,100000000,2,400000000)");
+            await Check("parseInt(document.getElementById('op-eta-eta-wall').textContent.match(/(\\d+) s/)[1],10)>=8", "a ETA usou somente a transmissão e ignorou os arquivos ainda não concluídos");
+            await view.ExecuteScriptAsync("window._opsUpdate('eta-wall','paused','Pausado')");
+            await Check("document.getElementById('op-eta-eta-wall').classList.contains('hidden')", "a transferência pausada continuou exibindo estimativa");
             AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
             RequireSync(!IsWindowVisible(window), "o teste exibiu uma janela");
             RequireSync(AppMemoryBudget.PeakCommittedBytes <= AppMemoryBudget.LimitBytes, "o job ultrapassou 1 GB");

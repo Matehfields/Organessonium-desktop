@@ -36,7 +36,11 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
     private async Task QueueAsync(string thread, Work[] group, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        foreach (var work in group) work.Part.SetTransportName(Guid.NewGuid().ToString("N") + ".bin");
+        foreach (var work in group)
+        {
+            work.Part.SetTransportName(Guid.NewGuid().ToString("N") + ".bin");
+            work.TrackedProduction = IsExpectedProduction(work.Reservation, work.Context.Role);
+        }
         var queue = _queues.GetOrAdd(thread, id => new Lazy<Channel<Work[]>>(() =>
         {
             var channel = Channel.CreateBounded<Work[]>(new BoundedChannelOptions(DiscordLimits.MaxPendingUploadMessages * DiscordLimits.MaxAttachmentsPerSharedMessage)
@@ -53,12 +57,15 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
     private async Task RunAsync(string threadId, ChannelReader<Work[]> reader)
     {
         Work[]? carry = null;
+        Task<bool>? pendingRead = null;
+        List<Work>? building = null;
         try
         {
-            while (carry != null || await reader.WaitToReadAsync(api.PayloadLifetime).ConfigureAwait(false))
+            while (carry != null || await (pendingRead ??= reader.WaitToReadAsync(api.PayloadLifetime).AsTask()).ConfigureAwait(false))
             {
+                pendingRead = null;
                 await RamUploadBudget.PendingMessages.WaitAsync(api.PayloadLifetime).ConfigureAwait(false);
-                var batch = new List<Work>(DiscordLimits.MaxAttachmentsPerSharedMessage);
+                var batch = building = new List<Work>(DiscordLimits.MaxAttachmentsPerSharedMessage);
                 var deadline = Stopwatch.GetTimestamp();
                 var firstWait = deadline;
                 while (batch.Count < DiscordLimits.MaxAttachmentsPerSharedMessage)
@@ -75,6 +82,12 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                     }
                     var remaining = DiscordLimits.SharedBatchWaitMilliseconds - Stopwatch.GetElapsedTime(deadline).TotalMilliseconds;
                     if (carry != null || batch.Count == DiscordLimits.MaxAttachmentsPerSharedMessage) break;
+                    if (batch.Count > 0 && batch.Any(work => work.TrackedProduction) && batch.All(work => work.Context.ChunkCount == 1) &&
+                        !HasOtherProduction(threadId, batch.Select(work => work.Reservation.VersionId)))
+                    {
+                        if (reader.TryPeek(out _)) continue;
+                        break;
+                    }
                     if (remaining <= 0)
                     {
                         if (!HasPendingProduction(threadId)) break;
@@ -84,20 +97,30 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                         deadline = Stopwatch.GetTimestamp();
                         remaining = DiscordLimits.SharedBatchWaitMilliseconds;
                     }
-                    using var wait = CancellationTokenSource.CreateLinkedTokenSource(api.PayloadLifetime);
-                    wait.CancelAfter((int)Math.Ceiling(remaining));
-                    try { if (!await reader.WaitToReadAsync(wait.Token).ConfigureAwait(false)) break; }
-                    catch (OperationCanceledException)
-                    { if (api.PayloadLifetime.IsCancellationRequested || !HasPendingProduction(threadId)) break; }
+                    pendingRead ??= reader.WaitToReadAsync(api.PayloadLifetime).AsTask();
+                    await Task.WhenAny(pendingRead, Task.Delay((int)Math.Ceiling(remaining), api.PayloadLifetime)).ConfigureAwait(false);
+                    api.PayloadLifetime.ThrowIfCancellationRequested();
+                    if (pendingRead.IsCompleted)
+                    {
+                        var available = await pendingRead.ConfigureAwait(false);
+                        pendingRead = null;
+                        if (!available) break;
+                    }
                 }
-                if (batch.Count == 0) { RamUploadBudget.PendingMessages.Release(); continue; }
+                if (batch.Count == 0) { building = null; RamUploadBudget.PendingMessages.Release(); continue; }
                 Diagnostics.DevelopmentDiagnostics.Current?.Record("upload.batch", "work", new
                 { attachmentCount = batch.Count, waitMilliseconds = Stopwatch.GetElapsedTime(firstWait).TotalMilliseconds, pendingProduction = HasPendingProduction(threadId) });
                 _ = CompleteAsync(threadId, batch);
+                building = null;
             }
         }
         catch (Exception error)
         {
+            if (building != null)
+            {
+                foreach (var work in building) work.Completion.TrySetException(error);
+                RamUploadBudget.PendingMessages.Release();
+            }
             if (carry != null) foreach (var work in carry) work.Completion.TrySetException(error);
             while (reader.TryRead(out var group)) foreach (var work in group) work.Completion.TrySetException(error);
         }
@@ -192,5 +215,6 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
         Func<TimeSpan, Task>? OnWait, Action<bool>? Activity)
     {
         internal TaskCompletionSource<ChunkReference> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool TrackedProduction { get; set; }
     }
 }

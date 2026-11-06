@@ -5,6 +5,7 @@ let allApps = [], viewMode = 'grid', sortMode = 'name-asc';
 let currentPath = '/', searchQuery = '', typeFilter = 'all', dateFilter = 'all';
 let currentFolderIds = ['root'];
 let libraryReconciliationPending = false;
+let uploadPublicationRenderTimer = 0;
 let activeLibraryView = 'files', specialItems = [], deviceItems = [];
 let favoritesLoaded = false, devicesLoaded = false;
 let serverReadDepth = 0;
@@ -1043,9 +1044,12 @@ window._onAppsBatch = apps => {
     apps.forEach(app => byId.set(appIdentityKey(app), app));
     allApps = [...byId.values()];
     syncOpenMarkdownApps();
-    render();
-    scheduleVisibleThumbnails();
-    refreshSidebarSummary();
+    if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
+    if (!uploadPublicationRenderTimer) uploadPublicationRenderTimer = setTimeout(() => {
+        uploadPublicationRenderTimer = 0;
+        if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
+        render(); scheduleVisibleThumbnails(); refreshSidebarSummary();
+    }, 100);
 };
 
 window._onAppsRemoved = apps => {
@@ -2657,6 +2661,8 @@ window._opsUpdate = (id, status, msg) => {
         }
     }
     if (['done', 'cancelled', 'error', 'waiting', 'paused'].includes(status)) {
+        const rate = transferRateStates.get(id);
+        if (rate && ['waiting','paused'].includes(status)) rate.etaSamples = [];
         const etaEl = $('op-eta-' + id);
         if (etaEl) { etaEl.textContent = ''; etaEl.classList.add('hidden'); }
     }
@@ -2761,6 +2767,13 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     }
     const bytes = state.highWaterBytes;
     const completed = Math.max(Number(item.dataset.metricCompleted) || 0, Number(completedItems) || 0);
+    state.etaSamples ||= [];
+    state.etaSamples.push([now,bytes,completed]);
+    while (state.etaSamples.length > 1 && state.etaSamples[1][0] <= now - 60000) state.etaSamples.shift();
+    const etaBaseline = state.etaSamples[0];
+    const wallSeconds = (now - etaBaseline[0]) / 1000;
+    const logicalRate = wallSeconds >= 1 ? Math.max(0,bytes - etaBaseline[1]) / wallSeconds : 0;
+    const completedRate = wallSeconds >= 1 ? Math.max(0,completed - etaBaseline[2]) / wallSeconds : 0;
 
     item.dataset.metricDirection = direction === 'upload' ? 'upload' : 'download';
     item.dataset.metricCompleted = String(Math.max(0, completed));
@@ -2773,7 +2786,10 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
     const etaEl = $('op-eta-' + id);
     if (etaEl) {
         const remaining = Math.max(0, total - bytes);
-        const etaSeconds = state.speed > 0 && remaining > 0 ? remaining / state.speed : 0;
+        const payloadEta = logicalRate > 0 && remaining > 0 ? remaining / logicalRate : 0;
+        const publicationEta = direction === 'upload' && Number(totalItems) > 1 && completedRate > 0
+            ? Math.max(0,Number(totalItems) - completed) / completedRate : 0;
+        const etaSeconds = Math.max(payloadEta,publicationEta);
         etaEl.textContent = item.dataset.opStatus === 'active' && etaSeconds > 0
             ? t('transferEta', { eta:formatTransferEta(etaSeconds) })
             : '';
@@ -6516,6 +6532,7 @@ function syncRenderedItems(container, items, kind, create) {
 }
 
 function render() {
+    if (uploadPublicationRenderTimer) { clearTimeout(uploadPublicationRenderTimer); uploadPublicationRenderTimer = 0; }
     $('btn-empty-trash').classList.toggle('hidden', activeLibraryView !== 'trash' || currentPath !== '/@trash');
     const viewApps = appsForActiveView();
     const favoritesView = activeLibraryView === 'favorites';

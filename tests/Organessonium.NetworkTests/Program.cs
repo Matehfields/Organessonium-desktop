@@ -73,6 +73,8 @@ internal static partial class Program
         ("serialsAfterBatchMutations", SerialsAfterBatchMutationsAsync),
         ("mediaUploadTypes", MediaUploadTypesAsync),
         ("sharedStorageDelayedProducers", SharedStorageDelayedProducersAsync),
+        ("sharedSingleUploadStartsImmediately", SharedSingleUploadStartsImmediatelyAsync),
+        ("webViewUploadAcceptanceSecondary", UploadAcceptanceSecondaryAsync),
         ("sharedStorageReferencesDownloadsAndThumbnails", SharedStorageReferencesDownloadsAndThumbnailsAsync),
         ("sharedStorageSelectiveCleanupAndRecovery", SharedStorageSelectiveCleanupAndRecoveryAsync),
         ("sharedStorageVersionsTrashAndLegacy", SharedStorageVersionsTrashAndLegacyAsync),

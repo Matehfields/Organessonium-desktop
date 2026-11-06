@@ -24,6 +24,17 @@ internal sealed partial class SharedPayloadBatcher
         lock (_productionSync) return _production.Keys.Any(key => key.Thread == threadId);
     }
 
+    private bool IsExpectedProduction(SharedStorageReservation reservation, string role)
+    {
+        lock (_productionSync) return _production.ContainsKey((reservation.ThreadId, reservation.VersionId, role));
+    }
+
+    private bool HasOtherProduction(string threadId, IEnumerable<string> versions)
+    {
+        var ready = versions.ToHashSet(StringComparer.Ordinal);
+        lock (_productionSync) return _production.Keys.Any(key => key.Thread == threadId && !ready.Contains(key.Version));
+    }
+
     private bool WaitingOnlyForPublication(string threadId)
     {
         lock (_productionSync)
