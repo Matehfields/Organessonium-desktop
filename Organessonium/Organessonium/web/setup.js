@@ -179,7 +179,20 @@ Object.assign(SETUP_I18N.en, {
     encryptionAckRequired:'Confirm that you will keep the recovery key.', encryptionBusy:'Preparing key...'
 });
 
+Object.assign(SETUP_I18N['pt-BR'], {
+    stepToken:'Token',stepSecurity:'Segurança',stepConnection:'Conexão',next:'Avançar',back:'Voltar',
+    connectionFailed:'Não foi possível conectar',retry:'Tentar novamente',reviewSetup:'Revisar configuração',
+    securitySubtitle:'Escolha como os dados da sua biblioteca serão protegidos.',
+    connectionSubtitle:'Verifique a conexão e continue para sua biblioteca.',connectionError:'Não foi possível concluir a conexão.'
+});
+Object.assign(SETUP_I18N.en, {
+    stepToken:'Token',stepSecurity:'Security',stepConnection:'Connection',next:'Continue',back:'Back',
+    connectionFailed:'Could not connect',retry:'Try again',reviewSetup:'Review setup',
+    securitySubtitle:'Choose how your library data is protected.',
+    connectionSubtitle:'Check the connection and continue to your library.',connectionError:'Could not complete the connection.'
+});
 let setupEncryptionMode = 'standard', setupCustomKeyAvailable = false, setupEncryptionBusy = false, setupEncryptionError = '';
+let setupStep = 'token', setupConnectionBusy = false;
 let setupLanguage = systemLanguage();
 let channelInputMode = 'auto';
 let setupThemeSetting = 'system';
@@ -202,6 +215,32 @@ function systemTheme() {
 
 function setupText(key) {
     return (SETUP_I18N[setupLanguage] && SETUP_I18N[setupLanguage][key]) || SETUP_I18N['pt-BR'][key] || key;
+}
+
+function syncSetupStage() {
+    document.querySelectorAll('[data-setup-text]').forEach(node => node.textContent = setupText(node.dataset.setupText));
+    const active = setupStep === 'token' ? 0 : setupStep === 'security' ? 1 : 2;
+    document.querySelectorAll('[data-setup-stage]').forEach((stage,index) => {
+        stage.classList.toggle('active',index === active); stage.classList.toggle('complete',index < active);
+        if (index === active) stage.setAttribute('aria-current','step'); else stage.removeAttribute('aria-current');
+    });
+    document.querySelector('.subtitle').textContent = setupText(active === 0 ? 'subtitle' : active === 1 ? 'securitySubtitle' : 'connectionSubtitle');
+}
+
+function showSetupStep(step) {
+    setupStep = step;
+    formArea.classList.remove('hidden'); loadArea.classList.add('hidden');
+    document.querySelectorAll('.setup-screen').forEach(screen => screen.classList.toggle('hidden',screen.id !== 'setup-' + step + '-step'));
+    syncSetupStage();
+    const target = step === 'token' ? inpToken : step === 'security' ? document.getElementById('setup-encryption-' + setupEncryptionMode) : document.getElementById('setup-error-title');
+    target?.focus({preventScroll:true});
+}
+
+function advanceSetup() {
+    if (setupConnectionBusy || setupEncryptionBusy) return;
+    if (!inpToken.value.trim()) { showErr(setupText('tokenRequired')); inpToken.focus(); return; }
+    document.getElementById('setup-token-error').classList.add('hidden');
+    showSetupStep('security');
 }
 
 function applySetupPreferences() {
@@ -227,8 +266,8 @@ function applySetupPreferences() {
     document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
     document.title = setupText('title');
 
-    const labels = document.querySelectorAll('#form-area > .field > label,#channel-fields .field > label');
-    const hints = document.querySelectorAll('#form-area > .field > .hint,#channel-fields .hint');
+    const labels = document.querySelectorAll('#setup-token-step > .field > label,#channel-fields .field > label');
+    const hints = document.querySelectorAll('#setup-token-step > .field > .hint,#channel-fields .hint');
     document.querySelector('.subtitle').textContent = setupText('subtitle');
     labels[0].textContent = setupText('token');
     labels[1].innerHTML = setupText('names').replace('names', '<code>names</code>');
@@ -252,6 +291,7 @@ function applySetupPreferences() {
     setupEncryptionMode = saved.encryptionMode === 'custom' ? 'custom' : 'standard';
     setupCustomKeyAvailable = saved.customKeyAvailable === true;
     renderSetupEncryption();
+    syncSetupStage();
 }
 
 function applyProxyLabels() {
@@ -345,6 +385,7 @@ function setupIcon(name, size) {
 }
 
 function renderSetupIcons() {
+    if (typeof initIcons === 'function') initIcons();
     const tokenVisible = inpToken.type === 'text';
     btnToggleToken.innerHTML = setupIcon(tokenVisible ? 'visibility_off' : 'visibility', 22);
     btnConnect.innerHTML = `<span class="btn-icon">${setupIcon('login', 22)}</span><span>${setupText('connect')}</span>`;
@@ -408,30 +449,23 @@ function collectProxySettings() {
     return proxy;
 }
 window._onSetupConnecting = function(msg) {
+    setupConnectionBusy = true; setupStep = 'connection'; syncSetupStage();
     formArea.classList.add('hidden');
     loadArea.classList.remove('hidden');
     loadMsg.textContent = msg || setupText('findingChannels');
 };
 
 window._onSetupError = function(msg, canConfigureProxy = false) {
-    formArea.classList.remove('hidden');
-    loadArea.classList.add('hidden');
-    errorBox.textContent = msg;
+    setupConnectionBusy = false; showSetupStep('error');
+    errorBox.textContent = String(msg || setupText('connectionError')).split(/\r?\n/).slice(0,2).join(' ').slice(0,360);
     errorBox.classList.remove('hidden');
     channelActions.classList.add('hidden');
     btnConnect.disabled = false;
-    btnOpenProxy.classList.toggle('hidden', !canConfigureProxy);
-    if (!canConfigureProxy) { proxyPanel.classList.add('hidden'); btnOpenProxy.setAttribute('aria-expanded', 'false'); }
+    btnOpenProxy.classList.remove('hidden');
 };
 
 window._onSetupChannelsMissing = function(msg) {
-    btnOpenProxy.classList.add('hidden');
-    proxyPanel.classList.add('hidden');
-    btnOpenProxy.setAttribute('aria-expanded', 'false');
-    formArea.classList.remove('hidden');
-    loadArea.classList.add('hidden');
-    errorBox.textContent = msg;
-    errorBox.classList.remove('hidden');
+    window._onSetupError(msg);
     channelActions.classList.remove('hidden');
     btnConnect.disabled = false;
 };
@@ -482,8 +516,14 @@ btnChannelIds.addEventListener('click', () => {
 
 btnCreateChannels.addEventListener('click', () => tryConnect(true));
 btnConnect.addEventListener('click', () => tryConnect(false));
+document.getElementById('setup-next').addEventListener('click',advanceSetup);
+document.getElementById('setup-back').addEventListener('click',() => showSetupStep('token'));
+document.getElementById('setup-retry').addEventListener('click',() => tryConnect(false));
+document.getElementById('setup-edit-token').addEventListener('click',() => showSetupStep('token'));
 document.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && loadArea.classList.contains('hidden')) tryConnect(false);
+    if (e.key !== 'Enter' || e.defaultPrevented || setupConnectionBusy || setupEncryptionBusy || e.target.closest('button,summary,select,.setup-select,#setup-encryption-custom-fields')) return;
+    e.preventDefault();
+    if (setupStep === 'token') advanceSetup(); else tryConnect(false);
 });
 
 selProxyMode.addEventListener('change', applyProxyFieldsVisibility);
@@ -513,15 +553,13 @@ window._onProxyTestResult = function(success, message, protocol) {
     proxyTestResult.classList.remove('hidden');
 };
 
-[inpToken, inpNames, inpFolders, inpForum, inpSerial].forEach(inp =>
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') tryConnect(false); })
-);
-
 btnGuide.addEventListener('click', () => {
     if (window.bridge && window.bridge.openGuide) window.bridge.openGuide();
 });
 
 function tryConnect(allowCreate) {
+    if (setupStep === 'token') { advanceSetup(); return; }
+    if (setupConnectionBusy || setupEncryptionBusy) return;
     errorBox.classList.add('hidden');
     channelActions.classList.add('hidden');
     btnConnect.disabled = true;
@@ -540,12 +578,13 @@ if (!token)  { showErr(setupText('tokenRequired')); return; }
     if (!forum)  { showErr(setupText('forumRequired')); return; }
     if (!serial)  { showErr(setupText('serialRequired')); return; }
     if (setupEncryptionMode === 'custom' && !setupCustomKeyAvailable) { showErr(setupText('encryptionRequired')); return; }
+    window._onSetupConnecting(setupText('connectingDiscord'));
     window.bridge.connect(token, names, folders, forum, serial, !!allowCreate, JSON.stringify(collectProxySettings()), setupEncryptionMode);
 }
 
 function applyChannelFieldMode() {
-    const labels = document.querySelectorAll('#form-area > .field > label,#channel-fields .field > label');
-    const hints = document.querySelectorAll('#form-area > .field > .hint,#channel-fields .hint');
+    const labels = document.querySelectorAll('#setup-token-step > .field > label,#channel-fields .field > label');
+    const hints = document.querySelectorAll('#setup-token-step > .field > .hint,#channel-fields .hint');
     const ids = channelInputMode === 'ids';
     labels[1].innerHTML = setupText(ids ? 'namesId' : 'names').replace('names', '<code>names</code>');
     labels[2].innerHTML = setupText(ids ? 'foldersId' : 'folders').replace('folders', '<code>folders</code>');
@@ -566,8 +605,9 @@ function applyChannelFieldMode() {
 }
 
 function showErr(msg) {
-    errorBox.textContent = msg;
-    errorBox.classList.remove('hidden');
+    const box = setupStep === 'token' ? document.getElementById('setup-token-error') : setupStep === 'security' ? document.getElementById('setup-security-error') : errorBox;
+    box.textContent = msg;
+    box.classList.remove('hidden');
     btnConnect.disabled = false;
 }
 
@@ -589,7 +629,7 @@ function renderSetupEncryption() {
     });
     document.getElementById('setup-encryption-custom-fields').classList.toggle('hidden',setupEncryptionMode!=='custom');
     ['setup-encryption-import','setup-key-create'].forEach(id=>document.getElementById(id).disabled=setupEncryptionBusy);
-    btnConnect.disabled=setupEncryptionBusy;
+    btnConnect.disabled=setupEncryptionBusy || setupConnectionBusy;
     const status=document.getElementById('setup-encryption-status');
     status.classList.toggle('error',!!setupEncryptionError);
     status.textContent=setupEncryptionError || (setupEncryptionBusy ? setupText('encryptionBusy') : setupText(setupCustomKeyAvailable?'encryptionReady':'encryptionRequired'));

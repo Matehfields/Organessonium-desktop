@@ -143,8 +143,24 @@ internal static partial class Program
                 await done.Task.WaitAsync(TimeSpan.FromSeconds(15)); view.NavigationCompleted -= Loaded;
             }
             async Task Check(string script, string message) => RequireSync(await view.ExecuteScriptAsync(script) == "true", message);
+            var flowCaptures = Directory.CreateDirectory(Path.Combine(Environment.CurrentDirectory, "artifacts", "setup-flow-review", "captures"));
+            async Task CaptureSetup(string name)
+            {
+                for (var attempt = 0; attempt < 30 && await view.ExecuteScriptAsync("document.fonts.status==='loaded'") != "true"; attempt++) await Task.Delay(50);
+                await Task.Delay(160);
+                await using var output = File.Create(Path.Combine(flowCaptures.FullName, name + ".png"));
+                await view.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, output);
+            }
             await Navigate("setup.html");
             await view.ExecuteScriptAsync("window.__organessoniumSettings={language:'pt-BR',theme:'dark'};window.onBridgeReady();window._onNativeTitleBarMetrics({enabled:true,height:48});");
+            await CaptureSetup("setup-token");
+            await view.ExecuteScriptAsync("window.__connectRequests=[];window.bridge.connect=(...args)=>window.__connectRequests.push(args);document.getElementById('setup-next').click()");
+            await Check("setupStep==='token'&&document.getElementById('setup-token-error').offsetHeight>0&&window.__connectRequests.length===0&&document.getElementById('setup-security-step').offsetHeight===0", "a primeira etapa mostrou segurança ou tentou conectar sem token");
+            await view.ExecuteScriptAsync("inpToken.value='setup-flow-fixture';document.getElementById('setup-next').click()");
+            await Check("setupStep==='security'&&document.getElementById('setup-token-step').offsetHeight===0&&document.getElementById('setup-security-step').offsetHeight>0&&window.__connectRequests.length===0", "Avançar não separou segurança da conexão");
+            await CaptureSetup("setup-security");
+            await view.ExecuteScriptAsync("btnConnect.click()");
+            await Check("setupConnectionBusy&&!loadArea.classList.contains('hidden')&&window.__connectRequests.length===1", "a conexão não começou depois de confirmar segurança");
             await Check("getComputedStyle(proxyPanel).display==='none'&&getComputedStyle(btnOpenProxy).display==='none'&&getComputedStyle(btnToggleToken).opacity==='1'", "proxy visível sem erro ou botão do token oculto");
             await view.ExecuteScriptAsync("inpToken.value='long-token-value-'.repeat(6);window._onSetupError('Falha de DNS',true);btnOpenProxy.click();document.querySelector('#sel-proxy-mode + .setup-select-trigger').click();");
             await Check("!proxyPanel.classList.contains('hidden')&&!document.querySelector('.setup-select-options').classList.contains('hidden')&&getComputedStyle(document.querySelector('.setup-select-options')).borderRadius==='10px'", "o erro de conexão não abriu proxy/seletor temático");
@@ -152,9 +168,14 @@ internal static partial class Program
             await Check("selProxyMode.value==='manual'&&!proxyManual.classList.contains('hidden')", "escolher proxy manual não mostrou os campos");
             await Check("document.querySelector('.page').getBoundingClientRect().top>=48&&document.documentElement.scrollHeight===innerHeight&&getComputedStyle(document.querySelector('.page')).overflowY==='auto'", "a barra de rolagem invadiu a barra nativa");
             await view.ExecuteScriptAsync("window._onSetupError('Token inválido',false);");
-            await Check("proxyPanel.classList.contains('hidden')&&btnOpenProxy.classList.contains('hidden')", "erro de token mostrou proxy");
+            await Check("setupStep==='error'&&btnOpenProxy.offsetHeight>0&&document.getElementById('setup-retry').offsetHeight>0", "a tela de erro perdeu proxy ou nova tentativa");
+            await view.ExecuteScriptAsync("if(!proxyPanel.classList.contains('hidden'))btnOpenProxy.click()");
+            await CaptureSetup("setup-error");
             await view.ExecuteScriptAsync("window._onSetupError('conexão',true);window._onSetupChannelsMissing('Canal não encontrado');");
-            await Check("proxyPanel.classList.contains('hidden')&&btnOpenProxy.classList.contains('hidden')", "canal inexistente mostrou proxy");
+            await Check("btnOpenProxy.offsetHeight>0&&channelActions.offsetHeight>0", "a tela de erro perdeu a criação de canais ou o proxy");
+            await view.ExecuteScriptAsync("inpProxyHost.value='proxy.test';inpProxyPort.value='8080';document.getElementById('setup-retry').click()");
+            await Check("window.__connectRequests.length===2&&JSON.parse(window.__connectRequests[1][6]).proxyHost==='proxy.test'&&setupConnectionBusy", "a nova tentativa não conservou a configuração do proxy");
+            await view.ExecuteScriptAsync("window._onSetupError('Sem conexão',true);document.getElementById('setup-edit-token').click()");
             // Real pointer movement checks hover visibility and the reserved token slot.
             var point = JsonSerializer.Deserialize<double[]>(await view.ExecuteScriptAsync("(()=>{const r=inpToken.getBoundingClientRect();return[r.left+20,r.top+15]})()"))!;
             await view.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", JsonSerializer.Serialize(new { type = "mouseMoved", x = point[0], y = point[1] }));
@@ -185,9 +206,9 @@ internal static partial class Program
                 window.__keyRequests=[];window.__connectRequests=[];window.__setupKeyCommand=window.bridge.setupEncryption;
                 window.bridge.setupEncryption=(action,...args)=>{window.__keyRequests.push(action);if(action==='create')window.__setupKeyCommand(action,...args)};
                 window.bridge.connect=(...args)=>window.__connectRequests.push(args);
-                document.getElementById('setup-encryption-custom').click();btnConnect.click();
+                document.getElementById('setup-next').click();document.getElementById('setup-encryption-custom').click();btnConnect.click();
                 """);
-            await Check("!document.getElementById('setup-encryption-custom-fields').classList.contains('hidden')&&window.__connectRequests.length===0&&errorBox.textContent.includes('chave')", "a configuração deixou conectar sem a chave personalizada");
+            await Check("!document.getElementById('setup-encryption-custom-fields').classList.contains('hidden')&&window.__connectRequests.length===0&&document.getElementById('setup-security-error').textContent.includes('chave')", "a configuração deixou conectar sem a chave personalizada");
             await view.ExecuteScriptAsync("document.getElementById('setup-encryption-import').click();window._onSetupEncryptionIdle()");
             await Check("window.__keyRequests[0]==='import'&&!document.getElementById('setup-encryption-import').disabled", "a importação não está acessível antes de conectar");
             await view.ExecuteScriptAsync("document.getElementById('setup-key-password').value='setup-fixture-passphrase';document.getElementById('setup-key-confirm').value='setup-fixture-passphrase';document.getElementById('setup-key-acknowledge').checked=true;document.getElementById('setup-key-create').click()");
@@ -204,7 +225,7 @@ internal static partial class Program
             RequireSync(restoredCrypto.DecryptBytes(sourceCrypto.EncryptBytes([1, 2, 3], context), context).SequenceEqual(new byte[] { 1, 2, 3 }), "a chave importada antes da conexão não abriu os arquivos existentes");
             await view.ExecuteScriptAsync("btnConnect.click()");
             await Check("window.__connectRequests.length===1&&window.__connectRequests[0][7]==='custom'", "a conexão não recebeu o modo de proteção escolhido");
-            await view.ExecuteScriptAsync("inpToken.value='';inpToken.type='password';document.documentElement.dataset.theme='dark';document.querySelector('.page').scrollTop=0");
+            await view.ExecuteScriptAsync("window._onSetupError('Não foi possível conectar ao servidor.',true);inpToken.value='';inpToken.type='password';document.documentElement.dataset.theme='dark';document.querySelector('.page').scrollTop=0");
             await Task.Delay(200);
             var setupCaptures = Directory.CreateDirectory(Path.Combine(AppContext.BaseDirectory, "ui-captures"));
             await using (var capture = File.Create(Path.Combine(setupCaptures.FullName, "setup-encryption.png")))

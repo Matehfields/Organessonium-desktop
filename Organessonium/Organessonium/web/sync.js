@@ -143,6 +143,7 @@
         byId('sync-link').classList.toggle('hidden', !source || data.folders.some(f => f.syncFolderId === source.sync.syncFolderId));
         byId('sync-start-windows').checked = Boolean(data.startWithWindows);
         byId('sync-close-behavior').value = data.closeToTray ? 'tray' : 'exit';
+        if (typeof syncSettingsSelects === 'function') syncSettingsSelects();
         document.querySelectorAll('.sync-card-status').forEach(e => e.remove());
         for (const folder of data.folders) {
             const apps = [...allApps, ...deviceItems, ...data.sources].filter(a => a.sync?.syncFolderId === folder.syncFolderId && !a.sync.relativePath);

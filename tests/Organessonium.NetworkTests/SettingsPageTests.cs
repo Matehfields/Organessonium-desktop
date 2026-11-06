@@ -77,6 +77,14 @@ internal static partial class Program
             await Check("isSettingsOpen()&&$('settings-panel').closest('.app-workspace')&&!$('settings-overlay')&&$('sidebar-settings').getAttribute('aria-current')==='page'&&$('sidebar-files').offsetWidth>0&&document.querySelector('.topbar').offsetHeight>0&&$('main-area').classList.contains('hidden')", "Configurações não abriu dentro da navegação lateral");
             await Check("document.querySelectorAll('[data-settings-pane]:not(.hidden)').length===1&&$('settings-pane-appearance').offsetHeight>0", "categorias diferentes aparecem misturadas");
             await Capture("appearance-dark");
+            await view.ExecuteScriptAsync("$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click()");
+            await Check("$('setting-accent-mode-options').offsetHeight>0&&getComputedStyle($('setting-accent-mode-options')).borderRadius==='11px'&&$('setting-accent-mode-options').querySelector('[aria-selected=\"true\"]').textContent==='Usar cor do Windows'", "as opções de cor continuaram usando a lista nativa");
+            await Capture("appearance-options-dark");
+            await view.ExecuteScriptAsync("$('setting-accent-mode-options').querySelector('[data-value=preset]').click()");
+            await Check("settings.accentColorMode==='preset'&&$('accent-presets').offsetHeight>0&&$('setting-accent-mode-options').offsetHeight===0", "selecionar uma opção não atualizou o controle e a paleta");
+            await view.ExecuteScriptAsync("$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click();$('setting-accent-mode-options').querySelector('[data-value=system]').click();$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click();document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+            await Check("isSettingsOpen()&&$('setting-accent-mode-options').offsetHeight===0&&settings.accentColorMode==='system'", "Escape fechou a página ou perdeu o valor do combo");
+            await Check("$('settings-tab-previews').textContent.includes('Miniaturas')&&getComputedStyle($('settings-tab-previews').querySelector('.svg-icon')).color===getComputedStyle($('settings-tab-downloads').querySelector('.svg-icon')).color", "o nome Miniaturas ou o ícone neutro não foram aplicados");
             foreach (var category in new[] { "performance", "previews", "uploads", "downloads", "protection", "connection", "application" })
             {
                 await view.ExecuteScriptAsync("$('settings-tab-" + category + "').click()");
@@ -88,6 +96,9 @@ internal static partial class Program
             await view.ExecuteScriptAsync("document.querySelector('[data-theme-value=light]').click();$('settings-tab-performance').click();$('setting-animations').click();$('settings-tab-downloads').click();$('setting-threads').value=7;$('setting-threads').dispatchEvent(new Event('input',{bubbles:true}));$('settings-close').click();");
             await WaitFor("JSON.parse(window.bridge.getSettings()).downloadThreads===7", "o ajuste de download não foi salvo ao sair");
             RequireSync(store.Load().Theme == "light" && store.Load().DownloadThreads == 7 && !store.Load().AnimationsEnabled, "os controles perderam a persistência real");
+            await view.ExecuteScriptAsync("$('sidebar-settings').click();$('settings-tab-appearance').click();$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click()");
+            await Capture("appearance-options-light");
+            await view.ExecuteScriptAsync("document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
             await view.ExecuteScriptAsync("$('sidebar-settings').click();$('settings-tab-protection').click();$('btn-encryption-custom').click()");
             await Check("settings.encryptionMode==='standard'&&settings.theme==='light'&&$('btn-encryption-custom').getAttribute('aria-checked')==='true'&&!$('encryption-standard-state').classList.contains('hidden')&&$('encryption-current-title').textContent.includes('padrão')&&$('btn-configure-custom-key').disabled&&$('setting-custom-key').offsetHeight>0", "selecionar a configuração da chave mudou o tema ou mostrou uma ativação inexistente");
             await Capture("protection-light-draft");

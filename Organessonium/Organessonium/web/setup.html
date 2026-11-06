@@ -13,7 +13,13 @@
         <h1>Organessônium</h1>
         <p class="subtitle">Configure a conexão com o Discord para começar</p>
 
+        <nav class="setup-steps" aria-label="Etapas da configuração">
+            <span data-setup-stage="token" class="active"><b>1</b><span data-setup-text="stepToken">Token</span></span>
+            <span data-setup-stage="security"><b>2</b><span data-setup-text="stepSecurity">Segurança</span></span>
+            <span data-setup-stage="connection"><b>3</b><span data-setup-text="stepConnection">Conexão</span></span>
+        </nav>
         <div id="form-area">
+            <section id="setup-token-step" class="setup-screen" aria-label="Token do bot">
             <div class="field">
                 <label>Token do Bot</label>
                 <div class="input-wrap">
@@ -22,26 +28,9 @@
                 </div>
                 <span class="hint">Developer Portal → Seu App → Bot → Reset Token</span>
             </div>
-            <section class="encryption-block" aria-labelledby="setup-encryption-title">
-                <div class="encryption-heading"><span data-icon="lock" data-size="22"></span><div><h2 id="setup-encryption-title">Proteção da biblioteca</h2><p id="setup-encryption-description">Configure a chave antes de abrir seus arquivos.</p></div></div>
-                <div class="encryption-modes" role="group" aria-labelledby="setup-encryption-title">
-                    <button id="setup-encryption-standard" type="button" aria-pressed="true">Padrão</button>
-                    <button id="setup-encryption-custom" type="button" aria-pressed="false">Chave personalizada</button>
-                </div>
-                <div id="setup-encryption-custom-fields" class="hidden">
-                    <p id="setup-encryption-help" class="encryption-help">Já tem arquivos protegidos? Importe a chave de recuperação usada nessa biblioteca.</p>
-                    <button id="setup-encryption-import" class="btn-secondary" type="button">Importar chave de recuperação</button>
-                    <p id="setup-encryption-status" class="encryption-status" role="status" aria-live="polite"></p>
-                    <details id="setup-encryption-create">
-                        <summary id="setup-encryption-create-title">Criar uma nova chave</summary>
-                        <p id="setup-encryption-create-help" class="encryption-help">Uma chave nova não abre arquivos protegidos por outra chave. Para recuperar uma biblioteca, importe o arquivo de recuperação.</p>
-                        <div class="field"><label id="setup-key-password-label" for="setup-key-password">Senha da nova chave</label><input id="setup-key-password" type="password" autocomplete="new-password"/></div>
-                        <div class="field"><label id="setup-key-confirm-label" for="setup-key-confirm">Confirmar senha</label><input id="setup-key-confirm" type="password" autocomplete="new-password"/></div>
-                        <label class="check-row"><input id="setup-key-acknowledge" type="checkbox"/><span id="setup-key-acknowledge-label">Vou exportar e guardar a chave de recuperação em um local seguro.</span></label>
-                        <button id="setup-key-create" class="btn-secondary" type="button">Criar chave</button>
-                    </details>
-                </div>
-            </section>
+
+                <p id="setup-token-error" class="error-box hidden" role="alert"></p>
+
             <button id="btn-custom-channel-names" class="guide-link" type="button">
                 Usar nomes diferentes para os canais
             </button>
@@ -70,10 +59,42 @@
                     <span class="hint">Canal de texto usado para armazenar os seriais das pastas</span>
                 </div>
             </div>
-<div id="channel-actions" class="channel-actions hidden">
-                <button id="btn-create-channels" class="btn-secondary" type="button">Criar canais automaticamente</button>
-            </div>
 
+
+
+                <button id="setup-next" class="btn-connect" type="button"><span data-setup-text="next">Avançar</span><span data-icon="arrow_forward" data-size="19"></span></button>
+            <button id="btn-guide" class="guide-link" type="button">
+                <span>Como criar o bot e configurar o Discord passo a passo</span><span class="guide-icon" data-icon="open_in_new" data-size="18"></span>
+            </button>
+            </section>
+            <section id="setup-security-step" class="setup-screen hidden" aria-label="Segurança da biblioteca">
+            <section class="encryption-block" aria-labelledby="setup-encryption-title">
+                <div class="encryption-heading"><span data-icon="lock" data-size="22"></span><div><h2 id="setup-encryption-title">Proteção da biblioteca</h2><p id="setup-encryption-description">Configure a chave antes de abrir seus arquivos.</p></div></div>
+                <div class="encryption-modes" role="group" aria-labelledby="setup-encryption-title">
+                    <button id="setup-encryption-standard" type="button" aria-pressed="true">Padrão</button>
+                    <button id="setup-encryption-custom" type="button" aria-pressed="false">Chave personalizada</button>
+                </div>
+                <div id="setup-encryption-custom-fields" class="hidden">
+                    <p id="setup-encryption-help" class="encryption-help">Já tem arquivos protegidos? Importe a chave de recuperação usada nessa biblioteca.</p>
+                    <button id="setup-encryption-import" class="btn-secondary" type="button">Importar chave de recuperação</button>
+                    <p id="setup-encryption-status" class="encryption-status" role="status" aria-live="polite"></p>
+                    <details id="setup-encryption-create">
+                        <summary id="setup-encryption-create-title">Criar uma nova chave</summary>
+                        <p id="setup-encryption-create-help" class="encryption-help">Uma chave nova não abre arquivos protegidos por outra chave. Para recuperar uma biblioteca, importe o arquivo de recuperação.</p>
+                        <div class="field"><label id="setup-key-password-label" for="setup-key-password">Senha da nova chave</label><input id="setup-key-password" type="password" autocomplete="new-password"/></div>
+                        <div class="field"><label id="setup-key-confirm-label" for="setup-key-confirm">Confirmar senha</label><input id="setup-key-confirm" type="password" autocomplete="new-password"/></div>
+                        <label class="check-row"><input id="setup-key-acknowledge" type="checkbox"/><span id="setup-key-acknowledge-label">Vou exportar e guardar a chave de recuperação em um local seguro.</span></label>
+                        <button id="setup-key-create" class="btn-secondary" type="button">Criar chave</button>
+                    </details>
+                </div>
+            </section>
+                <p id="setup-security-error" class="error-box hidden" role="alert"></p>
+                <div class="setup-actions"><button id="setup-back" class="btn-secondary" type="button"><span data-icon="arrow_back" data-size="19"></span><span data-setup-text="back">Voltar</span></button>
+            <button id="btn-connect" class="btn-connect"><span class="btn-icon" data-icon="login" data-size="22"></span><span>Conectar</span></button>
+                </div>
+            </section>
+            <section id="setup-error-step" class="setup-screen hidden" aria-labelledby="setup-error-title">
+                <div class="setup-error-heading"><span data-icon="cloud_off" data-size="30"></span><h2 id="setup-error-title" tabindex="-1" data-setup-text="connectionFailed">Não foi possível conectar</h2></div>
             <div id="error-box" class="error-box hidden" role="alert"></div>
             <button id="btn-open-proxy" class="btn-secondary hidden" type="button" aria-expanded="false" aria-controls="proxy-details">Configurar proxy</button>
             <section id="proxy-details" class="proxy-block hidden" aria-label="Rede e proxy">
@@ -126,11 +147,13 @@
                 </div>
             </section>
 
-            <button id="btn-connect" class="btn-connect"><span class="btn-icon" data-icon="login" data-size="22"></span><span>Conectar</span></button>
 
-            <button id="btn-guide" class="guide-link" type="button">
-                <span>Como criar o bot e configurar o Discord passo a passo</span><span class="guide-icon" data-icon="open_in_new" data-size="18"></span>
-            </button>
+<div id="channel-actions" class="channel-actions hidden">
+                <button id="btn-create-channels" class="btn-secondary" type="button">Criar canais automaticamente</button>
+            </div>
+                <button id="setup-retry" class="btn-connect" type="button"><span data-icon="refresh" data-size="19"></span><span data-setup-text="retry">Tentar novamente</span></button>
+                <button id="setup-edit-token" class="guide-link" type="button" data-setup-text="reviewSetup">Revisar configuração</button>
+            </section>
         </div>
 
         <div id="loading-area" class="loading hidden">

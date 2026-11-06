@@ -13,6 +13,93 @@ Object.assign(I18N.en, {
 
 const WINDOWS_ACCENT_PRESETS = ['#0078D4','#0099BC','#00B7C3','#107C10','#FFB900','#CA5010','#D13438','#E3008C','#8764B8'];
 const normalizeAccentColor = value => /^#[0-9a-f]{6}$/i.test(value || '') ? value.toUpperCase() : '#0078D4';
+const settingsSelectControls = new Map();
+let openSettingsSelect = null;
+
+function closeSettingsSelect(focus = false) {
+    const control = openSettingsSelect;
+    if (!control) return;
+    control.menu.classList.add('hidden');
+    control.trigger.setAttribute('aria-expanded','false');
+    openSettingsSelect = null;
+    if (focus) control.trigger.focus({preventScroll:true});
+}
+
+function syncSettingsSelects() {
+    document.querySelectorAll('#settings-panel select:not(#setting-language)').forEach(select => {
+        let control = settingsSelectControls.get(select);
+        if (!control) {
+            const wrapper = select.closest('.settings-select-wrap');
+            if (!wrapper) return;
+            wrapper.classList.add('settings-custom-select');
+            wrapper.querySelector(':scope > [data-icon]')?.remove();
+            select.classList.add('native-hidden');
+            select.tabIndex = -1;
+            select.setAttribute('aria-hidden','true');
+            const trigger = document.createElement('button');
+            trigger.type = 'button'; trigger.className = 'settings-select-trigger';
+            trigger.setAttribute('role','combobox'); trigger.setAttribute('aria-haspopup','listbox');
+            trigger.setAttribute('aria-expanded','false');
+            const label = select.labels[0];
+            if (label) { label.id ||= select.id + '-label'; trigger.setAttribute('aria-labelledby',label.id); }
+            const menu = document.createElement('div');
+            menu.id = select.id + '-options'; menu.className = 'settings-select-menu hidden';
+            menu.setAttribute('role','listbox'); trigger.setAttribute('aria-controls',menu.id);
+            wrapper.append(trigger); document.body.append(menu);
+            control = {select,trigger,menu}; settingsSelectControls.set(select,control);
+            const current = control;
+            const open = () => {
+                closeSettingsSelect(); syncSettingsSelects();
+                openSettingsSelect = current;
+                const bounds = trigger.getBoundingClientRect();
+                menu.style.width = Math.min(Math.max(bounds.width,240),innerWidth - 24) + 'px';
+                menu.style.maxHeight = Math.min(280,innerHeight - 24) + 'px';
+                menu.classList.remove('hidden');
+                const height = menu.offsetHeight;
+                menu.style.left = Math.max(12,Math.min(bounds.left,innerWidth - menu.offsetWidth - 12)) + 'px';
+                menu.style.top = Math.max(12,bounds.bottom + height + 8 <= innerHeight ? bounds.bottom + 6 : bounds.top - height - 6) + 'px';
+                trigger.setAttribute('aria-expanded','true');
+                menu.querySelector('[aria-selected="true"]')?.focus({preventScroll:true});
+            };
+            trigger.addEventListener('click', () => openSettingsSelect === current ? closeSettingsSelect() : open());
+            const navigate = event => {
+                if (!['ArrowDown','ArrowUp','Home','End','Escape','Enter',' '].includes(event.key)) return;
+                event.stopPropagation();
+                if (event.key === 'Escape') { event.preventDefault(); closeSettingsSelect(true); return; }
+                if (['Enter',' '].includes(event.key)) return;
+                event.preventDefault();
+                if (openSettingsSelect !== current) { open(); return; }
+                const choices = [...menu.querySelectorAll('button:not(:disabled)')];
+                const index = choices.indexOf(document.activeElement);
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+                choices[next]?.focus({preventScroll:true});
+            };
+            trigger.addEventListener('keydown',navigate); menu.addEventListener('keydown',navigate);
+            select.addEventListener('change',syncSettingsSelects);
+        }
+        const label = select.selectedOptions[0]?.textContent || '';
+        if (control.trigger.dataset.label !== label) {
+            control.trigger.innerHTML = '<span></span>' + icon('expand_more',18);
+            control.trigger.firstElementChild.textContent = label;
+            control.trigger.dataset.label = label;
+        }
+        control.trigger.disabled = select.disabled;
+        const signature = [...select.options].map(option => [option.value,option.textContent,option.selected,option.disabled].join('\u0000')).join('\u0001');
+        if (control.menu.dataset.options === signature) return;
+        control.menu.dataset.options = signature; control.menu.replaceChildren();
+        [...select.options].forEach(option => {
+            const choice = document.createElement('button');
+            choice.type = 'button'; choice.textContent = option.textContent; choice.disabled = option.disabled;
+            choice.setAttribute('role','option'); choice.setAttribute('aria-selected',String(option.selected));
+            choice.dataset.value = option.value;
+            choice.addEventListener('click', () => {
+                select.value = option.value; closeSettingsSelect(true);
+                select.dispatchEvent(new Event('change',{bubbles:true}));
+            });
+            control.menu.append(choice);
+        });
+    });
+}
 
 function accentLuminance(rgb) {
     return rgb.map(channel => channel / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
@@ -64,6 +151,7 @@ function syncAccentControls() {
         $('accent-presets').appendChild(button);
     });
     $('accent-presets').querySelectorAll('button').forEach(button => button.setAttribute('aria-pressed',String(mode.value === 'preset' && button.dataset.accent === settings.accentColor)));
+    syncSettingsSelects();
 }
 
 window._onSystemAccentChanged = color => {
@@ -104,6 +192,14 @@ function syncSidebarSelection() {
 }
 
 document.addEventListener('DOMContentLoaded',() => {
+    document.addEventListener('click',event => {
+        if (openSettingsSelect && !openSettingsSelect.trigger.contains(event.target) && !openSettingsSelect.menu.contains(event.target)) closeSettingsSelect();
+    });
+    document.addEventListener('focusin',event => {
+        if (openSettingsSelect && !openSettingsSelect.trigger.contains(event.target) && !openSettingsSelect.menu.contains(event.target)) closeSettingsSelect();
+    });
+    document.addEventListener('scroll',() => closeSettingsSelect(),true);
+    window.addEventListener('resize',() => closeSettingsSelect());
     syncAccentControls();
     $('setting-accent-mode').addEventListener('change',event => {
         settings.accentColorMode = event.target.value;

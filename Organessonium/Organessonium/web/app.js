@@ -134,14 +134,14 @@ const I18N = {
         openPreview:v => 'Selecionar arquivo ' + v.name,
         settingsTitle:'Configurações', appearance:'Aparência', language:'Idioma',
         theme:'Tema', system:'Sistema', dark:'Escuro', light:'Claro', cardSize:'Tamanho dos cards',
-        small:'Pequeno', medium:'Médio', large:'Grande', previews:'Prévias',
+        small:'Pequeno', medium:'Médio', large:'Grande', previews:'Miniaturas',
         videoPreviewQuality:'Qualidade do vídeo', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Usa a prévia 480p para carregar vídeos mais rápido.',
         generateVideoPreviews:'Gerar prévias 480p dos vídeos',
         generateVideoPreviewsHelp:'Desative para enviar vídeos mais rápido. Miniaturas e reprodução progressiva continuam disponíveis.',
         cancelFileUpload:'Cancelar upload deste arquivo', cancellingFileUpload:'Cancelando...',
         videoPrefetch:'Chunks antecipados de vídeo', videoPrefetchHelp:'Buffer somente em RAM. Zero desativa a antecipação; não limita downloads completos.',
-        cache:'Cache', clearCache:'Limpar cache', clearCacheHelp:'Limpa prévias e imagens salvas localmente.',
+        cache:'Cache', clearCache:'Limpar cache', clearCacheHelp:'Limpa miniaturas e prévias salvas neste dispositivo.',
         cacheSize:v => 'Uso atual: ' + v.size,
         cacheCleared:'Cache limpo.',
         performance:'Desempenho', enableAnimations:'Ativar animações',
@@ -155,7 +155,7 @@ const I18N = {
         encryptionExportWarning:'Qualquer pessoa que possuir este arquivo poderá acessar os arquivos protegidos por esta chave.',
         encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
-        enablePreviews:'Ativar prévias', simultaneousPreviews:'Prévias simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
+        enablePreviews:'Ativar miniaturas', simultaneousPreviews:'Miniaturas simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
         forceUploadParallelism:'Forçar 16 workers (RAM até 1 GB)', forceUploadParallelismHelp:'Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -280,14 +280,14 @@ const I18N = {
         openPreview:v => 'Select file ' + v.name,
         settingsTitle:'Settings', appearance:'Appearance', language:'Language',
         theme:'Theme', system:'System', dark:'Dark', light:'Light', cardSize:'Card size',
-        small:'Small', medium:'Medium', large:'Large', previews:'Previews',
+        small:'Small', medium:'Medium', large:'Large', previews:'Thumbnails',
         videoPreviewQuality:'Video quality', videoPreviewLow:'480p', videoPreviewOriginal:'Original',
         videoPreviewQualityHelp:'Uses the 480p preview to load videos faster.',
         generateVideoPreviews:'Generate 480p video previews',
         generateVideoPreviewsHelp:'Disable to upload videos faster. Thumbnails and progressive playback remain available.',
         cancelFileUpload:'Cancel this file upload', cancellingFileUpload:'Cancelling...',
         videoPrefetch:'Video chunks to prefetch', videoPrefetchHelp:'RAM-only buffer. Zero disables prefetch; full downloads are not limited.',
-        cache:'Cache', clearCache:'Clear cache', clearCacheHelp:'Clears locally saved previews and images.',
+        cache:'Cache', clearCache:'Clear cache', clearCacheHelp:'Clears thumbnails and previews saved on this device.',
         cacheSize:v => 'Current usage: ' + v.size,
         cacheCleared:'Cache cleared.',
         performance:'Performance', enableAnimations:'Enable animations',
@@ -301,7 +301,7 @@ const I18N = {
         encryptionExportWarning:'Anyone with this file can access files protected by this key.',
         encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
-        enablePreviews:'Enable previews', simultaneousPreviews:'Simultaneous previews', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
+        enablePreviews:'Enable thumbnails', simultaneousPreviews:'Simultaneous thumbnails', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
         forceUploadParallelism:'Force 16 workers (RAM up to 1 GB)', forceUploadParallelismHelp:'Applies immediately to running uploads. Bypasses only dynamic worker adjustment; keeps the global RAM ceiling and Discord limits. Chunks are encrypted in RAM without ciphertext disk fallback.',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
@@ -405,7 +405,7 @@ Object.assign(I18N['pt-BR'], {
     "settingEnabled": "Ativado",
     "settingDisabled": "Desativado",
     "settingsDescAppearance": "Idioma, tema, cores e tamanho dos cards.",
-    "settingsDescPreview": "Exibição de imagens, vídeos e prévias salvas no dispositivo.",
+    "settingsDescPreview": "Miniaturas dos arquivos, visualização de imagens e vídeos e cache local.",
     "settingsDescPerformance": "Animações e uso do hardware na interface.",
     "settingsDescUploads": "Prévia de vídeo e quantidade de arquivos e partes enviados ao mesmo tempo.",
     "settingsDescEncryption": "Escolha quem gerencia a chave usada nos próximos uploads.",
@@ -447,7 +447,7 @@ Object.assign(I18N.en, {
     "settingEnabled": "On",
     "settingDisabled": "Off",
     "settingsDescAppearance": "Language, theme, colors and card size.",
-    "settingsDescPreview": "Images, videos and previews stored on this device.",
+    "settingsDescPreview": "File thumbnails, image and video viewing, and local cache.",
     "settingsDescPerformance": "Animations and hardware usage in the interface.",
     "settingsDescUploads": "Video previews and simultaneous files and parts.",
     "settingsDescEncryption": "Choose who manages the key for new uploads.",
@@ -6116,8 +6116,10 @@ function syncSettingsPageLanguage() {
     if ($('settings-close')) $('settings-close').title = t('back');
     syncEncryptionSettings();
     syncUploadSettings();
+    if (typeof syncSettingsSelects === 'function') syncSettingsSelects();
 }
 function selectSettingsCategory(category, focus = false) {
+    if (typeof closeSettingsSelect === 'function') closeSettingsSelect();
     const button = settingsPanel.querySelector('[data-settings-category="' + category + '"]');
     if (!button) return;
     activeSettingsCategory = category;
@@ -6171,6 +6173,7 @@ function closeSettings(restoreWorkspace = true) {
     settingsPanel.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('settings-view');
     closeLanguageMenu();
+    if (typeof closeSettingsSelect === 'function') closeSettingsSelect();
     const create = $('btn-sidebar-new');
     create.disabled = activeLibraryView !== 'files';
     create.setAttribute('aria-disabled', String(create.disabled));
