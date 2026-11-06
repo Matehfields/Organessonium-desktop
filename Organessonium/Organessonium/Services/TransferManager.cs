@@ -22,7 +22,8 @@ public sealed partial class TransferManager
         string mimeType,
         long chunkSizeBytes,
         int totalChunks,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool persist = true)
     {
         var state = new TransferState
         {
@@ -39,7 +40,7 @@ public sealed partial class TransferManager
             TotalChunks = totalChunks,
             PendingChunks = Enumerable.Range(0, Math.Max(0, totalChunks)).ToList()
         };
-        await SaveAsync(state, cancellationToken);
+        if (persist) await SaveAsync(state, cancellationToken);
         return state;
     }
 

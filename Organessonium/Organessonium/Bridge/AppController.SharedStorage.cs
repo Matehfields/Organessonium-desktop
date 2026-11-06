@@ -18,7 +18,7 @@ public sealed partial class AppController
             var size = task.File.Length;
             var partBytes = Math.Min(size, EncryptionService.MaximumPlaintextPayloadBytes);
             var transfer = await _transferManager.CreateUploadAsync(task.File, task.Path, FolderIdForPath(entries, task.Path),
-                GuessFileMime(task.File.Name), partBytes, ArchiveSplitter.GetPartCount(size, EncryptionService.MaximumPlaintextPayloadBytes), cancellation);
+                GuessFileMime(task.File.Name), partBytes, ArchiveSplitter.GetPartCount(size, EncryptionService.MaximumPlaintextPayloadBytes), cancellation, persist: false);
             transfer.FileId = task.Replacement?.Metadata.FileId ?? Guid.NewGuid().ToString("N");
             transfer.Replacement = task.Replacement;
             transfer.Encryption = _encryption.CreateFileEncryption(encryptionMode);

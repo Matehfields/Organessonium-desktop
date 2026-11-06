@@ -32,7 +32,13 @@ internal static partial class Program
             await registry.AddEntryAsync(existing);
             var owner = new System.Windows.Window();
             using var web = new WebView2(); // Never shown or initialized.
-            await using var controller = new AppController(owner, store, new WebMessageBridge(web), _ => Task.CompletedTask);
+            var cachePublished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bridge = new WebMessageBridge(web, script =>
+            {
+                if (script.Contains("_onAppsLoaded", StringComparison.Ordinal)) cachePublished.TrySetResult();
+                return Task.CompletedTask;
+            });
+            await using var controller = new AppController(owner, store, bridge, _ => Task.CompletedTask);
             var session = new DiscordSession();
             typeof(DiscordSession).GetProperty("Api")!.SetValue(session, api);
             typeof(DiscordSession).GetProperty("Settings")!.SetValue(session, settings);
@@ -49,14 +55,19 @@ internal static partial class Program
             var upload = (Task)typeof(AppController).GetMethod("UploadPathsAsync", flags)!.Invoke(controller, new object[] { paths })!;
             await transport.MetadataStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
             // The user opens/refreshes the folder after the queue captured its initial snapshot.
-            await ((Task)typeof(AppController).GetMethod("LoadFolderAtPathAsync", flags)!.Invoke(controller,
-                new object[] { "/Fotos", "[\"photos\"]", false })!).WaitAsync(TimeSpan.FromSeconds(15));
-            RequireSync(!transport.Archives.Any(change => change.Thread == transport.IndexThreadId && change.Archived),
-                "a atualização fechou o índice enquanto o lote ainda o utiliza");
-            // Reconciliation in a separate task must not publish a partial serial.
-            RequireSync(transport.SerialWrites == serialWritesBeforeUpload,
-                "a recarga publicou um serial antes de terminar o upload");
-            transport.AllowMetadata.TrySetResult();
+            var reload = (Task)typeof(AppController).GetMethod("LoadFolderAtPathAsync", flags)!.Invoke(controller,
+                new object[] { "/Fotos", "[\"photos\"]", false })!;
+            try
+            {
+                // Cached cards must arrive before releasing the deliberately blocked metadata confirmation.
+                await cachePublished.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                RequireSync(!transport.Archives.Any(change => change.Thread == transport.IndexThreadId && change.Archived),
+                    "a atualização fechou o índice enquanto o lote ainda o utiliza");
+                RequireSync(transport.SerialWrites == serialWritesBeforeUpload,
+                    "a recarga publicou um serial antes de terminar o upload");
+            }
+            finally { transport.AllowMetadata.TrySetResult(); }
+            await reload.WaitAsync(TimeSpan.FromSeconds(15));
             await upload.WaitAsync(TimeSpan.FromSeconds(40));
             var visible = (IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!;
             var changes = transport.Archives.Where(change => change.Thread == transport.IndexThreadId).ToArray();
@@ -68,6 +79,16 @@ internal static partial class Program
                 $"o lote perdeu arquivos da pasta recarregada, publicou incompleto ou alterou os originais: posts={server.PayloadPosts}, attachments={server.FileThreads().Sum(thread => server.Messages(thread).Sum(message => message.Attachments.Count))}, existing={visible.Any(entry => entry.FileId == existing.FileId)}, cards={visible.Count(entry => entry.Type == "file")}, sources={paths.All(File.Exists)}");
             var cached = await registry.LoadCachedFolderAsync("photos", "/Fotos");
             RequireSync(cached.Count(entry => entry.Type == "file") == 13, "cache/serial perdeu entradas após o lote");
+            await using (var serialBatch = registry.BeginSerialBatch())
+            {
+                await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
+                var pendingFolder = new AppEntry { Type = "folder", Name = "Em upload", Path = "/",
+                    FolderId = "pending-folder", ParentFolderId = "root" };
+                await registry.AddEntryAsync(pendingFolder, synchronizeSerials: false);
+                var duringUpload = await registry.LoadCachedFolderAsync("root", "/");
+                RequireSync(duringUpload.Any(entry => entry.FolderId == pendingFolder.FolderId),
+                    "o cache reaplicou o serial anterior e ocultou a pasta criada durante o upload");
+            }
             var checksum = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(new byte[4096]));
             RequireSync(cached.Where(entry => entry.Name.StartsWith("small-", StringComparison.Ordinal)).All(entry =>
                 entry.Checksums?.Sha256 == checksum && entry.Checksums.Chunks.SequenceEqual(new[] { checksum })),

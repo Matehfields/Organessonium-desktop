@@ -1177,8 +1177,12 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     background:rgba(13,13,13,.88);
     display:flex;align-items:center;justify-content:center;
     pointer-events:none;
+    opacity:0;visibility:hidden;
+    transition:opacity .18s ease,visibility .18s;
 }
-.drag-content{display:flex;flex-direction:column;align-items:center;gap:14px;}
+.drag-overlay.drag-active{opacity:1;visibility:visible;}
+.drag-content{display:flex;flex-direction:column;align-items:center;gap:14px;transform:translateY(12px) scale(.97);transition:transform .22s ease;}
+.drag-active .drag-content{transform:translateY(0) scale(1);}
 .drag-icon-wrap{color:var(--accent);opacity:.8;}
 .drag-text{font-size:18px;font-weight:700;color:var(--text-primary);}
 .drag-ghost{

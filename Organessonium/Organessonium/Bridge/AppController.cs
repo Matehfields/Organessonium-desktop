@@ -128,6 +128,9 @@ public sealed partial class AppController : IAsyncDisposable
     private readonly Action<bool> _onSplashChanged;
     private readonly Func<HttpClient>? _downloadClientFactory;
     private IReadOnlyList<AppEntry> _loadedApps = [];
+    private readonly object _localStatisticsSync = new();
+    private readonly SemaphoreSlim _statisticsPublicationGate = new(1, 1);
+    private long _localStatisticsRevision;
     private IReadOnlyList<AppEntry> _favoriteApps = [];
     private IReadOnlyList<AppEntry> _deviceApps = [];
     private int _favoriteLoadVersion;
@@ -267,7 +270,7 @@ public sealed partial class AppController : IAsyncDisposable
                 var requestedPath = PathRules.Normalize(ArgString(args, 0));
                 var requestedFolderId = ArgString(args, 1);
                 _currentPath = requestedPath;
-                _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
+                if (!ArgBool(args, 2, false)) _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(async () => { await LoadAppsAsync(); await NotifyInterruptedTransfersAsync(); }); return Task.CompletedTask;
             case "loadFavorites": _ = RunAsync(() => LoadFavoritesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
@@ -884,7 +887,6 @@ public sealed partial class AppController : IAsyncDisposable
             await _bridge.CallAsync("_onFolderLoadState", normalizedPath, true);
             if (normalizedPath == AppRegistry.TrashPath)
             {
-                await registry.EnsureTrashIndexAsync();
                 folderIds = [AppRegistry.TrashFolderId];
             }
             if (refreshMappings)
@@ -914,6 +916,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
             }
 
+            if (normalizedPath == AppRegistry.TrashPath) await registry.EnsureTrashIndexAsync();
             var refreshed = await Task.WhenAll(folderIds.Select(folderId =>
                 LoadFolderResultAsync(registry, folderId, normalizedPath, refresh: true)));
             ReplaceLoadedFolders(refreshed);
@@ -1067,9 +1070,28 @@ public sealed partial class AppController : IAsyncDisposable
             entry.Normalize();
         }
 
-        _loadedApps = entries;
+        LibraryStatistics? completedStatistics = null;
+        Task? statisticsPublication = null;
+        lock (_localStatisticsSync)
+        {
+            if (!refreshStatistics && changedEntry is { Type: "file" } && _store.LoadLibraryStatistics() is { } statistics)
+            {
+                var previous = _loadedApps.FirstOrDefault(entry => EntryCacheKey(entry) == EntryCacheKey(changedEntry));
+                var newFile = previous == null && changedEntry.Versions.Count == 0;
+                var bytes = changedEntry.Versions.Count > 0 && previous?.VersionId != changedEntry.VersionId
+                    ? Math.Max(0, changedEntry.SizeBytes)
+                    : FileVersioning.StorageBytes(changedEntry) - (previous == null ? 0 : FileVersioning.StorageBytes(previous));
+                completedStatistics = statistics with { FileCount = statistics.FileCount + (newFile ? 1 : 0),
+                    TotalBytes = Math.Max(0, statistics.TotalBytes + bytes) };
+                _store.SaveLibraryStatistics(completedStatistics);
+                _localStatisticsRevision++;
+            }
+            _loadedApps = entries;
+            if (completedStatistics != null) statisticsPublication = SendLibraryStatisticsAsync(completedStatistics);
+        }
         IReadOnlyList<AppEntry> publishedEntries = changedEntry == null ? entries : [changedEntry];
         await _bridge.CallAsync(incremental ? "_onAppsBatch" : "_onLocalAppsChanged", publishedEntries);
+        if (statisticsPublication != null) await statisticsPublication;
         if (refreshStatistics) _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
     }
 
@@ -1082,12 +1104,21 @@ public sealed partial class AppController : IAsyncDisposable
 
         try
         {
+            var revision = Interlocked.Read(ref _localStatisticsRevision);
             var statistics = await registry.GetLibraryStatisticsAsync(AppRegistry.RootFolderId);
-            if (statistics != null && !_loggingOut)
+            Task? publication = null;
+            if (statistics != null)
             {
-                _store.SaveLibraryStatistics(statistics);
-                await SendLibraryStatisticsAsync(statistics);
+                lock (_localStatisticsSync)
+                {
+                    if (!_loggingOut && revision == _localStatisticsRevision)
+                    {
+                        _store.SaveLibraryStatistics(statistics);
+                        publication = SendLibraryStatisticsAsync(statistics);
+                    }
+                }
             }
+            if (publication != null) await publication;
         }
         catch (OperationCanceledException) when (_loggingOut)
         {
@@ -1106,13 +1137,18 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task SendLibraryStatisticsAsync(LibraryStatistics statistics)
     {
-        await _bridge.CallAsync("_onLibraryStatistics", new
+        await _statisticsPublicationGate.WaitAsync();
+        try
         {
-            fileCount = statistics.FileCount,
-            folderCount = statistics.FolderCount,
-            totalBytes = statistics.TotalBytes
-        });
-        await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
+            await _bridge.CallAsync("_onLibraryStatistics", new
+            {
+                fileCount = statistics.FileCount,
+                folderCount = statistics.FolderCount,
+                totalBytes = statistics.TotalBytes
+            });
+            await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
+        }
+        finally { _statisticsPublicationGate.Release(); }
     }
 
     private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson, string? requestedPath = null)
@@ -2153,6 +2189,7 @@ public sealed partial class AppController : IAsyncDisposable
         var folderCount = 0;
         var skipped = 0;
         var registry = Registry();
+        await using var preparationPriority = registry.SharedStorage.PrioritizeUploads();
         await using var serialBatch = registry.BeginSerialBatch();
         await using var indexBatch = await registry.BeginUploadIndexBatchAsync();
         var all = CurrentLocalEntries();

@@ -7,7 +7,8 @@ let currentFolderIds = ['root'];
 let libraryReconciliationPending = false;
 let uploadPublicationRenderTimer = 0;
 let activeLibraryView = 'files', specialItems = [], deviceItems = [];
-let favoritesLoaded = false, devicesLoaded = false;
+let favoritesLoaded = false, devicesLoaded = false, trashLoaded = false;
+let trashParentSource = null, trashFolderParents = new Map();
 let serverReadDepth = 0;
 let trashEmptying = false;
 let ctxTarget = null;
@@ -1065,6 +1066,7 @@ window._onAppsRemoved = apps => {
 
 window._onAppsLoaded = apps => {
     if (folderLoadingPath === '/') folderLoadingPath = '';
+    if (currentPath === '/@trash') { trashLoaded = true; folderLoadingPath = ''; }
     allApps = apps;
     syncOpenMarkdownApps();
     render();
@@ -1082,7 +1084,7 @@ window._onFolderIndexReconciled = (folderId, entries) => {
     const id = String(folderId || 'root').toLowerCase();
     allApps = allApps.filter(entry => String(entry.parentFolderId || 'root').toLowerCase() !== id).concat(entries);
     syncOpenMarkdownApps();
-    if (activeLibraryView !== 'files' || (!searchQuery && !currentFolderIds.some(folder => String(folder).toLowerCase() === id))) return;
+    if (!['files','trash'].includes(activeLibraryView) || (!searchQuery && !currentFolderIds.some(folder => String(folder).toLowerCase() === id))) return;
     if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
     render();
     refreshSidebarSummary();
@@ -2490,8 +2492,8 @@ window._onEncryptionSettingsChanged = (mode, customKeyAvailable) => {
     setStatus(t('encryptionUpdated'), false);
 };
 window._onEncryptionKeyExported = () => setStatus(t('encryptionExport'), false);
-window._onDragOver  = () => dragOverlay.classList.remove('hidden');
-window._onDragLeave = () => dragOverlay.classList.add('hidden');
+window._onDragOver  = () => { dragOverlay.classList.add('drag-active'); dragOverlay.setAttribute('aria-hidden', 'false'); };
+window._onDragLeave = () => { dragOverlay.classList.remove('drag-active'); dragOverlay.setAttribute('aria-hidden', 'true'); };
 window._onPathChosen = (type, path) => {
     if (type==='download') { $('setting-dlpath').value  = path; settings.downloadPath = path; }
     else if (type==='data') { $('setting-datapath').value = path; settings.dataPath = path; }
@@ -5045,6 +5047,7 @@ function setupMarqueeSelection() {
             additive:e.ctrlKey || e.metaKey || e.shiftKey,
             base:new Set(selectedKeys),
             active:false,
+            frame:0,
             autoScroll:0,
             autoScrollFrame:0
         };
@@ -5065,13 +5068,16 @@ function onMarqueeMove(e) {
         marqueeEl.className = 'selection-rect';
         document.body.appendChild(marqueeEl);
     }
-    updateMarqueeAutoScroll();
-    updateMarqueeRect();
-    updateMarqueeSelection();
+    if (!marqueeState.frame) marqueeState.frame = requestAnimationFrame(() => {
+        if (!marqueeState) return;
+        marqueeState.frame = 0;
+        updateMarqueeAutoScroll(); updateMarqueeSelection(); updateMarqueeRect();
+    });
     e.preventDefault();
 }
 
 function onMarqueeUp() {
+    if (marqueeState?.frame) { cancelAnimationFrame(marqueeState.frame); updateMarqueeSelection(); }
     if (marqueeState && marqueeState.autoScrollFrame) cancelAnimationFrame(marqueeState.autoScrollFrame);
     if (marqueeEl) marqueeEl.remove();
     marqueeEl = null;
@@ -5486,7 +5492,8 @@ function navigate(path, addHistory = true, folderId = '') {
         : path === '/@synchronized' || path.startsWith('/@synchronized/') ? 'devices' : 'files');
     if (addHistory && path !== currentPath) { historyBack.push({ path:currentPath, folderIds:[...currentFolderIds] }); historyForward = []; }
     currentPath = path; searchQuery = ''; $('search-input').value = '';
-    folderLoadingPath = path;
+    const cacheOnly = path === '/@trash' && trashLoaded;
+    folderLoadingPath = cacheOnly ? '' : path;
     const folderIds = path === '/'
         ? []
         : [...allApps, ...specialItems, ...deviceItems]
@@ -5494,7 +5501,7 @@ function navigate(path, addHistory = true, folderId = '') {
             .map(app => app.folderId);
     const explicitIds = Array.isArray(folderId) ? folderId : folderId ? [folderId] : [];
     currentFolderIds = path === '/' ? ['root'] : path === '/@trash' ? ['trash'] : explicitIds.length ? explicitIds : folderIds;
-    window.bridge.setCurrentPath(path, JSON.stringify(currentFolderIds));
+    window.bridge.setCurrentPath(path, JSON.stringify(currentFolderIds), cacheOnly);
     updateNavButtons(); render(); requestVisibleThumbnails();
 }
 
@@ -6973,12 +6980,17 @@ function appsForActiveView() {
 function isTrashApp(app) {
     const path = app.path || '/';
     if (path === '/@trash' || path.startsWith('/@trash/')) return true;
+    if (trashParentSource !== allApps) {
+        trashParentSource = allApps;
+        trashFolderParents = new Map(allApps.filter(entry => entry.type === 'folder' && entry.folderId)
+            .map(entry => [entry.folderId, entry.parentFolderId]));
+    }
     let parent = app.parentFolderId;
     const visited = new Set();
     while (parent && !visited.has(parent)) {
         if (parent === 'trash') return true;
         visited.add(parent);
-        parent = allApps.find(folder => folder.type === 'folder' && folder.folderId === parent)?.parentFolderId;
+        parent = trashFolderParents.get(parent);
     }
     return false;
 }
@@ -7001,11 +7013,12 @@ function updateSelectionUI() {
         if (el.hasAttribute('aria-selected')) el.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
     const bar = $('selection-bar');
-    const count = getSelectedApps().length;
+    const selectedApps = getSelectedApps();
+    const count = selectedApps.length;
     bar.classList.toggle('hidden', count === 0);
     $('selection-count').textContent = t('selectedCount', { count });
     $('sel-delete-text').textContent = t(activeLibraryView === 'trash' ? 'permanentDelete' : 'moveToTrash');
-    $('sel-restore').classList.toggle('hidden', !count || getSelectedApps().some(app => app.parentFolderId !== 'trash'));
+    $('sel-restore').classList.toggle('hidden', !count || selectedApps.some(app => app.parentFolderId !== 'trash'));
 }
 function clearSelection() {
     selectedKeys.clear();

@@ -1237,6 +1237,7 @@ public partial class MainWindow : Window
     {
         private readonly Action<IReadOnlyList<string>> _onDrop;
         private readonly Action<bool> _onDragState;
+        private bool _acceptsFiles;
 
         public NativeFileDropTarget(Action<IReadOnlyList<string>> onDrop, Action<bool> onDragState)
         {
@@ -1246,28 +1247,33 @@ public partial class MainWindow : Window
 
         public int DragEnter(ComTypes.IDataObject dataObject, int keyState, NativePoint point, ref int effect)
         {
-            effect = DropEffectCopy;
-            _onDragState(true);
+            var format = new ComTypes.FORMATETC { cfFormat = CfHdrop, dwAspect = ComTypes.DVASPECT.DVASPECT_CONTENT,
+                lindex = -1, tymed = ComTypes.TYMED.TYMED_HGLOBAL };
+            _acceptsFiles = dataObject.QueryGetData(ref format) == SOk;
+            effect = _acceptsFiles ? DropEffectCopy : 0;
+            _onDragState(_acceptsFiles);
             return SOk;
         }
 
         public int DragOver(int keyState, NativePoint point, ref int effect)
         {
-            effect = DropEffectCopy;
+            effect = _acceptsFiles ? DropEffectCopy : 0;
             return SOk;
         }
 
         public int DragLeave()
         {
+            _acceptsFiles = false;
             _onDragState(false);
             return SOk;
         }
 
         public int Drop(ComTypes.IDataObject dataObject, int keyState, NativePoint point, ref int effect)
         {
-            effect = DropEffectCopy;
             _onDragState(false);
             var paths = ExtractOleDropPaths(dataObject);
+            _acceptsFiles = false;
+            effect = paths.Count > 0 ? DropEffectCopy : 0;
             if (paths.Count > 0)
             {
                 _onDrop(paths);

@@ -61,6 +61,7 @@ internal static partial class Program
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
         ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
         ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),
+        ("mappingRefreshPreservesConcurrentCreation", MappingRefreshPreservesConcurrentCreationAsync),
         ("uploadBatchCadence", UploadBatchCadenceAsync),
         ("uploadPoolBoundary", UploadPoolBoundaryAsync),
         ("resumedUploadDestinationsAndCancellation", ResumedUploadDestinationsAndCancellationAsync),

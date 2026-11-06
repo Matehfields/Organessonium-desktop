@@ -101,6 +101,36 @@ internal static partial class Program
             await Task.Delay(250);
             await Check("allApps.length===6693&&document.querySelectorAll('.cards-grid .file-card').length===100&&document.querySelectorAll('.cards-grid [data-key^=\"burst-meta-\"]').length===40&&window.__retained.isConnected&&window.__retained.classList.contains('selected')&&window.__burstMilliseconds<1000", "o lote grande bloqueou a interface, não apareceu ou recriou a seleção existente");
             Console.WriteLine("UPLOAD_RENDER_RESULT " + await view.ExecuteScriptAsync("JSON.stringify({files:allApps.length,burstMilliseconds:window.__burstMilliseconds,visibleCards:document.querySelectorAll('.cards-grid .file-card').length})"));
+            await view.ExecuteScriptAsync("""
+                _opsUploadBatch('interaction',Array(914).fill('image.jpg'));clearSelection();
+                window.__main=document.getElementById('main-area');window.__surface=marqueeSurfaceBounds();
+                window.__first=document.querySelector('.cards-grid .file-card').getBoundingClientRect();
+                __main.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,clientX:__surface.left+3,clientY:__surface.top+3}));
+                window.__moveStarted=performance.now();
+                for(let i=0;i<20;i++){
+                    _opsUploadFileProgress('interaction',i%16,'active',i+1,'Enviando');
+                    document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:__first.right-2,clientY:__first.bottom-2}));
+                }
+                window.__moveMs=performance.now()-__moveStarted;
+                """);
+            await Task.Delay(80);
+            await Check("window.__moveMs<500&&document.querySelector('.selection-rect').getBoundingClientRect().width>100&&selectedKeys.size>0", "a seleção atrasou durante o upload ou não alcançou os cards");
+            Console.WriteLine("SELECTION_RESULT " + await view.ExecuteScriptAsync("JSON.stringify({moveMilliseconds:__moveMs,selected:selectedKeys.size,files:allApps.length})"));
+            await view.ExecuteScriptAsync("""
+                document.dispatchEvent(new MouseEvent('mouseup',{bubbles:true}));
+                window.__navigation=[];window.bridge.setCurrentPath=(...args)=>__navigation.push(args);
+                showTrashWorkspace();_onAppsLoaded(allApps);showFilesWorkspace();showTrashWorkspace();
+                """);
+            await Check("activeLibraryView==='trash'&&trashLoaded&&folderLoadingPath===''&&__navigation.at(-1)[2]===true&&document.querySelectorAll('.file-card').length===0", "a Lixeira vazia perdeu o cache ao voltar para a aba");
+            await view.ExecuteScriptAsync("_onFolderIndexReconciled('trash',[{type:'file',fileId:'trash-new',metadataMessageId:'trash-new',name:'Recuperado.jpg',path:'/@trash',parentFolderId:'trash'}])");
+            await Check("document.querySelectorAll('.file-card').length===1&&document.querySelector('.file-card').textContent.includes('Recuperado.jpg')", "a reconciliação silenciosa não atualizou a Lixeira aberta");
+            await view.ExecuteScriptAsync("_onFolderIndexReconciled('trash',[])");
+            await Check("document.querySelectorAll('.file-card').length===0", "a Lixeira conservou um card removido na reconciliação");
+            await view.ExecuteScriptAsync("_onDragOver()");
+            await Check("dragOverlay.getAttribute('aria-hidden')==='false'&&dragOverlay.classList.contains('drag-active')", "o indicador de arquivos arrastados não apareceu");
+            await view.ExecuteScriptAsync("_onDragLeave()");
+            await Task.Delay(250);
+            await Check("dragOverlay.getAttribute('aria-hidden')==='true'&&getComputedStyle(dragOverlay).visibility==='hidden'", "o indicador de arrastar não saiu da tela");
             RequireSync(!IsWindowVisible(host), "o teste exibiu uma janela");
             return TestOutcome.Pass();
         }

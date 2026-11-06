@@ -9,6 +9,59 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static async Task<TestOutcome> MappingRefreshPreservesConcurrentCreationAsync()
+    {
+        using var h = new SharedHarness();
+        await h.Registry.RefreshMappingsAsync();
+        await h.Registry.AddEntryAsync(AppEntry.Folder("Antes", "/"));
+        using var gate = new NamesSnapshotGate(h.Server);
+        using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(gate, false));
+        var registry = new AppRegistry(api, h.Store, h.Settings);
+        await registry.RefreshMappingsAsync();
+        gate.HoldNext = 1;
+        var refresh = registry.RefreshMappingsAsync();
+        var folder = AppEntry.Folder("Durante", "/");
+        string newRootHash;
+        try
+        {
+            await gate.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await registry.AddEntryAsync(folder).WaitAsync(TimeSpan.FromSeconds(10));
+            newRootHash = h.Store.LoadFolderIndexMappings()["root"].SerialSha256;
+        }
+        finally { gate.Release.TrySetResult(); }
+        await refresh.WaitAsync(TimeSpan.FromSeconds(10));
+        var mappings = h.Store.LoadFolderIndexMappings();
+        var entries = await registry.LoadFolderSerialAsync("root", "/");
+        RequireSync(mappings.ContainsKey(folder.FolderId) && mappings["root"].SerialSha256 == newRootHash &&
+            entries.Any(entry => entry.FolderId == folder.FolderId),
+            "uma leitura anterior removeu a pasta nova ou substituiu seu serial confirmado");
+        await api.DeleteMessageAsync("names", mappings[folder.FolderId].NamesMessageId);
+        await registry.RefreshMappingsAsync();
+        RequireSync(!h.Store.LoadFolderIndexMappings().ContainsKey(folder.FolderId),
+            "a proteção de concorrência impediu reconhecer uma remoção remota posterior");
+        return TestOutcome.Pass();
+    }
+
+    private sealed class NamesSnapshotGate(HttpMessageHandler inner) : HttpMessageHandler
+    {
+        private readonly HttpMessageInvoker _forward = new(inner, false);
+        internal int HoldNext;
+        internal TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            var response = await _forward.SendAsync(request, token);
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/channels/names/messages", StringComparison.Ordinal) &&
+                Interlocked.Exchange(ref HoldNext, 0) == 1)
+            {
+                Started.TrySetResult();
+                await Release.Task.WaitAsync(token);
+            }
+            return response;
+        }
+        protected override void Dispose(bool disposing) { if (disposing) _forward.Dispose(); base.Dispose(disposing); }
+    }
+
     private static async Task<TestOutcome> SharedSingleUploadStartsImmediatelyAsync()
     {
         using var h = new SharedHarness();

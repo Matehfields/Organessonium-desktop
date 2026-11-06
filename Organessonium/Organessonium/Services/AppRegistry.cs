@@ -28,6 +28,7 @@ public sealed partial class AppRegistry
     private readonly ConcurrentDictionary<string, byte> _deferredFolderSerials = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _duplicateFolderRepairs = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _mappingRefreshGate = new(1, 1);
+    private readonly object _mappingPublicationSync = new();
     private readonly SemaphoreSlim _rootCreationGate = new(1, 1);
     private readonly SemaphoreSlim _entryMutationGate = new(1, 1);
     private readonly SemaphoreSlim _serialSynchronizationGate = new(1, 1);
@@ -57,11 +58,9 @@ public sealed partial class AppRegistry
     {
         var normalizedFolderId = NormalizeFolderId(folderId);
         var cached = _store.LoadCachedEntriesForFolder(normalizedFolderId);
-        var serial = await _serials.LoadCachedFolderAsync(normalizedFolderId, cancellationToken);
-        if (serial == null && _mappings.TryGetValue(normalizedFolderId, out var mapping))
-        {
-            serial = await _serials.LoadFolderAsync(mapping, cancellationToken);
-        }
+        // Confirmed upload metadata can be newer than the serial until the batch ends.
+        var serial = Volatile.Read(ref _uploadIndexBatches) > 0 ? null
+            : await _serials.LoadCachedFolderAsync(normalizedFolderId, cancellationToken);
         var entries = serial == null
             ? cached
             : _serials.MaterializeEntries(serial, cached, folderPath, MappingSnapshot()).ToList();
@@ -696,6 +695,7 @@ public sealed partial class AppRegistry
         await _mappingRefreshGate.WaitAsync(cancellationToken);
         try
         {
+            var before = _mappings.ToArray().ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
             var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
             var messages = await _discord.GetMessagesInParallelAsync(
                 _settings.NamesChannelId,
@@ -710,24 +710,30 @@ public sealed partial class AppRegistry
                     .First())
                 .ToList();
 
-            if (canonical.Count == 0 && !_mappings.IsEmpty)
+            if (canonical.Count == 0 && before.Count > 0)
             {
                 throw new InvalidOperationException("A leitura dos mappings retornou vazia; o índice local foi preservado.");
             }
             foreach (var mapping in canonical)
             {
-                if (_mappings.TryGetValue(mapping.FolderId, out var previous) &&
+                if (before.TryGetValue(mapping.FolderId, out var previous) &&
+                    _mappings.TryGetValue(mapping.FolderId, out var current) && current == previous &&
                     (previous.SerialMessageId != mapping.SerialMessageId || previous.SerialSha256 != mapping.SerialSha256))
                     await _serials.InvalidateCachedFolderAsync(mapping.FolderId);
-                _mappings[mapping.FolderId] = mapping;
             }
             var currentIds = canonical.Select(mapping => mapping.FolderId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var folderId in _mappings.Keys.Where(folderId => !currentIds.Contains(folderId)))
+            lock (_mappingPublicationSync)
             {
-                _mappings.TryRemove(folderId, out _);
+                // A remote snapshot cannot replace or remove a mapping published after its read began.
+                foreach (var mapping in canonical)
+                    if (before.TryGetValue(mapping.FolderId, out var previous))
+                        _mappings.TryUpdate(mapping.FolderId, mapping, previous);
+                    else _mappings.TryAdd(mapping.FolderId, mapping);
+                foreach (var previous in before.Where(pair => !currentIds.Contains(pair.Key)))
+                    ((ICollection<KeyValuePair<string, FolderIndexMapping>>)_mappings).Remove(previous);
+                _store.ReplaceFolderIndexMappings(_mappings.Values.ToList());
             }
-            _store.ReplaceFolderIndexMappings(canonical);
             _folderFileCounts.Clear();
             _libraryStatistics.Clear();
         }
@@ -1218,9 +1224,12 @@ public sealed partial class AppRegistry
                 await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken);
             }
 
-            _mappings.TryRemove(entry.FolderId, out _);
+            lock (_mappingPublicationSync)
+            {
+                _mappings.TryRemove(entry.FolderId, out _);
+                _store.DeleteFolderIndexMapping(entry.FolderId);
+            }
             _descriptors.TryRemove(entry.FolderId, out _);
-            _store.DeleteFolderIndexMapping(entry.FolderId);
             _store.CacheFolderEntries(entry.FolderId, []);
         }
 
@@ -1312,8 +1321,11 @@ public sealed partial class AppRegistry
             _settings.NamesChannelId, mapping.NamesMessageId,
             _metadata.SerializeFolderIndex(updated), cancellationToken);
         updated = updated with { NamesMessageId = message.Id };
-        _mappings[updated.FolderId] = updated;
-        _store.UpsertFolderIndexMapping(updated);
+        lock (_mappingPublicationSync)
+        {
+            _mappings[updated.FolderId] = updated;
+            _store.UpsertFolderIndexMapping(updated);
+        }
     }
 
     private async Task<List<AppEntry>> RefreshFolderCoreAsync(
@@ -1639,8 +1651,11 @@ public sealed partial class AppRegistry
             _metadata.SerializeFolderIndex(draft),
             cancellationToken);
         var mapping = draft with { NamesMessageId = message.Id };
-        _mappings[folderId] = mapping;
-        _store.UpsertFolderIndexMapping(mapping);
+        lock (_mappingPublicationSync)
+        {
+            _mappings[folderId] = mapping;
+            _store.UpsertFolderIndexMapping(mapping);
+        }
         _descriptors[folderId] = new FolderDescriptor(folderId, parentFolderId, name, folderPath);
         if (synchronizeSerials)
         {
@@ -1705,8 +1720,11 @@ public sealed partial class AppRegistry
             }
 
             var persisted = updated with { NamesMessageId = message.Id };
-            _mappings[normalizedFolderId] = persisted;
-            _store.UpsertFolderIndexMapping(persisted);
+            lock (_mappingPublicationSync)
+            {
+                _mappings[normalizedFolderId] = persisted;
+                _store.UpsertFolderIndexMapping(persisted);
+            }
             await _serials.DeleteSupersededRemoteSerialAsync(
                 mapping.SerialMessageId,
                 persisted.SerialMessageId,
