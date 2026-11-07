@@ -85,6 +85,7 @@ internal sealed partial class SharedStorageManager
     internal async Task ReconcileAsync(CancellationToken token = default)
     {
         var deferUntilNextAction = false;
+        var cancelledPools = new HashSet<string>(StringComparer.Ordinal);
         CancellationTokenSource lifetime;
         lock (_maintenance)
         {
@@ -113,12 +114,16 @@ internal sealed partial class SharedStorageManager
                 if (pending.Length > 0) NotifyCleanup(new(Pending: pending.Select(request => request.OperationId).ToArray()));
                 await CleanBatchAsync(pending, (request, cleaned) =>
                 {
+                    if (cleaned && request.Scope.StartsWith("upload:", StringComparison.Ordinal))
+                        foreach (var payload in request.Payloads.Where(payload => payload.Storage?.Shared == true))
+                            cancelledPools.Add(payload.ThreadId);
                     var interested = NotifyCleanup(cleaned ? new(Completed: request.OperationId) : new(Waiting: true));
                     deferUntilNextAction |= !cleaned && interested;
                     return Task.CompletedTask;
                 }, lifetime.Token, continueOnFailure: false);
             }
             finally { _gate.Release(); }
+            if (cancelledPools.Count > 0) await AuditOrphansAsync(cancelledPools, lifetime.Token);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested && lifetime.IsCancellationRequested)
         {

@@ -12,19 +12,21 @@ internal static class FfmpegMediaService
     internal static int PreviewChunkBytes => EncryptionService.MaximumPlaintextPayloadBytes;
     private const long WorkingBytes = 192L * 1024 * 1024;
     private static readonly SemaphoreSlim Gate = new(1, 1);
+    private static readonly SemaphoreSlim ThumbnailGate = new(1, 1);
     internal static bool Available => EmbeddedMediaRuntime.Available && Environment.Is64BitOperatingSystem &&
         (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.X64 ||
             OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000));
 
-    internal static async Task<IDisposable> EnterAsync(CancellationToken token)
+    internal static async Task<IDisposable> EnterAsync(CancellationToken token, bool thumbnail = false)
     {
-        await Gate.WaitAsync(token).ConfigureAwait(false);
-        return new GateLease();
+        var gate = thumbnail ? ThumbnailGate : Gate;
+        await gate.WaitAsync(token).ConfigureAwait(false);
+        return new GateLease(gate);
     }
 
     internal static async Task<RamMediaPreview> ThumbnailAsync(FileInfo source, CancellationToken token, string? executable = null)
     {
-        using var gate = await EnterAsync(token).ConfigureAwait(false);
+        using var gate = await EnterAsync(token, thumbnail: true).ConfigureAwait(false);
         using var sourceLock = OpenSourceLock(source);
         using var output = new MemoryStream();
         await ReadOutputAsync(source, false, true, async (stream, cancellation) =>
@@ -169,9 +171,9 @@ internal static class FfmpegMediaService
         catch (System.ComponentModel.Win32Exception) { }
     }
 
-    private sealed class GateLease : IDisposable
+    private sealed class GateLease(SemaphoreSlim gate) : IDisposable
     {
         private int _released;
-        public void Dispose() { if (Interlocked.Exchange(ref _released, 1) == 0) Gate.Release(); }
+        public void Dispose() { if (Interlocked.Exchange(ref _released, 1) == 0) gate.Release(); }
     }
 }

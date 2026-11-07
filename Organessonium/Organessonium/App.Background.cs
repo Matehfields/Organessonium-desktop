@@ -113,6 +113,8 @@ public partial class App
     internal async Task ExitDesktopAsync()
     {
         if (_exiting) return;
+        if (_mainWindow != null && !await _mainWindow.ConfirmExitDesktopAsync()) return;
+        if (_exiting) return;
         _exiting = true;
         AppLogger.SyncEvent("Sync.Exit", "cancelling workers");
         _tray?.Dispose();

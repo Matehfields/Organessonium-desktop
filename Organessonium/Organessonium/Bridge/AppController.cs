@@ -212,6 +212,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _closeConfirmationResponse?.TrySetResult(false);
         _videoMemoryGuard.Dispose();
         DetachSyncHost();
         _loggingOut = true;
@@ -258,6 +259,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         switch (method)
         {
+            case "resolveAppClose": _closeConfirmationResponse?.TrySetResult(ArgBool(args, 0, false)); return Task.CompletedTask;
             case "loadSyncState": case "discoverSyncFolders": case "chooseSyncFolder":
             case "openSyncFolder":
             case "addSyncFolder": case "updateSyncFolder": case "removeSyncFolder":
@@ -2493,6 +2495,8 @@ public sealed partial class AppController : IAsyncDisposable
             _uploadFileOperations[opId + ":" + index] = fileCancellations[index];
 
         var producers = new SharedPayloadBatcher.ProductionExpectation?[tasks.Count];
+        var originalsFinished = tasks.Select(_ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).ToArray();
+        var waves = new List<Task>();
         Task RunWorkersAsync(IEnumerable<int> indices) => Task.WhenAll(indices.Select(index =>
             RunPausableUploadAsync(opId, index, tasks[index], fileCancellations[index].Token, async (task, fileToken) =>
         {
@@ -2504,6 +2508,24 @@ public sealed partial class AppController : IAsyncDisposable
             void ReleaseOriginal()
             {
                 if (Interlocked.Exchange(ref originalHeld, 0) == 1) admission.Release();
+                originalsFinished[index].TrySetResult();
+            }
+            async Task PreviewGenerationAsync(bool generating, CancellationToken token)
+            {
+                if (generating)
+                {
+                    if (pendingHeld) { pendingHeld = false; pendingFiles.Release(); }
+                    if (activeCounted) { activeCounted = false; Interlocked.Decrement(ref active); }
+                    await OpsUploadFileProgressAsync(opId, index, "processing", -1, "Gerando prévia 480p");
+                }
+                else
+                {
+                    await pendingFiles.WaitAsync(token);
+                    pendingHeld = true;
+                    activeCounted = true;
+                    Interlocked.Increment(ref active);
+                    await OpsUploadFileProgressAsync(opId, index, "active", -1, "Enviando prévia 480p");
+                }
             }
             try
             {
@@ -2556,6 +2578,7 @@ public sealed partial class AppController : IAsyncDisposable
                     reservationVerified: task.PreparedTransfer?.Storage?.Shared == true,
                     recoverSharedParts: task.Resuming || task.NeedsRemoteRecovery,
                     onOriginalUploaded: ReleaseOriginal,
+                    onPreviewGeneration: PreviewGenerationAsync,
                     onPublishingMetadata: () =>
                     {
                         if (_transferPauses.TryGetValue(TransferKey(opId, index), out var pause)) pause.FinishPublication();
@@ -2639,25 +2662,31 @@ public sealed partial class AppController : IAsyncDisposable
                         producers[index] = registry.SharedStorage.Batcher.ExpectProduction(new SharedStorageReservation(planned.FileId,
                             planned.TransferId, planned.ThreadId, planned.Storage), EncryptedPayloadRoles.Original, fileCancellations[index].Token,
                             waitingForPublication: () => Volatile.Read(ref publishing) > 0);
-                await RunWorkersAsync(wave);
+                waves.Add(RunWorkersAsync(wave));
+                await Task.WhenAll(wave.Select(index => originalsFinished[index].Task));
                 pending.RemoveAll(wave.Contains);
             }
+            await Task.WhenAll(waves);
             registry.SharedStorage.RequestReservationReconciliation();
         }
         finally
         {
-            for (var index = 0; index < fileCancellations.Length; index++)
+            try { await Task.WhenAll(waves); }
+            finally
             {
-                if (fileCancellations[index].IsCancellationRequested)
-                    await CancelUploadCheckpointAsync(tasks[index].PreparedTransfer);
-                producers[index]?.Dispose();
-                _uploadFileOperations.TryRemove(opId + ":" + index, out _);
-                fileCancellations[index].Dispose();
-            }
-            foreach (var pair in uploadedEntries.OrderBy(pair => pair.Key))
-            {
-                ReplaceLocalEntry(allEntries, pair.Value);
-                TrackFolderSerial(serialFolderIds, pair.Value.ParentFolderId);
+                for (var index = 0; index < fileCancellations.Length; index++)
+                {
+                    if (fileCancellations[index].IsCancellationRequested)
+                        await CancelUploadCheckpointAsync(tasks[index].PreparedTransfer);
+                    producers[index]?.Dispose();
+                    _uploadFileOperations.TryRemove(opId + ":" + index, out _);
+                    fileCancellations[index].Dispose();
+                }
+                foreach (var pair in uploadedEntries.OrderBy(pair => pair.Key))
+                {
+                    ReplaceLocalEntry(allEntries, pair.Value);
+                    TrackFolderSerial(serialFolderIds, pair.Value.ParentFolderId);
+                }
             }
         }
 
@@ -2728,7 +2757,8 @@ public sealed partial class AppController : IAsyncDisposable
         bool reservationVerified = false,
         bool recoverSharedParts = true,
         Action? onOriginalUploaded = null,
-        Action? onPublishingMetadata = null)
+        Action? onPublishingMetadata = null,
+        Func<bool, CancellationToken, Task>? onPreviewGeneration = null)
     {
         await using var uploadPriority = registry.SharedStorage.PrioritizeUploads();
         using var networkWait = NetworkRetryPolicy.TransferScope(cancellationToken);
@@ -3090,7 +3120,7 @@ public sealed partial class AppController : IAsyncDisposable
                         transferState.Encryption,
                         EncryptedPayloadRoles.Preview,
                         0),
-                adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded, sharedUpload);
+                adaptiveUploadGate, transferActivity, onPreviewSize, onBytesUploaded, sharedUpload, onPreviewGeneration);
 
             onPublishingMetadata?.Invoke();
             await ReportUploadItemProgressAsync(
@@ -3214,7 +3244,7 @@ public sealed partial class AppController : IAsyncDisposable
         UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null,
         AdaptiveUploadGate? adaptiveUploadGate = null, TransferActivityClock? transferActivity = null,
         Action<long>? onPreviewSize = null, Func<long, long, Task>? onPreviewBytes = null,
-        SharedUploadContext? sharedUpload = null)
+        SharedUploadContext? sharedUpload = null, Func<bool, CancellationToken, Task>? generationState = null)
     {
         var previewMessageId = transferState?.ThumbnailMessageId ?? "";
         IReadOnlyList<string> videoChunks = transferState?.VideoPreview480pChunks ?? [];
@@ -3299,7 +3329,7 @@ public sealed partial class AppController : IAsyncDisposable
                 {
                     void Report(string status) => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
                         progressTracker?.Current ?? 80, status, throttle,
-                        status == "Concluindo", useBatchUi, progressTracker: progressTracker);
+                        status == "Concluindo", useBatchUi, batchStatus: status.StartsWith("Gerando", StringComparison.Ordinal) ? "processing" : "active", progressTracker: progressTracker);
                     long previewSent = 0;
                     var streamed = await FfmpegPreviewUpload.UploadAsync(file, VideoPreviewFileName(name), threadId,
                         uploader, _encryption, encryption, references, settings.HardwareAcceleration, Report,
@@ -3315,22 +3345,33 @@ public sealed partial class AppController : IAsyncDisposable
                         cancellationToken, onRateLimitWait,
                         generationProgress: percent => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
                             progressTracker?.VideoPreviewGeneration(percent) ?? 80, $"Gerando prévia 480p - {percent}%",
-                            throttle, percent is 0 or 100, useBatchUi, progressTracker: progressTracker),
+                            throttle, percent is 0 or 100, useBatchUi, batchStatus: "processing", progressTracker: progressTracker),
                         maxParallelParts: settings.EffectiveUploadThreads, adaptiveUploadGate: adaptiveUploadGate,
                         onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
-                        onPreviewSize: onPreviewSize, sharedUpload: sharedUpload);
+                        onPreviewSize: onPreviewSize, sharedUpload: sharedUpload, generationState: generationState);
                     result = new VideoPreviewUploadResult(streamed.SizeBytes, streamed.Upload.ChunkMessageIds, streamed.Upload.ChunkReferences);
                 }
                 else
                 {
-                    using var generated = await VideoPreviewGenerator.Create480pAsync(file, settings.HardwareAcceleration,
-                        progress => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
-                            progressTracker?.VideoPreviewGeneration(progress) ?? 99,
-                            $"Gerando prévia 480p - {progress}%", throttle, progress is 0 or 100, useBatchUi, progressTracker: progressTracker),
-                        cancellationToken);
-                    result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
-                        generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
-                        settings.EffectiveUploadThreads, progressTracker, encryption, references, sharedUpload);
+                    RamMediaPreview? generated = null;
+                    if (generationState != null) await generationState(true, cancellationToken);
+                    try
+                    {
+                        generated = await VideoPreviewGenerator.Create480pAsync(file, settings.HardwareAcceleration,
+                            progress => _ = ReportUploadItemProgressAsync(opId, fileIndex, fileTotal,
+                                progressTracker?.VideoPreviewGeneration(progress) ?? 99,
+                                $"Gerando prévia 480p - {progress}%", throttle, progress is 0 or 100, useBatchUi, batchStatus: "processing", progressTracker: progressTracker),
+                            cancellationToken);
+                    }
+                    finally
+                    {
+                        try { if (generationState != null) await generationState(false, cancellationToken); }
+                        catch { generated?.Dispose(); throw; }
+                    }
+                    using (generated)
+                        result = await UploadVideoPreview480Async(opId, fileIndex, fileTotal, threadId, name,
+                            generated, uploader, throttle, onRateLimitWait, cancellationToken, useBatchUi,
+                            settings.EffectiveUploadThreads, progressTracker, encryption, references, sharedUpload);
                 }
                 videoChunks = result.ChunkMessageIds;
                 videoReferences = result.ChunkReferences;

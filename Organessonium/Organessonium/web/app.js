@@ -15,7 +15,7 @@ let ctxTarget = null;
 let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
 let historyBack = [], historyForward = [];
-let confirmCb = null;
+let confirmCb = null, confirmCancelCb = null;
 const nonfatalMessages = [];
 let uploadConflictState = null;
 let settings = {
@@ -98,6 +98,9 @@ const I18N = {
         filesFound:v => v.count + ' arquivo(s) encontrado(s)...',
         uploadProgress:'Enviando', downloadProgress:'Baixando', deleteProgress:'Apagando', moveProgress:'Movendo', cleanupProgress:'Limpando',
         cancelTransfersTitle:'Cancelar transferência?',
+        closeAppTitle:'Fechar o Organessônium?',
+        closeAppTransfers:'Há transferências em andamento. Fechar agora interrompe essas transferências.',
+        closeAppBackground:'Há transferências em andamento. A janela será fechada e as transferências continuarão em segundo plano.',
         cancelTransfersMessage:v => v.count === 1
             ? 'A transferência em andamento será cancelada.'
             : v.count + ' transferências em andamento serão canceladas.',
@@ -244,6 +247,9 @@ const I18N = {
         filesFound:v => v.count + ' file(s) found...',
         uploadProgress:'Uploading', downloadProgress:'Downloading', deleteProgress:'Deleting', moveProgress:'Moving', cleanupProgress:'Cleaning',
         cancelTransfersTitle:'Cancel transfer?',
+        closeAppTitle:'Close Organessônium?',
+        closeAppTransfers:'Transfers are in progress. Closing now interrupts these transfers.',
+        closeAppBackground:'Transfers are in progress. The window will close and transfers will continue in the background.',
         cancelTransfersMessage:v => v.count === 1
             ? 'The running transfer will be canceled.'
             : v.count + ' running transfers will be canceled.',
@@ -2615,9 +2621,9 @@ window._opsUploadBatch = (id, names, sizes) => {
 window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     const row = $('op-file-' + id + '-' + fileIndex);
     if (!row) return;
-    const normalizedStatus = ['active', 'waiting', 'paused', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
-    if (row.dataset.fileStatus === 'paused' && ['active','waiting'].includes(normalizedStatus)) return;
-    if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && normalizedStatus === 'active') return;
+    const normalizedStatus = ['active', 'processing', 'waiting', 'paused', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
+    if (row.dataset.fileStatus === 'paused' && ['active','processing','waiting'].includes(normalizedStatus)) return;
+    if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && ['active','processing'].includes(normalizedStatus)) return;
     row.dataset.fileStatus = normalizedStatus;
     updateTransferPauseButton(row.querySelector('.op-file-icon'), id, fileIndex, normalizedStatus);
     const cancelButton = row.querySelector('.op-file-cancel');
@@ -2673,7 +2679,7 @@ window._opsUpdate = (id, status, msg) => {
         if (status === 'done') {
             setOpProgress(id, 100);
             item.querySelectorAll('.op-file-row').forEach(row => {
-                if (row.dataset.fileStatus === 'active' || row.dataset.fileStatus === 'queued') {
+                if (['active','processing','queued'].includes(row.dataset.fileStatus)) {
                     window._opsUploadFileProgress(id, Number(row.id.split('-').pop()), 'done', 100, t('uploadProgress'));
                 }
             });
@@ -5691,14 +5697,20 @@ function confirmRename() {
     window.bridge.renameItem(renameTarget.metadataMessageId, name);
     closeRenameModal();
 }
-function askConfirm(title, msg, onYes, confirmKey = 'delete', singleButton = false) {
+window._onConfirmAppClose = background => {
+    hideConfirm();
+    askConfirm(t('closeAppTitle'), t(background ? 'closeAppBackground' : 'closeAppTransfers'),
+        () => window.bridge.resolveAppClose(true), 'close', false, () => window.bridge.resolveAppClose(false));
+};
+function askConfirm(title, msg, onYes, confirmKey = 'delete', singleButton = false, onNo = null) {
     $('confirm-title').textContent=title; $('confirm-message').textContent=msg;
     $('confirm-ok').textContent=t(confirmKey);
     $('confirm-cancel').classList.toggle('hidden', singleButton);
-    confirmCb=onYes; confirmOverlay.classList.remove('hidden'); setTimeout(()=>$('confirm-ok').focus(),50);
+    confirmCancelCb=onNo; confirmCb=()=>{confirmCancelCb=null;onYes?.();}; confirmOverlay.classList.remove('hidden'); setTimeout(()=>$('confirm-ok').focus(),50);
 }
 function hideConfirm() {
-    confirmOverlay.classList.add('hidden'); confirmCb=null;
+    const cancel=confirmCancelCb; confirmCancelCb=null;
+    confirmOverlay.classList.add('hidden'); confirmCb=null; cancel?.();
     setTimeout(showNextNonfatalError, 0);
 }
 function showNextNonfatalError() {

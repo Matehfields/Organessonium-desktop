@@ -17,18 +17,23 @@ internal static class FfmpegPreviewUpload
         CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, string? executable = null,
         Action<int>? generationProgress = null, int maxParallelParts = 4, AdaptiveUploadGate? adaptiveUploadGate = null,
         Action<bool>? onTransferActivity = null, Action<long>? onPreviewSize = null,
-        SharedUploadContext? sharedUpload = null)
+        SharedUploadContext? sharedUpload = null, Func<bool, CancellationToken, Task>? generationState = null)
     {
         using var staged = new StagedPreview(source);
-        status?.Invoke("Gerando prévia 480p");
-        generationProgress?.Invoke(0);
-        using (await FfmpegMediaService.EnterAsync(token).ConfigureAwait(false))
-        using (FfmpegMediaService.OpenSourceLock(source))
+        if (generationState != null) await generationState(true, token).ConfigureAwait(false);
+        try
         {
-            await FfmpegMediaService.ReadOutputAsync(source, hardwareAcceleration, false,
-                (input, cancellation) => input.CopyToAsync(staged.Output, 128 * 1024, cancellation), token, executable,
-                generationProgress: generationProgress).ConfigureAwait(false);
+            status?.Invoke("Gerando prévia 480p");
+            generationProgress?.Invoke(0);
+            using (await FfmpegMediaService.EnterAsync(token).ConfigureAwait(false))
+            using (FfmpegMediaService.OpenSourceLock(source))
+            {
+                await FfmpegMediaService.ReadOutputAsync(source, hardwareAcceleration, false,
+                    (input, cancellation) => input.CopyToAsync(staged.Output, 128 * 1024, cancellation), token, executable,
+                    generationProgress: generationProgress).ConfigureAwait(false);
+            }
         }
+        finally { if (generationState != null) await generationState(false, token).ConfigureAwait(false); }
         await staged.Output.FlushAsync(token).ConfigureAwait(false);
         var length = staged.Output.Length;
         if (length == 0) throw new IOException("O gerador não produziu vídeo para a prévia 480p.");

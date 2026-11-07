@@ -162,6 +162,26 @@ internal static partial class Program
             "a limpeza cancelada reteve versões ou removeu os anexos de outro arquivo");
         var output = await h.Downloader.DownloadAndAssembleAsync(kept, h.Directory.CreateSubdirectory("kept-download"), _ => { });
         RequireSync(await File.ReadAllTextAsync(output.FullName) == "keep", "a recuperação da limpeza alterou o arquivo mantido");
+        var dedicated = await h.PrepareAsync("dedicated-cancel.bin", [7, 8, 9]);
+        var post = await h.Api.CreateForumPostAsync("files", "dedicated-cancel", "test");
+        dedicated.ThreadId = post.ThreadId; dedicated.Storage = new StorageLayout { Mode = "dedicated" };
+        using (var part = new PreparedUploadPart(new FileInfo(dedicated.SourcePath), 3))
+            await h.Api.SendFilesMessageAsync(post.ThreadId, "payload", [part]);
+        await h.Storage.CancelReservationAsync(dedicated, default, deferCleanup: true);
+        await h.Transfers.CancelAsync(dedicated, false, true);
+        while (!h.Server.DeletedChannels.Contains(post.ThreadId)) await Task.Delay(50, done.Token);
+        RequireSync(!h.Server.DeletedChannels.Contains(kept.ThreadId), "o cancelamento dedicado removeu o pool de outro arquivo");
+        using var empty = new SharedHarness();
+        var single = await empty.PrepareAsync("cancel-empty-pool.bin", [1, 2, 3]);
+        var only = (await empty.UploadAsync([single], publish: false)).Single();
+        await using (empty.Storage.PrioritizeUploads())
+        {
+            await empty.Storage.CancelReservationAsync(single, default, deferCleanup: true);
+            await empty.Transfers.CancelAsync(single, false, true);
+        }
+        while (!empty.Server.DeletedChannels.Contains(only.ThreadId)) await Task.Delay(50, done.Token);
+        RequireSync(empty.Server.Messages(only.ThreadId).Count == 0, "o cancelamento deixou a thread vazia no servidor");
+        Console.WriteLine("CANCEL_CLEANUP sharedAttachmentsRemoved=True unrelatedFileKept=True dedicatedThreadDeleted=True emptyPoolDeleted=True");
         return TestOutcome.Pass();
     }
 

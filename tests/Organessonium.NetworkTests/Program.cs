@@ -76,6 +76,8 @@ internal static partial class Program
         ("sharedStorageDelayedProducers", SharedStorageDelayedProducersAsync),
         ("sharedSingleUploadStartsImmediately", SharedSingleUploadStartsImmediatelyAsync),
         ("webViewUploadAcceptanceSecondary", UploadAcceptanceSecondaryAsync),
+        ("webViewVideoUploadIsolationSecondary", VideoUploadIsolationSecondaryAsync),
+        ("webViewTransferCloseConfirmationSecondary", TransferCloseConfirmationSecondaryAsync),
         ("sharedStorageReferencesDownloadsAndThumbnails", SharedStorageReferencesDownloadsAndThumbnailsAsync),
         ("sharedStorageSelectiveCleanupAndRecovery", SharedStorageSelectiveCleanupAndRecoveryAsync),
         ("sharedStorageVersionsTrashAndLegacy", SharedStorageVersionsTrashAndLegacyAsync),

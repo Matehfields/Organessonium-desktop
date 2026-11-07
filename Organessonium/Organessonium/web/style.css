@@ -2502,10 +2502,10 @@ button:focus-visible{outline:2px solid var(--selection-border);outline-offset:2p
     display:flex;align-items:center;justify-content:center;
     position:relative;color:var(--text-muted);border:2px solid var(--surface3);
 }
-.op-file-progress.active{
+.op-file-progress.active,.op-file-progress.processing{
     border:0;background:conic-gradient(var(--text-secondary) calc(var(--progress) * 1%),var(--surface3) 0);animation:none;
 }
-.op-file-progress.active::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--surface);}
+.op-file-progress.active::after,.op-file-progress.processing::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--surface);}
 .op-file-action{position:relative;width:24px;height:24px;display:flex;align-items:center;justify-content:center;}
 .op-file-cancel{position:absolute;inset:0;border:0;border-radius:50%;background:var(--surface3);color:var(--text-primary);cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;}
 .op-file-row:not([data-file-status="done"]):not([data-file-status="error"]):not([data-file-status="cancelled"]) .op-file-action:hover .op-file-cancel,

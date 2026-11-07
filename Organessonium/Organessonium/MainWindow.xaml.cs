@@ -46,6 +46,8 @@ public partial class MainWindow : Window
     private ResizeMode _savedResizeMode;
     private bool _savedTopmost;
     private bool _shutdownInProgress;
+    private bool _closeConfirmationPending;
+    private bool _transferCloseApproved;
     private AppWindowTitleBar? _nativeTitleBar;
     private bool _usesIntegratedTitleBar;
     private int _lastTitleBarLeftInset = -1;
@@ -354,7 +356,7 @@ public partial class MainWindow : Window
 
     private async void OnClosing(object? sender, CancelEventArgs e)
     {
-        if (_shutdownInProgress)
+        if (_shutdownInProgress || _closeConfirmationPending)
         {
             e.Cancel = true;
             return;
@@ -368,6 +370,16 @@ public partial class MainWindow : Window
             if (_bridge != null) await _bridge.CallAsync("_closePreviewFromHost");
             return;
         }
+        if (!_transferCloseApproved && _controller?.HasTransfersInProgress == true)
+        {
+            e.Cancel = true;
+            _closeConfirmationPending = true;
+            bool approved;
+            try { approved = await _controller.ConfirmCloseAsync(Application.Current is App { KeepBackgroundOnClose: true }); }
+            finally { _closeConfirmationPending = false; }
+            if (!approved) return;
+        }
+        _transferCloseApproved = false;
         if (Application.Current is App backgroundApp && backgroundApp.KeepBackgroundOnClose)
         {
             e.Cancel = true;
@@ -402,6 +414,15 @@ public partial class MainWindow : Window
             Close();
             if (Application.Current is App desktopApp) desktopApp.WindowReleased(this);
         }
+    }
+
+    internal async Task<bool> ConfirmExitDesktopAsync()
+    {
+        if (_controller?.HasTransfersInProgress != true) return true;
+        if (!IsVisible) { Show(); Activate(); }
+        _closeConfirmationPending = true;
+        try { return _transferCloseApproved = await _controller.ConfirmCloseAsync(false); }
+        finally { _closeConfirmationPending = false; }
     }
 
     private async void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)

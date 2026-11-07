@@ -36,7 +36,10 @@ internal static partial class Program
         public int EnumDAdvise(out System.Runtime.InteropServices.ComTypes.IEnumSTATDATA enumerator) { enumerator = null!; return 1; }
     }
 
-    private static Task<TestOutcome> UploadAcceptanceSecondaryAsync() => OnHiddenDispatcherAsync(async () =>
+    private static Task<TestOutcome> UploadAcceptanceSecondaryAsync() => UploadAcceptanceSecondaryAsync(false);
+    private static Task<TestOutcome> VideoUploadIsolationSecondaryAsync() => UploadAcceptanceSecondaryAsync(true);
+    private static Task<TestOutcome> TransferCloseConfirmationSecondaryAsync() => UploadAcceptanceSecondaryAsync(false, true);
+    private static Task<TestOutcome> UploadAcceptanceSecondaryAsync(bool videoIsolation, bool closeOnly = false) => OnHiddenDispatcherAsync(async () =>
     {
         AcceptanceRect secondary = default;
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, _, _, _) =>
@@ -48,6 +51,8 @@ internal static partial class Program
         RequireSync(secondary.Right > secondary.Left, "o monitor secundário não está disponível");
         using var h = new SharedHarness();
         h.Settings.PreviewEnabled = true; h.Settings.MaxParallelUploads = 16; h.Settings.UploadThreads = 16;
+        h.Settings.GenerateVideoPreviews = videoIsolation;
+        if (videoIsolation || closeOnly) h.Settings.Language = "pt-BR";
         h.Store.SaveLibraryStatistics(new LibraryStatistics(0, 0, 0));
         var unconfigured = h.Settings.Clone(); unconfigured.BotToken = ""; h.Store.Save(unconfigured);
         var window = new Organessonium.MainWindow(h.Store)
@@ -78,6 +83,8 @@ internal static partial class Program
             typeof(AppController).GetField("_registry", flags)!.SetValue(controller, h.Registry);
             typeof(Organessonium.MainWindow).GetMethod("LoadLocalPage", flags)!.Invoke(window, ["index.html"]);
             while (await view.ExecuteScriptAsync("location.pathname==='/index.html'&&typeof allApps!=='undefined'") != "true") await Task.Delay(50, timeout.Token);
+            if (videoIsolation) return await CheckVideoUploadIsolationAsync(h, controller, view, window);
+            if (closeOnly) return await CheckTransferCloseConfirmationAsync(h, controller, view, window, closed.Task);
             var targets = (System.Collections.IDictionary)typeof(Organessonium.MainWindow).GetField("_oleDropTargets", flags)!.GetValue(window)!;
             var target = targets.Values.Cast<object>().First();
             var enter = target.GetType().GetMethod("DragEnter")!;
@@ -157,10 +164,22 @@ internal static partial class Program
         }
         finally
         {
+            if (!closed.Task.IsCompleted)
+            {
+            if (typeof(Organessonium.MainWindow).GetField("_controller", flags)!.GetValue(window) is AppController cleanup)
+            {
+                await cleanup.HandleJsonMessageAsync("{\"method\":\"resolveAppClose\",\"args\":[false]}");
+                if (cleanup.HasTransfersInProgress)
+                    await ((Task)typeof(AppController).GetMethod("CancelActiveTransfersAndWaitAsync", flags)!.Invoke(cleanup, [])!).WaitAsync(TimeSpan.FromSeconds(20));
+                await Task.Yield();
+            }
             window.Hide();
             // Invoke shutdown outside WPF's closing event, including when disposal completes synchronously.
             typeof(Organessonium.MainWindow).GetMethod("OnClosing", flags | BindingFlags.DeclaredOnly)!.Invoke(window, [window, new System.ComponentModel.CancelEventArgs()]);
+            if (typeof(Organessonium.MainWindow).GetField("_controller", flags)!.GetValue(window) is AppController closing)
+                await closing.HandleJsonMessageAsync("{\"method\":\"resolveAppClose\",\"args\":[true]}");
             await closed.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            }
         }
     });
 }
