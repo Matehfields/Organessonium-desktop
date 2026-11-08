@@ -4,6 +4,14 @@ namespace Organessonium.Models;
 
 public sealed class AppEntry
 {
+    internal AppEntry AtLocation(string folderId, string path)
+    {
+        var entry = (AppEntry)MemberwiseClone();
+        entry.ParentFolderId = folderId;
+        entry.Path = path;
+        return entry;
+    }
+
     [JsonIgnore]
     public PayloadChecksums? Checksums { get; set; }
 

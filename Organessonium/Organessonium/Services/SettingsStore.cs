@@ -65,6 +65,21 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
     }
 
+    internal List<LibraryMutation> LoadLibraryMutations(string key)
+    {
+        var value = ReadSettingValue(key);
+        return value.Length == 0 ? [] : System.Text.Json.JsonSerializer.Deserialize<List<LibraryMutation>>(value, JsonOptions.Web) ?? [];
+    }
+
+    internal void SaveLibraryMutations(string key, IReadOnlyList<LibraryMutation> mutations)
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            Upsert(connection, key, System.Text.Json.JsonSerializer.Serialize(mutations, JsonOptions.Web));
+        }
+    }
+
     public string PrepareDataDirectoryForNextStartup(string selectedPath)
     {
         var targetPath = NormalizeDataDirectorySelection(selectedPath);
@@ -718,7 +733,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
         Save(settings);
     }
 
-    string IEncryptionSecretStore.ReadEncryptionSecret(string key)
+    string IEncryptionSecretStore.ReadEncryptionSecret(string key) => ReadSettingValue(key);
+
+    private string ReadSettingValue(string key)
     {
         lock (_lock)
         {

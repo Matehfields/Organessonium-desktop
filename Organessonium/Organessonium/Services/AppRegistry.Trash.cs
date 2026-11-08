@@ -159,10 +159,16 @@ public sealed partial class AppRegistry
         finally { _entryMutationGate.Release(); }
     }
 
-    private async Task<(AppEntry Entry, string ChannelId)> ReadTrashEntryAsync(AppEntry entry, CancellationToken cancellationToken)
+    private async Task<(AppEntry Entry, string ChannelId)> ReadTrashEntryAsync(AppEntry entry, CancellationToken cancellationToken) =>
+        await FindLibrarySourceAsync(entry, cancellationToken)
+        ?? throw new InvalidOperationException("Os metadados completos do item não foram encontrados; nenhuma exclusão foi realizada.");
+
+    internal async Task<(AppEntry Entry, string ChannelId)?> FindLibrarySourceAsync(AppEntry entry, CancellationToken cancellationToken)
     {
         var channels = new List<string>();
         if (_mappings.TryGetValue(NormalizeFolderId(entry.ParentFolderId), out var mapping)) channels.Add(mapping.ThreadId);
+        else if (TryGetFolderIndexThreadId(_store.LoadCachedFolderEntry(NormalizeFolderId(entry.ParentFolderId)), out var indexThread))
+            channels.Add(indexThread);
         channels.Add(_settings.NamesChannelId);
         foreach (var channel in channels.Distinct(StringComparer.Ordinal))
         {
@@ -171,18 +177,20 @@ public sealed partial class AppRegistry
                 var message = await _discord.GetMessageAsync(channel, entry.MetadataMessageId, cancellationToken);
                 var envelope = await _metadata.ReadEnvelopeAsync(message, cancellationToken);
                 var detailed = envelope == null ? null : _metadata.ToAppEntry(envelope);
-                if (detailed == null || !SameEntryIdentity(detailed, entry)) continue;
+                if (detailed == null || !SameEntryIdentity(detailed, entry))
+                    throw new InvalidOperationException("A mensagem de metadados não identifica o item selecionado.");
                 detailed.ParentFolderId ??= entry.ParentFolderId;
                 if (NormalizeFolderId(detailed.ParentFolderId) != NormalizeFolderId(entry.ParentFolderId))
                     throw new InvalidOperationException("A pasta do item mudou no servidor. Atualize a lista antes de continuar.");
                 if (detailed.Type == "file" && detailed.SizeBytes > 0 && detailed.LogicalChunkCount == 0)
                     throw new InvalidOperationException("Os metadados não contêm os chunks do arquivo; nenhuma exclusão foi realizada.");
                 if (detailed.Type == "folder") detailed.ThreadId = entry.ThreadId;
+                detailed.Path = entry.Path;
                 return (detailed, channel);
             }
             catch (DiscordApiException ex) when ((int)ex.StatusCode == 404) { }
         }
-        throw new InvalidOperationException("Os metadados completos do item não foram encontrados; nenhuma exclusão foi realizada.");
+        return null;
     }
 
     private async Task<List<AppEntry>> LoadStandaloneTrashSourceAsync(string folderId, string path, CancellationToken cancellationToken)

@@ -75,8 +75,11 @@ internal static partial class Program
             }
 
             await Check("isSettingsOpen()&&$('settings-panel').closest('.app-workspace')&&!$('settings-overlay')&&$('sidebar-settings').getAttribute('aria-current')==='page'&&$('sidebar-files').offsetWidth>0&&document.querySelector('.topbar').offsetHeight>0&&$('main-area').classList.contains('hidden')", "Configurações não abriu dentro da navegação lateral");
-            await Check("document.querySelectorAll('[data-settings-pane]:not(.hidden)').length===1&&$('settings-pane-appearance').offsetHeight>0", "categorias diferentes aparecem misturadas");
+            await Check("!$('settings-close')&&document.querySelectorAll('[data-settings-pane]:not(.hidden)').length===1&&$('settings-pane-appearance').offsetHeight>0", "o cabeçalho ainda tem a seta interna ou mistura categorias");
             await Capture("appearance-dark");
+            await view.ExecuteScriptAsync("window.__settingsTransitions=[];$('settings-panel').addEventListener('animationstart',e=>{if(e.target.matches('[data-settings-pane]'))window.__settingsTransitions.push(e.target.id)});$('settings-tab-appearance').click();");
+            await Task.Delay(300);
+            await Check("window.__settingsTransitions.length===0&&$('settings-tab-appearance').getAttribute('aria-selected')==='true'", "clicar na categoria aberta repetiu a transição");
             await view.ExecuteScriptAsync("$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click()");
             await Check("$('setting-accent-mode-options').offsetHeight>0&&getComputedStyle($('setting-accent-mode-options')).borderRadius==='11px'&&$('setting-accent-mode-options').querySelector('[aria-selected=\"true\"]').textContent==='Usar cor do Windows'", "as opções de cor continuaram usando a lista nativa");
             await Capture("appearance-options-dark");
@@ -91,9 +94,10 @@ internal static partial class Program
                 await Check("document.querySelectorAll('[data-settings-pane]:not(.hidden)').length===1&&$('settings-pane-" + category + "').offsetHeight>0&&$('settings-tab-" + category + "').getAttribute('aria-selected')==='true'", "categoria inacessível: " + category);
                 await Capture(category + "-dark");
             }
+            await Check("window.__settingsTransitions.includes('settings-pane-performance')", "uma troca real deixou de animar");
             await view.ExecuteScriptAsync("$('settings-tab-application').dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true}));");
             await Check("document.activeElement.id==='settings-tab-appearance'&&$('settings-pane-appearance').offsetHeight>0", "a navegação por teclado não selecionou a categoria");
-            await view.ExecuteScriptAsync("document.querySelector('[data-theme-value=light]').click();$('settings-tab-performance').click();$('setting-animations').click();$('settings-tab-downloads').click();$('setting-threads').value=7;$('setting-threads').dispatchEvent(new Event('input',{bubbles:true}));$('settings-close').click();");
+            await view.ExecuteScriptAsync("document.querySelector('[data-theme-value=light]').click();$('settings-tab-performance').click();$('setting-animations').click();$('settings-tab-downloads').click();$('setting-threads').value=7;$('setting-threads').dispatchEvent(new Event('input',{bubbles:true}));$('btn-back').click();");
             await WaitFor("JSON.parse(window.bridge.getSettings()).downloadThreads===7", "o ajuste de download não foi salvo ao sair");
             RequireSync(store.Load().Theme == "light" && store.Load().DownloadThreads == 7 && !store.Load().AnimationsEnabled, "os controles perderam a persistência real");
             await view.ExecuteScriptAsync("$('sidebar-settings').click();$('settings-tab-appearance').click();$('setting-accent-mode').closest('.settings-custom-select').querySelector('button').click()");

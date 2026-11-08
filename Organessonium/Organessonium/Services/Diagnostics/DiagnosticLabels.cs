@@ -9,7 +9,7 @@ internal static class DiagnosticLabels
         "setFavorite", "refreshCurrentFolder", "refreshServerIndex", "loadVisibleThumbnails", "loadVisibleFolderStatistics",
         "requestPreview", "videoPlayback", "clearPreviewCache", "getPreviewCacheSize", "openPreviewMedia", "createFolder",
         "moveItems", "moveItem", "updateFolderColor", "renameItem", "requestFileInformation", "copyFile", "downloadVersion",
-        "resumeTransfers", "failInterruptedTransfers", "deleteApp", "deleteItems", "restoreItems", "saveMarkdown",
+        "resumeTransfers", "failInterruptedTransfers", "deleteApp", "deleteItems", "restoreItems", "restoreTrash", "saveMarkdown",
         "readMarkdown", "uploadFiles", "uploadFolder", "downloadApp", "downloadItems", "cancelOperation", "cancelUploadFile",
         "saveSettings", "updateSettings", "syncCreate", "syncLink", "syncRemove", "syncPause", "syncNow", "syncResolve"
     };

@@ -59,9 +59,17 @@ public static class FileVersioning
         next.Sync = previous.Sync;
     }
 
-    public static long StorageBytes(AppEntry entry) => entry.Versions.Aggregate(Math.Max(0, entry.SizeBytes),
-        (total, version) => total > long.MaxValue - Math.Max(0, version.Payload.SizeBytes)
-            ? long.MaxValue : total + Math.Max(0, version.Payload.SizeBytes));
+    public static long CurrentStorageBytes(AppEntry entry) => AddBytes(entry.SizeBytes, entry.VideoPreviewSizeBytes);
+
+    public static long StorageBytes(AppEntry entry) => entry.Versions.Aggregate(CurrentStorageBytes(entry),
+        (total, version) => AddBytes(total, AddBytes(version.Payload.SizeBytes, version.Payload.Preview?.Video480p?.SizeBytes ?? 0)));
+
+    private static long AddBytes(long size, long extra)
+    {
+        size = Math.Max(0, size);
+        extra = Math.Max(0, extra);
+        return size > long.MaxValue - extra ? long.MaxValue : size + extra;
+    }
 
     private static FileMetadata Clone(FileMetadata metadata) =>
         JsonSerializer.Deserialize<FileMetadata>(JsonSerializer.Serialize(metadata, JsonOptions.Web), JsonOptions.Web)

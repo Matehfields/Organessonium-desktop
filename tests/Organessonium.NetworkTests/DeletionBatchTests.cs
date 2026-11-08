@@ -64,7 +64,7 @@ internal static partial class Program
                 var publication = observeMaintenance && (script.Contains("_onFolderIndexReconciled") || script.Contains("_onAppsLoaded"));
                 if (publication) maintenanceScriptBytes += Encoding.UTF8.GetByteCount(script);
                 await view.ExecuteScriptAsync(script);
-                if (publication) maintenancePublished.TrySetResult();
+                if (publication && script.Contains("Found during maintenance.bin", StringComparison.Ordinal)) maintenancePublished.TrySetResult();
             });
             controller = new AppController(new System.Windows.Window(), h.Store, bridge, _ => Task.CompletedTask);
             var session = new DiscordSession();
@@ -87,6 +87,8 @@ internal static partial class Program
             var task = (Task)delete.Invoke(controller, [JsonSerializer.Serialize(entries.Take(8).Select(entry => entry.MetadataMessageId)), true])!;
             await transport.FourDeletes.Task.WaitAsync(TimeSpan.FromSeconds(15));
             RequireSync(transport.MaximumDeletes == 4 && !task.IsCompleted, "não houve quatro exclusões de metadados simultâneas");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===2&&pendingLibraryChanges.length===8") == "true",
+                "a biblioteca esperou pela exclusão remota para remover os cards");
             var browsing = Enumerable.Range(0, 2305).Select(index => new AppEntry { Type = "file", Name = $"photo-{index:D4}.jpg",
                 FileId = "browse-" + index, ThreadId = "browse-thread-" + index, MetadataMessageId = "browse-meta-" + index,
                 ParentFolderId = "browse", Path = "/Browse", SizeBytes = 1024 }).ToArray();
@@ -102,7 +104,7 @@ internal static partial class Program
             phase = "fresh reference proof";
             await transport.ProofStarted.Task.WaitAsync(TimeSpan.FromSeconds(15));
             await task.WaitAsync(TimeSpan.FromSeconds(5));
-            RequireSync(await view.ExecuteScriptAsync("document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'&&!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
+            RequireSync(await view.ExecuteScriptAsync("pendingLibraryChanges.length===0&&!document.querySelector('.op-item[data-op-type=delete],.op-item[data-op-type=cleanup]')") == "true",
                 "a remoção do índice aguardou a limpeza física ou mostrou a manutenção silenciosa");
             RequireSync(h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 10,
                 "a limpeza física ocorreu antes da conferência bloqueada");
@@ -137,8 +139,8 @@ internal static partial class Program
             typeof(AppController).GetField("_currentPath", flags)!.SetValue(controller, "/");
             RequireSync(transport.RootProofReads == 1 && transport.RootArchiveChanges <= 2,
                 $"a exclusão repetiu a varredura/arquivamento por arquivo: leituras={transport.RootProofReads}, archives={transport.RootArchiveChanges}");
-            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===2&&document.querySelector('.op-item[data-op-type=delete]').dataset.opStatus==='done'&&document.querySelector('.op-item[data-op-type=delete] .op-percent').textContent==='100%'") == "true",
-                "cards ou conclusão em 100% não foram atualizados");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('#files-grid .file-card').length===2&&pendingLibraryChanges.length===0") == "true",
+                "a remoção dos cards não se manteve após a confirmação remota");
             RequireSync(h.Store.LoadCachedEntriesForFolder("root").Count(entry => entry.Type == "file") == 2 &&
                 h.Server.Messages(entries[0].ThreadId).Sum(message => message.Attachments.Count) == 2 &&
                 !h.Server.DeletedChannels.Contains(entries[0].ThreadId), "a limpeza perdeu o cache, outro attachment ou o pool");
@@ -189,7 +191,10 @@ internal static partial class Program
             phase = "folder creation UI";
             await ((Task)typeof(AppController).GetMethod("CreateFolderAsync", flags)!.Invoke(controller, ["Created after cleanup"])!)
                 .WaitAsync(TimeSpan.FromSeconds(10));
-            RequireSync(await view.ExecuteScriptAsync("Array.from(document.querySelectorAll('#files-grid .folder-card')).some(card=>card.textContent.includes('Created after cleanup'))&&document.querySelectorAll('.cards-grid .file-card').length===1") == "true",
+            const string createdFolderVisible = "Array.from(document.querySelectorAll('#files-grid .folder-card')).some(card=>card.textContent.includes('Created after cleanup'))&&document.querySelectorAll('.cards-grid .file-card').length===1";
+            for (var attempt = 0; attempt < 100 && await view.ExecuteScriptAsync(createdFolderVisible) != "true"; attempt++)
+                await Task.Delay(50);
+            RequireSync(await view.ExecuteScriptAsync(createdFolderVisible) == "true",
                 "a pasta criada não apareceu na interface ou substituiu o arquivo preservado");
             phase = "large library reconciliation without hidden rendering";
             var archivedFiles = Enumerable.Range(0, 6653).Select(index => new AppEntry
@@ -209,7 +214,7 @@ internal static partial class Program
             await maintenancePublished.Task.WaitAsync(TimeSpan.FromSeconds(20));
             RequireSync(maintenanceScriptBytes < 64 * 1024 && await view.ExecuteScriptAsync("isSettingsOpen()&&window.__maintenanceMutations===0&&allApps.some(entry=>entry.name==='Found during maintenance.bin')&&allApps.some(entry=>entry.fileId==='archive-6652')") == "true",
                 "a manutenção reenviou toda a biblioteca, alterou cards ocultos ou perdeu os demais arquivos");
-            await view.ExecuteScriptAsync("window.__maintenanceObserver.disconnect();$('settings-tab-downloads').click();$('setting-threads').value=6;$('setting-threads').dispatchEvent(new Event('input'));$('settings-close').click()");
+            await view.ExecuteScriptAsync("window.__maintenanceObserver.disconnect();$('settings-tab-downloads').click();$('setting-threads').value=6;$('setting-threads').dispatchEvent(new Event('input'));$('btn-back').click()");
             RequireSync(await view.ExecuteScriptAsync("!isSettingsOpen()&&$('thr-val').textContent==='6'&&document.querySelector('#files-grid').textContent.includes('Found during maintenance.bin')&&!document.querySelector('.op-item[data-op-type=cleanup]')") == "true",
                 "a interface deixou de responder durante a manutenção ou não aplicou os dados ao retornar");
             Console.WriteLine("MAINTENANCE_UI_RESULT libraryFiles=6653 fullLibraryBytes=" + Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(largeLibrary, JsonOptions.Web)) + " publicationBytes=" + maintenanceScriptBytes + " hiddenMutations=0");

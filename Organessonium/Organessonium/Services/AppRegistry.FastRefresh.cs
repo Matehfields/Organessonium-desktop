@@ -7,6 +7,8 @@ public sealed partial class AppRegistry
     internal async Task<List<AppEntry>> LoadFolderSerialAsync(string folderId, string path, CancellationToken token = default,
         bool allowMetadataFallback = true)
     {
+        var revision = Volatile.Read(ref _libraryPublicationRevision);
+        if (_publishingLibraryFolders.ContainsKey(folderId)) return await LoadCachedFolderAsync(folderId, path, token);
         if (!allowMetadataFallback && !_mappings.ContainsKey(NormalizeFolderId(folderId)))
             return await LoadCachedFolderAsync(folderId, path, token);
         var mapping = await GetMappingAsync(folderId, token);
@@ -15,6 +17,8 @@ public sealed partial class AppRegistry
         await _entryMutationGate.WaitAsync(token);
         try
         {
+            if (_publishingLibraryFolders.ContainsKey(folderId) || revision != Volatile.Read(ref _libraryPublicationRevision))
+                return await LoadCachedFolderAsync(folderId, path, token);
             var cached = _store.LoadCachedEntriesForFolder(folderId);
             var entries = _serials.MaterializeEntries(serial, cached, path, MappingSnapshot()).ToList();
             // An open upload index can contain confirmed messages newer than its serial.

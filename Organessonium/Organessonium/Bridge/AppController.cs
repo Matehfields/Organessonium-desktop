@@ -291,8 +291,8 @@ public sealed partial class AppController : IAsyncDisposable
             case "openPreviewMedia": _ = RunAsync(() => RunTrackedPreviewAsync(() => OpenPreviewMediaAsync(ArgString(args, 0)))); return Task.CompletedTask;
             case "requestPdfPages": return Task.CompletedTask;
             case "createFolder": _ = RunAsync(() => CreateFolderAsync(ArgString(args, 0))); return Task.CompletedTask;
-            case "moveItems": _ = RunAsync(() => MoveItemsAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
-            case "moveItem": _ = RunAsync(() => MoveItemsAsync(JsonSerializer.Serialize(new[] { ArgString(args, 0) }), ArgString(args, 1))); return Task.CompletedTask;
+            case "moveItems": _ = RunAsync(() => QueueLibraryMutationAsync(LibraryMutationKind.Move, ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
+            case "moveItem": _ = RunAsync(() => QueueLibraryMutationAsync(LibraryMutationKind.Move, JsonSerializer.Serialize(new[] { ArgString(args, 0) }), ArgString(args, 1))); return Task.CompletedTask;
             case "updateFolderColor": _ = RunAsync(() => UpdateFolderColorAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "renameItem": _ = RunAsync(() => RenameItemAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "requestFileInformation": _ = RunAsync(() => SendFileInformationAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
@@ -307,10 +307,11 @@ public sealed partial class AppController : IAsyncDisposable
             case "resumeTransfers": _ = RunAsync(ResumeInterruptedTransfersAsync); return Task.CompletedTask;
             case "failInterruptedTransfers": _ = RunAsync(FailInterruptedTransfersAsync); return Task.CompletedTask;
             case "startDownload": return StartDownloadAsync(ArgString(args, 0), ArgString(args, 1));
-            case "deleteApp": _ = RunAsync(() => DeleteAppAsync(ArgString(args, 0), ArgString(args, 1), ArgBool(args, 2, false))); return Task.CompletedTask;
+            case "deleteApp": _ = RunAsync(() => QueueLibraryMutationAsync(ArgBool(args, 2, false) ? LibraryMutationKind.Delete : LibraryMutationKind.Trash, JsonSerializer.Serialize(new[] { ArgString(args, 1) }))); return Task.CompletedTask;
             case "deleteItems": _ = RunAsync(() => DeleteItemsAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
             case "emptyTrash": _ = RunAsync(EmptyTrashAsync); return Task.CompletedTask;
-            case "restoreItems": _ = RunAsync(() => RelocateTrashItemsAsync(ArgString(args, 0), restore: true)); return Task.CompletedTask;
+            case "restoreTrash": _ = RunAsync(() => QueueLibraryMutationAsync(LibraryMutationKind.Restore)); return Task.CompletedTask;
+            case "restoreItems": _ = RunAsync(() => QueueLibraryMutationAsync(LibraryMutationKind.Restore, ArgString(args, 0))); return Task.CompletedTask;
             case "saveMarkdown": _ = RunAsync(() => SaveMarkdownAsync(args)); return Task.CompletedTask;
             case "uploadMarkdownImage": _ = RunAsync(() => UploadMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "uploadMarkdownImageData": _ = RunAsync(() => UploadMarkdownImageDataAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2), ArgString(args, 3))); return Task.CompletedTask;
@@ -678,6 +679,7 @@ public sealed partial class AppController : IAsyncDisposable
                 var localStatistics = await registry.GetCachedLibraryStatisticsAsync();
                 if (localStatistics != null) await SendLibraryStatisticsAsync(localStatistics);
             }
+            await ResumeLibraryMutationsAsync();
             var cached = await registry.LoadCachedFolderAsync(AppRegistry.RootFolderId, "/");
             _loadedApps = cached;
             var hasCache = cached.Count > 0;
@@ -1081,7 +1083,7 @@ public sealed partial class AppController : IAsyncDisposable
                 var previous = _loadedApps.FirstOrDefault(entry => EntryCacheKey(entry) == EntryCacheKey(changedEntry));
                 var newFile = previous == null && changedEntry.Versions.Count == 0;
                 var bytes = changedEntry.Versions.Count > 0 && previous?.VersionId != changedEntry.VersionId
-                    ? Math.Max(0, changedEntry.SizeBytes)
+                    ? FileVersioning.CurrentStorageBytes(changedEntry)
                     : FileVersioning.StorageBytes(changedEntry) - (previous == null ? 0 : FileVersioning.StorageBytes(previous));
                 completedStatistics = statistics with { FileCount = statistics.FileCount + (newFile ? 1 : 0),
                     TotalBytes = Math.Max(0, statistics.TotalBytes + bytes) };
@@ -1999,78 +2001,9 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private async Task MoveItemsAsync(string idsJson, string newPath)
-    {
-        var ids = (JsonSerializer.Deserialize<string[]>(idsJson, JsonOptions.Web) ?? [])
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (ids.Count == 0)
-        {
-            await ErrorAsync("Nenhum item selecionado.");
-            return;
-        }
-
-        var registry = Registry();
-        await using var serialBatch = registry.BeginSerialBatch();
-        var all = CurrentLocalEntries();
-        var opId = NewId();
-        await OpsAddAsync(opId, "move", ids.Count == 1 ? "Movendo item" : "Movendo itens");
-
-        var moved = 0;
-        try
-        {
-            for (var i = 0; i < ids.Count; i++)
-            {
-                var id = ids[i];
-                var entry = all.FirstOrDefault(a => a.MetadataMessageId == id);
-                if (entry == null)
-                {
-                    await OpsProgressAsync(opId, Percent(i + 1, ids.Count), $"Ignorado ({i + 1}/{ids.Count})");
-                    continue;
-                }
-
-                await OpsProgressAsync(opId, Percent(i, ids.Count), $"Movendo {i + 1}/{ids.Count}: {entry.Name}");
-                await MoveEntryAsync(registry, all, entry, PathRules.Normalize(newPath));
-                moved++;
-                await OpsProgressAsync(opId, Percent(i + 1, ids.Count), $"Movido {i + 1}/{ids.Count}: {entry.Name}");
-            }
-
-            await serialBatch.DisposeAsync();
-            await OpsUpdateAsync(opId, "done", $"OK {moved} item(ns) movido(s).");
-            await _bridge.CallAsync("_onStatus", $"OK {moved} item(ns) movido(s).", false);
-            await PublishLocalRegistryAsync(registry, all);
-        }
-        catch (Exception ex)
-        {
-            await OpsUpdateAsync(opId, "error", ex.Message);
-            throw;
-        }
-    }
-
     private static string MovedChildPath(string oldFolderPath, string newFolderPath, string childPath)
     {
         return PathRules.Normalize(newFolderPath + childPath[oldFolderPath.Length..]);
-    }
-
-    private async Task MoveEntryAsync(AppRegistry registry, List<AppEntry> all, AppEntry entry, string newPath)
-    {
-        var targetFolderId = FolderIdForPath(all.Where(candidate => !ReferenceEquals(candidate, entry)), newPath)
-            ?? AppRegistry.RootFolderId;
-        var oldFolderPath = entry.Type == "folder" ? PathRules.ChildPath(entry) : "";
-        await registry.MoveEntryAsync(entry, targetFolderId, newPath);
-        if (entry.Type == "folder")
-        {
-            var newFolderPath = PathRules.Normalize(newPath == "/" ? "/" + entry.Name : newPath + "/" + entry.Name);
-            foreach (var child in all.Where(child => !ReferenceEquals(child, entry)).ToList())
-            {
-                var childPath = PathRules.Normalize(child.Path);
-                if (childPath == oldFolderPath || childPath.StartsWith(oldFolderPath + "/", StringComparison.Ordinal))
-                {
-                    child.Path = MovedChildPath(oldFolderPath, newFolderPath, childPath);
-                }
-            }
-        }
     }
 
     private async Task UpdateFolderColorAsync(string metadataMessageId, string color)
@@ -3725,104 +3658,11 @@ public sealed partial class AppController : IAsyncDisposable
         });
     }
 
-    private async Task DeleteAppAsync(string threadId, string metadataMessageId, bool permanently)
-    {
-        if (!permanently)
-        {
-            await RelocateTrashItemsAsync(JsonSerializer.Serialize(new[] { metadataMessageId }), restore: false);
-            return;
-        }
-        await SetBackgroundActivityAsync("Em andamento...", true);
-        try
-        {
-            var registry = Registry();
-            var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
-            var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
-            if (entry != null)
-            {
-                var result = await DeleteEntriesWithProgressAsync(registry, all, [entry]);
-                _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
-                if (result.Failed > 0)
-                {
-                    await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
-                    return;
-                }
-            }
-            else
-            {
-                await ErrorAsync("Item não encontrado na pasta carregada.");
-                return;
-            }
-
-            await _bridge.CallAsync("_onStatus", "OK Item apagado.", false);
-        }
-        finally
-        {
-            await SetBackgroundActivityAsync("", false);
-        }
-    }
-
     private async Task EmptyTrashAsync()
     {
         await _bridge.CallAsync("_onTrashEmptying", true);
-        try
-        {
-            var entries = await Registry().RefreshFolderAsync(AppRegistry.TrashFolderId, AppRegistry.TrashPath);
-            ReplaceLoadedFolder(AppRegistry.TrashFolderId, entries);
-            if (entries.Count > 0)
-                await DeleteItemsAsync(JsonSerializer.Serialize(entries.Select(entry => entry.MetadataMessageId), JsonOptions.Web), permanently: true);
-            else
-                await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
-        }
+        try { await QueueLibraryMutationAsync(LibraryMutationKind.Delete); }
         finally { await _bridge.CallAsync("_onTrashEmptying", false); }
-    }
-
-    private async Task DeleteItemsAsync(string idsJson, bool permanently)
-    {
-        if (!permanently)
-        {
-            await RelocateTrashItemsAsync(idsJson, restore: false);
-            return;
-        }
-        var ids = JsonSerializer.Deserialize<string[]>(idsJson, JsonOptions.Web) ?? [];
-        if (ids.Length == 0)
-        {
-            await ErrorAsync("Nenhum item selecionado.");
-            return;
-        }
-
-        await SetBackgroundActivityAsync("Em andamento...", true);
-        try
-        {
-            var registry = Registry();
-            var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
-            var selected = ids
-                .Select(id => all.FirstOrDefault(a => a.MetadataMessageId == id))
-                .Where(entry => entry != null)
-                .Cast<AppEntry>()
-                .ToList();
-
-            if (selected.Count == 0)
-            {
-                await ErrorAsync("Nenhum item encontrado para apagar.");
-                return;
-            }
-
-            var result = await DeleteEntriesWithProgressAsync(registry, all, selected);
-            _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
-            if (result.Failed == 0)
-            {
-                await _bridge.CallAsync("_onStatus", $"OK {result.Deleted} item(ns) apagado(s).", false);
-            }
-            else
-            {
-                await ErrorAsync($"{result.Deleted}/{result.Total} apagados; {result.Failed} falharam.");
-            }
-        }
-        finally
-        {
-            await SetBackgroundActivityAsync("", false);
-        }
     }
 
     private async Task PublishDeletedEntriesAsync(IReadOnlyList<AppEntry> deleted)
@@ -3836,205 +3676,76 @@ public sealed partial class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onAppsRemoved", deleted);
     }
 
-    private async Task RelocateTrashItemsAsync(string idsJson, bool restore)
+    private async Task<int> DeleteLibraryEntriesAsync(AppRegistry registry, IReadOnlyList<AppEntry> selected, CancellationToken token)
     {
-        var ids = JsonSerializer.Deserialize<string[]>(idsJson, JsonOptions.Web) ?? [];
-        var all = LoadedEntriesForLookup().DistinctBy(EntryCacheKey).ToList();
-        var selected = all.Where(entry => ids.Contains(entry.MetadataMessageId, StringComparer.Ordinal)).ToList();
-        selected = selected.Where(entry => !selected.Any(parent => parent != entry && IsFolderEntry(parent) &&
-            IsDescendantOfFolder(entry, parent, all))).ToList();
-        if (selected.Count == 0) throw new InvalidOperationException("Nenhum item encontrado para esta ação.");
-
-        var registry = Registry();
         await using var serialBatch = registry.BeginSerialBatch();
-        var opId = NewId();
-        await OpsAddAsync(opId, "move", restore ? "Restaurando da lixeira" : "Enviando à lixeira");
-        await SetBackgroundActivityAsync("Em andamento...", true);
-        await using var priority = registry.SharedStorage.PrioritizeMutations();
-        var devicesChanged = false;
-        try
+        var all = new List<AppEntry>();
+        foreach (var folder in selected.Where(IsFolderEntry))
         {
-            await using var writes = await registry.BeginTrashWriteBatchAsync(selected, restore);
-            for (var i = 0; i < selected.Count; i++)
+            try { all.AddRange(await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true, cancellationToken: token)); }
+            catch (DiscordApiException error) when ((int)error.StatusCode == 404 &&
+                !_store.LoadFolderIndexMappings().ContainsKey(folder.FolderId))
             {
-                var entry = selected[i];
-                var changed = new List<AppEntry>();
-                var oldFolderPath = IsFolderEntry(entry) ? PathRules.ChildPath(entry) : "";
-                var moved = restore
-                    ? await registry.RestoreFromTrashAsync(entry)
-                    : await registry.MoveToTrashAsync(entry);
-                devicesChanged |= entry.ParentFolderId == AppRegistry.SynchronizedRootFolderId ||
-                                  moved.ParentFolderId == AppRegistry.SynchronizedRootFolderId;
-                if (IsFolderEntry(entry))
-                {
-                    var newFolderPath = PathRules.ChildPath(moved);
-                    foreach (var child in all.Where(child => child != entry && IsDescendantOfFolder(child, entry, all) &&
-                                                           IsInsideFolder(child, oldFolderPath)))
-                    {
-                        child.Path = MovedChildPath(oldFolderPath, newFolderPath, PathRules.Normalize(child.Path));
-                        changed.Add(child);
-                    }
-                }
-                ReplaceLocalEntry(all, moved);
-                changed.Add(moved);
-                var latest = CurrentLocalEntries();
-                foreach (var item in changed) ReplaceLocalEntry(latest, item);
-                _loadedApps = latest;
-                await _bridge.CallAsync("_onAppsBatch", changed);
-                await OpsProgressAsync(opId, Percent(i + 1, selected.Count), moved.Name);
-            }
-            await serialBatch.DisposeAsync();
-            Interlocked.Increment(ref _favoriteLoadVersion);
-            _favoriteApps = await registry.LoadFavoritesAsync();
-            await _bridge.CallAsync("_onSpecialItemsLoaded", "favorites", _favoriteApps);
-            if (devicesChanged)
-            {
-                Interlocked.Increment(ref _deviceLoadVersion);
-                _deviceApps = await registry.LoadSynchronizedDevicesAsync();
-                await _bridge.CallAsync("_onSpecialItemsLoaded", "devices", _deviceApps);
-            }
-            var status = restore ? "OK Item(ns) restaurado(s)." : "OK Item(ns) enviado(s) à lixeira.";
-            _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
-            await OpsUpdateAsync(opId, "done", status);
-            await _bridge.CallAsync("_onStatus", status, false);
-        }
-        catch (Exception ex)
-        {
-            await OpsUpdateAsync(opId, "error", ex.Message);
-            throw;
-        }
-        finally { await SetBackgroundActivityAsync("", false); }
-    }
-
-    private async Task<DeleteResult> DeleteEntriesWithProgressAsync(AppRegistry registry, List<AppEntry> all, IReadOnlyList<AppEntry> selected)
-    {
-        await using var priority = registry.SharedStorage.PrioritizeMutations();
-        await using var serialBatch = registry.BeginSerialBatch();
-        foreach (var folder in selected.Where(IsFolderEntry).ToList())
-        {
-            var descendants = await registry.LoadFolderTreeAsync(folder, allowOrphanThread: true);
-            foreach (var descendant in descendants)
-            {
-                ReplaceLocalEntry(all, descendant);
+                // A previous attempt already removed the index thread.
             }
         }
-
         var plan = BuildDeletePlan(all, selected);
-        var total = plan.Files.Count + plan.Folders.Count;
-        if (total == 0)
-        {
-            return new DeleteResult(0, 0, 0);
-        }
-
-        var fileTotal = plan.Files.Count;
-        var progressTotal = fileTotal > 0 ? fileTotal : plan.Folders.Count;
-        var opId = NewId();
-        await OpsAddAsync(opId, "delete", DeletePlanLabel(selected, plan));
-
-        var deletedFiles = 0;
-        var deletedFolders = 0;
         var failed = 0;
-        var serialFolderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var pendingCleanup = false;
-        if (fileTotal > 0)
+        var deleted = new ConcurrentBag<AppEntry>();
+        var cleanups = new ConcurrentBag<StorageCleanupRecord>();
+        if (plan.Files.Count > 0)
         {
-            var cleanups = new List<StorageCleanupRecord>();
-            using var progressGate = new SemaphoreSlim(1, 1);
-            var completed = 0;
             var mappings = _store.LoadFolderIndexMappings();
             var indices = plan.Files.Select(file => mappings.GetValueOrDefault(file.ParentFolderId ?? AppRegistry.RootFolderId)?.ThreadId)
                 .Where(thread => !string.IsNullOrWhiteSpace(thread)).Cast<string>();
-            var journal = await registry.GetStorageJournalIndexAsync(CancellationToken.None);
-            await using var writes = await registry.SharedStorage.HoldWritesAsync(indices.Append(journal.ThreadId), CancellationToken.None);
-            await Parallel.ForEachAsync(plan.Files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, _) =>
+            var journal = await registry.GetStorageJournalIndexAsync(token);
+            await using var writes = await registry.SharedStorage.HoldWritesAsync(indices.Append(journal.ThreadId), token);
+            await Parallel.ForEachAsync(plan.Files, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token }, async (file, cancellation) =>
             {
-                StorageCleanupRecord? cleanup = null;
                 try
                 {
-                    var details = await registry.LoadFileDetailsAsync(file, forceRefresh: true, cacheDetails: false);
-                    cleanup = await registry.SharedStorage.BeginCleanupAsync(details, CancellationToken.None);
-                    await registry.DeleteEntryAsync(details, synchronizeSerials: false);
-                    ThumbnailCache.Remove(details.ThumbnailCacheKey);
-                    _videoProgress.Delete(details.FileId);
-                }
-                catch (Exception ex)
-                {
-                    cleanup = null;
-                    Interlocked.Increment(ref failed);
-                    Debug.WriteLine("[Delete] " + ex.Message);
-                }
-
-                await progressGate.WaitAsync();
-                try
-                {
-                    if (cleanup != null)
+                    if (await registry.FindLibrarySourceAsync(file, cancellation) is { } source)
                     {
+                        var details = source.Entry;
+                        var cleanup = await registry.SharedStorage.BeginCleanupAsync(details, cancellation);
+                        await registry.DeleteEntryAsync(details, cancellation, synchronizeSerials: false, allowMissing: true);
                         cleanups.Add(cleanup);
-                        TrackFolderSerial(serialFolderIds, file.ParentFolderId);
-                        deletedFiles++;
-                        all.Remove(file);
-                        await PublishDeletedEntriesAsync([file]);
+                        ThumbnailCache.Remove(details.ThumbnailCacheKey);
+                        _videoProgress.Delete(details.FileId);
                     }
-                    await OpsProgressAsync(opId, 80 * ++completed / fileTotal,
-                        $"Removendo metadados ({completed}/{fileTotal}): {file.Name}");
+                    deleted.Add(file);
                 }
-                finally { progressGate.Release(); }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    Interlocked.Increment(ref failed);
+                    AppLogger.Error("Registry.DeleteLibraryFile", error);
+                }
             });
-
-            await QueuePhysicalCleanupAsync(registry, cleanups);
-            pendingCleanup = cleanups.Count > 0;
         }
 
-        var foldersToDelete = plan.Folders;
-        if (failed > 0 && plan.Files.Count > 0 && plan.Folders.Count > 0)
+        if (failed == 0)
         {
-            foldersToDelete = [];
-            await OpsUpdateAsync(opId, "active", "Alguns arquivos falharam; mantendo pastas para nova tentativa...");
-        }
-        else if (plan.Folders.Count > 0 && plan.Files.Count > 0)
-        {
-            await OpsUpdateAsync(opId, "active", "Removendo pastas vazias...");
-        }
-
-        for (var i = 0; i < foldersToDelete.Count; i++)
-        {
-            var folder = foldersToDelete[i];
-            if (plan.Files.Count == 0)
+            foreach (var folder in plan.Folders)
             {
-                await OpsProgressAsync(opId, Percent(i, progressTotal), DeleteProgressMessage("pasta", i, foldersToDelete.Count, folder.Name));
-            }
-
-            try
-            {
-                await DeleteStoredEntryAsync(registry, folder, synchronizeSerials: false);
-                TrackFolderSerial(serialFolderIds, folder.ParentFolderId);
-                deletedFolders++;
-                all.Remove(folder);
-                await PublishDeletedEntriesAsync([folder]);
-            }
-            catch (Exception ex)
-            {
-                failed++;
-                Debug.WriteLine("[Delete] " + ex.Message);
-            }
-
-            if (plan.Files.Count == 0)
-            {
-                await OpsProgressAsync(opId, Percent(i + 1, progressTotal), DeleteProgressMessage("pasta", i + 1, foldersToDelete.Count, folder.Name));
+                try
+                {
+                    await registry.DeleteEntryAsync(folder, token, synchronizeSerials: false, allowMissing: true);
+                    deleted.Add(folder);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    failed++;
+                    AppLogger.Error("Registry.DeleteLibraryFolder", error);
+                }
             }
         }
-
-        var status = failed == 0 ? "done" : "error";
-        var visibleTotal = fileTotal > 0 ? fileTotal : plan.Folders.Count;
-        var visibleDeleted = fileTotal > 0 ? deletedFiles : deletedFolders;
-        var visibleKind = fileTotal > 0 ? "arquivo(s)" : "pasta(s)";
-        await registry.SynchronizeFolderSerialsAsync(serialFolderIds);
+        await PublishDeletedEntriesAsync(deleted.ToArray());
+        await registry.SynchronizeFolderSerialsAsync(deleted.Select(entry => entry.ParentFolderId), token);
         await serialBatch.DisposeAsync();
-        if (failed == 0) await OpsProgressAsync(opId, 100, $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s)");
-        await OpsUpdateAsync(opId, status, failed == 0
-            ? $"{visibleDeleted}/{visibleTotal} {visibleKind} removido(s) do índice" + (pendingCleanup ? "; limpeza física em segundo plano" : "")
-            : $"{visibleDeleted}/{visibleTotal} {visibleKind} apagado(s), {failed} falharam");
-        return new DeleteResult(visibleTotal, visibleDeleted, failed);
+        await QueuePhysicalCleanupAsync(registry, cleanups.ToArray());
+        return failed;
     }
 
     private async Task DeleteEntryAsync(AppRegistry registry, List<AppEntry> all, AppEntry entry)
@@ -4161,32 +3872,6 @@ public sealed partial class AppController : IAsyncDisposable
         }
 
         return $"{entry.Type}:{entry.ThreadId}:{PathRules.Normalize(entry.Path)}:{entry.Name}";
-    }
-
-    private static string DeletePlanLabel(IReadOnlyList<AppEntry> selected, DeletePlan plan)
-    {
-        if (selected.Count == 1 && IsFolderEntry(selected[0]))
-        {
-            return $"{selected[0].Name} ({plan.Files.Count} arquivo(s))";
-        }
-
-        if (plan.Folders.Count > 0)
-        {
-            return $"{plan.Files.Count} arquivo(s), {plan.Folders.Count} pasta(s)";
-        }
-
-        return $"{plan.Files.Count} arquivo(s)";
-    }
-
-    private static string DeleteProgressMessage(string kind, int done, int total, string name)
-    {
-        var remaining = Math.Max(0, total - done);
-        if (done <= 0)
-        {
-            return $"Apagando {total} {kind}(s) - faltam {remaining}";
-        }
-
-        return $"({done}/{total}) {name} - faltam {remaining}";
     }
 
     private static int Percent(int done, int total)
@@ -7355,7 +7040,6 @@ private static string ClassifyConnectError(Exception ex)
     private sealed record VideoPreviewUploadResult(long SizeBytes, IReadOnlyList<string> ChunkMessageIds,
         IReadOnlyList<ChunkReference>? ChunkReferences = null);
     private sealed record DeletePlan(List<AppEntry> Files, List<AppEntry> Folders);
-    private sealed record DeleteResult(int Total, int Deleted, int Failed);
     private sealed record DocxStyle(string? Alignment, bool Bold, bool Italic, bool Underline, string? FontSize);
     private sealed record DocxParagraph(string Html, int Units, bool PageBreakAfter);
     private sealed record XlsxSheet(string Name, string Path);

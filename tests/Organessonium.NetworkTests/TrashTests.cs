@@ -1,5 +1,6 @@
 using System.Net;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -10,6 +11,7 @@ using Microsoft.Web.WebView2.Wpf;
 using Organessonium.Bridge;
 using Organessonium.Models;
 using Organessonium.Services;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.NetworkTests;
 
@@ -21,7 +23,26 @@ internal static partial class Program
         var complete = new TaskCompletionSource<TestOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
-            var window = new Window { Title = "Organessônium: lixeira", Width = 1280, Height = 800 };
+            AcceptanceRect secondary = default;
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, _, _, _) =>
+            {
+                var info = new AcceptanceMonitor { Size = Marshal.SizeOf<AcceptanceMonitor>() };
+                if (GetAcceptanceMonitor(monitor, ref info) && (info.Flags & 1) == 0) { secondary = info.Work; return false; }
+                return true;
+            }, IntPtr.Zero);
+            if (secondary.Right <= secondary.Left)
+            {
+                complete.TrySetResult(TestOutcome.Fail("Monitor secundário indisponível para o teste visível."));
+                return;
+            }
+            var window = new Window
+            {
+                Title = "Organessônium - Teste isolado da biblioteca", ShowActivated = false,
+                WindowStartupLocation = WindowStartupLocation.Manual, Left = secondary.Left + 20, Top = secondary.Top + 20,
+                Width = Math.Min(1280, secondary.Right - secondary.Left - 40), Height = Math.Min(800, secondary.Bottom - secondary.Top - 60)
+            };
+            window.SourceInitialized += (_, _) => SetWindowPos(new System.Windows.Interop.WindowInteropHelper(window).Handle, IntPtr.Zero,
+                secondary.Left + 20, secondary.Top + 20, (int)window.Width, (int)window.Height, 0x0014);
             var view = new WebView2();
             window.Content = view;
             var dispatcher = Dispatcher.CurrentDispatcher;
@@ -31,8 +52,10 @@ internal static partial class Program
                 AppController? controller = null;
                 try
                 {
-                    using var handler = new TrashDiscordFixture();
-                    using var discord = new DiscordApiClient("trash-test-token", new HttpClient(handler));
+                    using var handler = new TrashDiscordFixture(video: true);
+                    DiscordApiClient CreateDiscord() => new("trash-test-token", new HttpClient(handler, disposeHandler: false));
+                    using var firstDiscord = CreateDiscord();
+                    var discord = firstDiscord;
                     var store = new SettingsStore(Directory.CreateDirectory(Path.Combine(root.FullName, "Data")));
                     var settings = new AppSettings { NamesChannelId = "names", FoldersForumId = "folders", AppsForumId = "files", SerialChannelId = "serial", SearchWorkers = 1, Theme = "dark", PreviewEnabled = false };
                     store.Save(settings);
@@ -51,48 +74,66 @@ internal static partial class Program
                     await view.EnsureCoreWebView2Async(await CoreWebView2Environment.CreateAsync(null, Path.Combine(root.FullName, "WebView")));
                     view.CoreWebView2.SetVirtualHostNameToFolderMapping("organessonium.local", webRoot.FullName, CoreWebView2HostResourceAccessKind.Allow);
                     var bridge = new WebMessageBridge(view);
-                    controller = new AppController(window, store, bridge, _ => Task.CompletedTask);
-                    var session = new DiscordSession();
-                    typeof(DiscordSession).GetProperty(nameof(DiscordSession.Api))!.SetValue(session, discord);
-                    controller.SetSession(session);
+                    AppController CreateController(SettingsStore data, DiscordApiClient api)
+                    {
+                        var app = new AppController(window, data, bridge, _ => Task.CompletedTask);
+                        var session = new DiscordSession();
+                        typeof(DiscordSession).GetProperty(nameof(DiscordSession.Api))!.SetValue(session, api);
+                        app.SetSession(session);
+                        return app;
+                    }
+                    controller = CreateController(store, discord);
                     view.CoreWebView2.WebMessageReceived += async (_, e) =>
                     {
                         using var message = JsonDocument.Parse(e.WebMessageAsJson);
                         var method = message.RootElement.GetProperty("method").GetString();
-                        if (method is "refreshServerIndex" or "refreshCurrentFolder" or "setCurrentPath" or "deleteItems" or "restoreItems" or "loadFavorites")
-                            await controller.HandleJsonMessageAsync(e.WebMessageAsJson);
+                        if (method is "refreshServerIndex" or "refreshCurrentFolder" or "setCurrentPath" or "deleteItems" or
+                            "restoreItems" or "restoreTrash" or "moveItems" or "requestFileInformation" or "loadFavorites")
+                            if (controller != null) await controller.HandleJsonMessageAsync(e.WebMessageAsJson);
                     };
-                    var navigation = new TaskCompletionSource();
-                    view.CoreWebView2.NavigationCompleted += (_, e) =>
+                    async Task OpenLibraryAsync(bool reopened = false)
                     {
-                        if (e.IsSuccess) navigation.TrySetResult();
-                        else navigation.TrySetException(new IOException("WebView test navigation: " + e.WebErrorStatus + " HTTP " + e.HttpStatusCode));
-                    };
-                    view.CoreWebView2.Navigate("https://organessonium.local/index.html");
-                    await navigation.Task.WaitAsync(TimeSpan.FromSeconds(20));
-                    await bridge.SetSettingsAsync(settings);
-                    await view.CoreWebView2.ExecuteScriptAsync("window.onBridgeReady();window.__actions=0;window.__refreshes=0;window.__testError='';const status=window._onStatus;window._onStatus=(s,l)=>{status(s,l);if(String(s).startsWith('OK'))window.__actions++};const refreshed=window._onServerIndexRefreshed;window._onServerIndexRefreshed=(r)=>{refreshed(r);window.__refreshes++};window._onError=(e)=>{window.__testError=String(e)};document.getElementById('main-area').dispatchEvent(new KeyboardEvent('keydown',{key:'F5',bubbles:true}));");
-                    await WaitForLibraryScriptAsync(view, "window.__refreshes===1");
+                        var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        void Navigated(object? _, CoreWebView2NavigationCompletedEventArgs e)
+                        {
+                            view.CoreWebView2.NavigationCompleted -= Navigated;
+                            if (e.IsSuccess) navigation.TrySetResult();
+                            else navigation.TrySetException(new IOException("WebView test navigation: " + e.WebErrorStatus + " HTTP " + e.HttpStatusCode));
+                        }
+                        view.CoreWebView2.NavigationCompleted += Navigated;
+                        view.CoreWebView2.Navigate("https://organessonium.local/index.html" + (reopened ? "?restart=1" : ""));
+                        await navigation.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                        await bridge.SetSettingsAsync(settings);
+                        await view.CoreWebView2.ExecuteScriptAsync("window.onBridgeReady();window.__actions=0;window.__refreshes=0;window.__testError='';const status=window._onStatus;window._onStatus=(s,l)=>{status(s,l);if(String(s).startsWith('OK'))window.__actions++};const refreshed=window._onServerIndexRefreshed;window._onServerIndexRefreshed=(r)=>{refreshed(r);window.__refreshes++};window._onError=(e)=>{window.__testError=String(e)};");
+                        if (reopened)
+                            await controller!.HandleJsonMessageAsync("""{"method":"loadApps","args":[]}""");
+                        else
+                        {
+                            await view.CoreWebView2.ExecuteScriptAsync("document.getElementById('main-area').dispatchEvent(new KeyboardEvent('keydown',{key:'F5',bubbles:true}));");
+                            await WaitForLibraryScriptAsync(view, "window.__refreshes===1");
+                        }
+                    }
+                    await OpenLibraryAsync();
 
                     async Task ClickSidebarAsync(string name, int files, int folders)
                     {
                         await view.CoreWebView2.ExecuteScriptAsync($"document.getElementById('sidebar-{name}').click()");
                         await WaitForLibraryScriptAsync(view, $"activeLibraryView==='{name}'&&folderLoadingPath===''&&document.querySelectorAll('#files-grid .file-card:not(.folder-card)').length==={files}&&document.querySelectorAll('#files-grid .folder-card').length==={folders}");
                     }
-                    async Task DeleteVisibleAsync(string name, bool folder, bool shift, int expected)
+                    async Task DeleteVisibleAsync(string name, bool folder, bool shift, int? expected)
                     {
                         await view.CoreWebView2.ExecuteScriptAsync($"clearSelection();window.__testError='';var card=[...document.querySelectorAll('#files-grid .file-card')].find(c=>c.textContent.includes('{name}'));card.focus();card.dispatchEvent(new KeyboardEvent('keydown',{{key:' ',bubbles:true}}));card.dispatchEvent(new KeyboardEvent('keydown',{{key:'Delete',shiftKey:{shift.ToString().ToLowerInvariant()},bubbles:true}}));");
                         await RequireLibraryScriptAsync(view, "!document.getElementById('confirm-overlay').classList.contains('hidden')", "Delete não abriu a confirmação visível.");
                         await RequireLibraryScriptAsync(view, $"document.getElementById('confirm-ok').textContent==='{(shift ? "Apagar permanentemente" : "Mover para a lixeira")}'", "Delete e Shift+Delete usam a mesma ação.");
                         await view.CoreWebView2.ExecuteScriptAsync("document.getElementById('confirm-ok').click()");
                         if (expected >= 0) await WaitForLibraryScriptAsync(view, $"window.__actions==={expected}");
-                        else await WaitForLibraryScriptAsync(view, "window.__testError.length>0");
+                        else if (expected != null) await WaitForLibraryScriptAsync(view, "window.__testError.length>0");
                     }
                     async Task CheckTrashSerialAsync(int children, string? stableId = null)
                     {
                         var mapping = store.LoadFolderIndexMappings()[AppRegistry.TrashFolderId];
-                        var remote = new FolderSerialCodec().DecodeFolder(handler.Serials[mapping.SerialMessageId]);
-                        var reopened = new SerialIndexService(discord, settings, store.SerialCacheDirectory);
+                        var remote = DecodePublishedSerial(mapping.SerialMessageId);
+                        var reopened = new SerialIndexService(discord, store, settings);
                         var cached = await reopened.LoadCachedFolderAsync(AppRegistry.TrashFolderId);
                         if (remote.Kind != FolderSerialKind.Folder || remote.FolderId != "trash" || remote.Children.Count != children || cached?.Children.Count != children || store.LoadCachedEntriesForFolder("trash").Count != children)
                             throw new InvalidDataException("A lixeira não acompanha o serial remoto, persistente e SQLite.");
@@ -100,6 +141,16 @@ internal static partial class Program
                             throw new InvalidDataException("A lixeira trocou o ID da mensagem em vez de substituir o .bin.");
                         if (mapping.SerialSha256 != Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(handler.Serials[mapping.SerialMessageId])).ToLowerInvariant())
                             throw new InvalidDataException("O mapping da lixeira não acompanha o SHA-256 do serial.");
+                    }
+                    FolderSerial DecodePublishedSerial(string messageId)
+                    {
+                        var transport = new SerialMetadataTransport(MetadataCodec.ForStore(store));
+                        return new FolderSerialCodec().DecodeFolder(transport.Decode(handler.Serials[messageId]));
+                    }
+                    async Task WaitForPhysicalDeletionAsync(string threadId)
+                    {
+                        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                        while (!handler.DeletedChannels.Contains(threadId)) await Task.Delay(50, timeout.Token);
                     }
 
                     await ClickSidebarAsync("favorites", 1, 0);
@@ -109,12 +160,47 @@ internal static partial class Program
                         throw new InvalidDataException("Falha no destino removeu o arquivo original.");
                     await RequireLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .file-card').length===1", "Falha no envio ocultou o favorito.");
                     handler.RejectTrashWrites = false;
-                    await DeleteVisibleAsync("Favorito.png", false, false, 1);
+                    var postGate = handler.TrashPostGate = new RemoteWriteGate();
+                    var resumedPost = new RemoteWriteGate();
+                    var deleteGate = handler.RootDeleteGate = new RemoteWriteGate();
+                    await DeleteVisibleAsync("Favorito.png", false, false, null);
+                    try
+                    {
+                        await postGate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await WaitForLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .file-card').length===0&&pendingLibraryChanges.length===1");
+                        var reopenedStore = new SettingsStore(store.DataDirectory);
+                        var queued = reopenedStore.LoadLibraryMutations("libraryMutations:names:folders:files:serial");
+                        if (queued.Count != 1 || queued[0].Relocations?.Single().FilePayload?.Chunks?.Single() != "payload-part" ||
+                            handler.Entry("root-thread", "file-a") == null)
+                            throw new InvalidDataException("O payload da mudança local não foi persistido antes da rede.");
+                        await controller.DisposeAsync();
+                        controller = null;
+                        await postGate.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                        handler.TrashPostGate = resumedPost;
+                        discord = CreateDiscord();
+                        controller = CreateController(reopenedStore, discord);
+                        await OpenLibraryAsync(reopened: true);
+                        await resumedPost.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await ClickSidebarAsync("favorites", 0, 0);
+                        await RequireLibraryScriptAsync(view, "pendingLibraryChanges.length===1", "Reabrir perdeu a mudança pendente da interface.");
+                        resumedPost.Released.TrySetResult();
+                        await deleteGate.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+                        await CheckTrashSerialAsync(1);
+                        var rootSerialId = store.LoadFolderIndexMappings()["root"].SerialMessageId;
+                        if (DecodePublishedSerial(rootSerialId).Children.Any(child => child.Id == "file-a") ||
+                            handler.Entry("root-thread", "file-a") == null)
+                            throw new InvalidDataException("O serial não foi atualizado antes da remoção da mensagem antiga.");
+                    }
+                    finally { postGate.Released.TrySetResult(); resumedPost.Released.TrySetResult(); deleteGate.Released.TrySetResult(); }
+                    await WaitForLibraryScriptAsync(view, "window.__actions===1&&pendingLibraryChanges.length===0");
+                    handler.TrashPostGate = null; handler.RootDeleteGate = null;
                     await RequireLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .file-card').length===0", "O item enviado à lixeira continua nos favoritos.");
                     if (handler.DeletedChannels.Count != 0 || handler.Entry("root-thread", "file-a") != null)
                         throw new InvalidDataException("Delete apagou payloads ou deixou metadata na origem.");
                     var trashed = handler.Entry("trash-thread", "file-a") as FileMetadata;
-                    if (trashed?.Trash?.OriginalParentFolderId != "root" || !DateTimeOffset.TryParse(trashed.Trash.DeletedAt, out _) || trashed.Chunks?.Single() != "payload-part" || trashed.Encryption?.Salt != "AAAAAAAAAAAAAAAAAAAAAA" || trashed.Preview?.ThumbnailMessageId != "thumb-part")
+                    if (trashed?.Trash?.OriginalParentFolderId != "root" || !DateTimeOffset.TryParse(trashed.Trash.DeletedAt, out _) ||
+                        trashed.Chunks?.Single() != "payload-part" || trashed.Encryption?.Salt != "AAAAAAAAAAAAAAAAAAAAAA" ||
+                        trashed.Preview?.ThumbnailMessageId != "thumb-part" || trashed.Checksums?.Chunks.Single() != new string('1', 64))
                         throw new InvalidDataException("O envio à lixeira perdeu os metadados completos.");
                     await ClickSidebarAsync("trash", 1, 0);
                     await CheckTrashSerialAsync(1);
@@ -123,7 +209,7 @@ internal static partial class Program
                     var screenshot = Path.Combine(Path.GetTempPath(), "organessonium-trash-ui-" + Guid.NewGuid().ToString("N") + ".png");
                     using (var output = File.Create(screenshot)) await view.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, output);
                     Console.WriteLine("Trash UI screenshot: " + screenshot);
-                    await view.CoreWebView2.ExecuteScriptAsync("document.querySelector('#files-grid .file-card').click();document.getElementById('sel-restore').click()");
+                    await view.CoreWebView2.ExecuteScriptAsync("document.querySelector('#files-grid .file-card').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:300,clientY:240}));document.getElementById('ctx-restore').click()");
                     await WaitForLibraryScriptAsync(view, "window.__actions===2");
                     if (handler.Entry("root-thread", "file-a") is not FileMetadata { Trash: null, Favorite: true } || handler.DeletedChannels.Count != 0)
                         throw new InvalidDataException("Restaurar não preservou o arquivo e seu favorito.");
@@ -131,12 +217,26 @@ internal static partial class Program
                     await ClickSidebarAsync("favorites", 1, 0);
                     await ClickSidebarAsync("files", 1, 2);
                     await DeleteVisibleAsync("Favorito.png", false, true, 3);
+                    await WaitForPhysicalDeletionAsync("payload-a");
                     if (!handler.DeletedChannels.SequenceEqual(new[] { "payload-a" }))
                         throw new InvalidDataException("Shift+Delete não apagou somente o payload selecionado.");
                     await CheckTrashSerialAsync(0, trashId);
                     await ClickSidebarAsync("favorites", 0, 0);
                     await ClickSidebarAsync("files", 0, 2);
-                    await DeleteVisibleAsync("Fotos", true, false, 4);
+                    await view.CoreWebView2.ExecuteScriptAsync("[...document.querySelectorAll('#files-grid .folder-card')].find(c=>c.textContent.includes('Fotos')).click()");
+                    await WaitForLibraryScriptAsync(view, "currentPath==='/Fotos'&&folderLoadingPath===''&&document.querySelectorAll('#files-grid .file-card').length===1");
+                    await view.CoreWebView2.ExecuteScriptAsync("openFileDetails(allApps.find(entry=>entry.fileId==='file-b'),false)");
+                    await WaitForLibraryScriptAsync(view, "[...$('file-details-content').querySelectorAll('div')].some(row=>row.querySelector('dt')?.textContent===t('detailsSize')&&row.querySelector('dd')?.textContent===fmtSize(100))&&[...$('file-details-content').querySelectorAll('div')].some(row=>row.querySelector('dt')?.textContent===t('detailsStorage')&&row.querySelector('dd')?.textContent===fmtSize(150))");
+                    await WaitForLibraryScriptAsync(view, "$('storage-display').textContent===fmtSize(350)");
+                    await view.CoreWebView2.ExecuteScriptAsync("closeFileDetails();moveIdsToPath([allApps.find(entry=>entry.fileId==='file-b').metadataMessageId],'/Arquivo')");
+                    await WaitForLibraryScriptAsync(view, "window.__actions===4");
+                    if (handler.Entry("archive-thread", "file-b") is not FileMetadata { ParentFolderId: "archive" } ||
+                        handler.Entry("photos-thread", "file-b") != null)
+                        throw new InvalidDataException("Mover não publicou o arquivo no destino.");
+                    await view.CoreWebView2.ExecuteScriptAsync("moveIdsToPath([allApps.find(entry=>entry.fileId==='file-b').metadataMessageId],'/Fotos')");
+                    await WaitForLibraryScriptAsync(view, "window.__actions===5");
+                    await ClickSidebarAsync("files", 0, 2);
+                    await DeleteVisibleAsync("Fotos", true, false, 6);
                     if (handler.Entry("photos-thread", "file-b") == null || handler.DeletedChannels.Count != 1)
                         throw new InvalidDataException("Mover uma pasta apagou seus filhos.");
                     await view.CoreWebView2.ExecuteScriptAsync("searchQuery='inside-photos';render()");
@@ -147,10 +247,10 @@ internal static partial class Program
                     await ClickSidebarAsync("files", 0, 1);
                     await view.CoreWebView2.ExecuteScriptAsync("document.querySelector('#files-grid .folder-card').click()");
                     await WaitForLibraryScriptAsync(view, "currentPath==='/Arquivo'&&folderLoadingPath===''");
-                    await DeleteVisibleAsync("Fotos", true, false, 5);
+                    await DeleteVisibleAsync("Fotos", true, false, 7);
                     await ClickSidebarAsync("trash", 0, 2);
                     await view.CoreWebView2.ExecuteScriptAsync("document.getElementById('main-area').dispatchEvent(new KeyboardEvent('keydown',{key:'F5',bubbles:true}))");
-                    await WaitForLibraryScriptAsync(view, "window.__refreshes===2");
+                    await WaitForLibraryScriptAsync(view, "window.__refreshes===1");
                     await CheckTrashSerialAsync(2, trashId);
                     await RequireLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .folder-card').length===2", "Pastas apagadas com nomes iguais foram combinadas.");
                     if (handler.DeletedChannels.Count != 1) throw new InvalidDataException("F5 removeu índices ou payloads da lixeira.");
@@ -164,15 +264,24 @@ internal static partial class Program
                     await RequireLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .file-card:not(.folder-card)').length===1&&currentFolderIds[0]===window.__opened", "O histórico perdeu a identidade da pasta aberta.");
                     await ClickSidebarAsync("trash", 0, 2);
                     await view.CoreWebView2.ExecuteScriptAsync("document.getElementById('main-area').dispatchEvent(new KeyboardEvent('keydown',{key:'a',ctrlKey:true,bubbles:true}));document.getElementById('sel-restore').click()");
-                    await WaitForLibraryScriptAsync(view, "window.__actions===6");
+                    await WaitForLibraryScriptAsync(view, "window.__actions===8");
                     await CheckTrashSerialAsync(0, trashId);
                     if (handler.Entry("root-thread", "photos") is not FolderMetadata { ParentFolderId: "root", Trash: null } || handler.Entry("archive-thread", "other-photos") is not FolderMetadata { ParentFolderId: "archive", Trash: null } || handler.Entry("other-thread", "file-c") == null)
                         throw new InvalidDataException("Restaurar pastas não preservou sua árvore.");
                     await ClickSidebarAsync("files", 0, 2);
-                    await DeleteVisibleAsync("Fotos", true, true, 7);
+                    await DeleteVisibleAsync("Fotos", true, false, 9);
+                    await ClickSidebarAsync("trash", 0, 1);
+                    await RequireLibraryScriptAsync(view, "$('btn-restore-trash').offsetWidth>0&&!$('btn-restore-trash').disabled", "Restaurar tudo não apareceu na lixeira.");
+                    await view.CoreWebView2.ExecuteScriptAsync("$('btn-restore-trash').click()");
+                    await WaitForLibraryScriptAsync(view, "window.__actions===10&&$('btn-restore-trash').disabled&&!document.querySelector('#files-grid .file-card')");
+                    await CheckTrashSerialAsync(0, trashId);
+                    await ClickSidebarAsync("files", 0, 2);
+                    await DeleteVisibleAsync("Fotos", true, true, 11);
+                    await WaitForPhysicalDeletionAsync("payload-b");
                     if (!handler.DeletedChannels.Contains("payload-b") || !handler.DeletedChannels.Contains("photos-thread") || handler.DeletedChannels.Contains("other-thread") || handler.Entry("other-thread", "file-c") == null)
                         throw new InvalidDataException("Exclusão permanente recursiva atingiu uma pasta não selecionada.");
                     await CheckTrashSerialAsync(0, trashId);
+                    Console.WriteLine("LIBRARY_MUTATION_RESULT localWhileBlocked=True resumedWithPayload=True serialBeforeOldMetadata=True restoreIndividual=True restoreSelection=True restoreAll=True previewBytes=True secondary=True");
                     complete.TrySetResult(TestOutcome.Pass());
                 }
                 catch (Exception ex) { complete.TrySetResult(TestOutcome.Fail(ex.ToString())); }
@@ -190,6 +299,24 @@ internal static partial class Program
         return await complete.Task.WaitAsync(TimeSpan.FromMinutes(2));
     }
 
+    private sealed class RemoteWriteGate
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Cancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task WaitAsync(CancellationToken token)
+        {
+            Entered.TrySetResult();
+            try { await Released.Task.WaitAsync(token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                Cancelled.TrySetResult();
+                throw;
+            }
+        }
+    }
+
     private sealed class TrashDiscordFixture : HttpMessageHandler
     {
         private readonly MetadataService _metadata = new();
@@ -198,8 +325,10 @@ internal static partial class Program
         public Dictionary<string, byte[]> Serials { get; } = new();
         public List<string> DeletedChannels { get; } = [];
         public bool RejectTrashWrites { get; set; }
+        public RemoteWriteGate? TrashPostGate { get; set; }
+        public RemoteWriteGate? RootDeleteGate { get; set; }
 
-        public TrashDiscordFixture()
+        public TrashDiscordFixture(bool video = false)
         {
             _channels["names"] = []; _channels["serial"] = [];
             foreach (var (id, thread, parent, name) in new[] { ("root", "root-thread", "root", "root"), ("photos", "photos-thread", "root", "Fotos"), ("archive", "archive-thread", "root", "Arquivo"), ("other-photos", "other-thread", "archive", "Fotos") })
@@ -209,8 +338,18 @@ internal static partial class Program
                 Add(thread, _metadata.SerializeFolderIndexHeader(id, parent, name));
                 if (id != "root") Add(parent == "archive" ? "archive-thread" : "root-thread", JsonSerializer.Serialize(new FolderMetadata { FolderId = id, Name = name, ParentFolderId = parent, CreatedAt = "2026-10-04T12:00:00Z" }, JsonOptions.Web));
             }
-            Add("root-thread", JsonSerializer.Serialize(new FileMetadata { FileId = "file-a", ThreadId = "payload-a", Name = "Favorito.png", MimeType = "image/png", SizeBytes = 8192, ParentFolderId = "root", UploadedAt = "2026-10-04T12:00:00Z", Favorite = true, Chunks = ["payload-part"], Preview = new() { ThumbnailMessageId = "thumb-part" }, Encryption = new() { Version = 1, Mode = "standard", Salt = "AAAAAAAAAAAAAAAAAAAAAA" } }, JsonOptions.Web));
-            Add("photos-thread", JsonSerializer.Serialize(new FileMetadata { FileId = "file-b", ThreadId = "payload-b", Name = "inside-photos.jpg", MimeType = "image/jpeg", SizeBytes = 100, ParentFolderId = "photos", UploadedAt = "2026-10-04T12:00:00Z", Chunks = ["part-b"] }, JsonOptions.Web));
+            Add("root-thread", JsonSerializer.Serialize(new FileMetadata
+            {
+                FileId = "file-a", ThreadId = "payload-a", Name = "Favorito.png", MimeType = "image/png", SizeBytes = 8192,
+                ParentFolderId = "root", UploadedAt = "2026-10-04T12:00:00Z", Favorite = true, Chunks = ["payload-part"],
+                Preview = new() { ThumbnailMessageId = "thumb-part" },
+                Encryption = new() { Version = 1, Mode = "standard", Salt = "AAAAAAAAAAAAAAAAAAAAAA" },
+                Checksums = video ? new() { ChunkSizeBytes = 8192, Sha256 = new string('1', 64), Chunks = [new string('1', 64)] } : null
+            }, JsonOptions.Web));
+            Add("photos-thread", JsonSerializer.Serialize(new FileMetadata { FileId = "file-b", ThreadId = "payload-b",
+                Name = video ? "inside-photos.mp4" : "inside-photos.jpg", MimeType = video ? "video/mp4" : "image/jpeg", SizeBytes = 100,
+                ParentFolderId = "photos", UploadedAt = "2026-10-04T12:00:00Z", Chunks = ["part-b"],
+                Preview = video ? new() { Video480p = new() { SizeBytes = 50, Chunks = ["preview-b"] } } : null }, JsonOptions.Web));
             Add("other-thread", JsonSerializer.Serialize(new FileMetadata { FileId = "file-c", ThreadId = "payload-c", Name = "inside-other.jpg", MimeType = "image/jpeg", SizeBytes = 200, ParentFolderId = "other-photos", UploadedAt = "2026-10-04T12:00:00Z", Chunks = ["part-c"] }, JsonOptions.Web));
         }
 
@@ -248,12 +387,14 @@ internal static partial class Program
             }
             if (request.Method == HttpMethod.Delete)
             {
+                if (channel == "root-thread" && parts.Length == 3 && RootDeleteGate is { } deleteGate) await deleteGate.WaitAsync(cancellationToken);
                 if (parts.Length == 3) _channels.GetValueOrDefault(channel)?.Remove(parts[2]);
                 else { DeletedChannels.Add(channel); _channels.Remove(channel); }
                 return new(HttpStatusCode.NoContent);
             }
             if (request.Method == HttpMethod.Patch && parts.Length == 1) return Json(new { id = channel });
             if (request.Method == HttpMethod.Post && channel == "trash-thread" && RejectTrashWrites) return new(HttpStatusCode.Forbidden);
+            if (request.Method == HttpMethod.Post && channel == "trash-thread" && TrashPostGate is { } postGate) await postGate.WaitAsync(cancellationToken);
             string content;
             string? threadName = null;
             byte[]? bytes = null;

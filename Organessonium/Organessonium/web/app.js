@@ -132,6 +132,7 @@ const I18N = {
         trashConfirmTitle:'Mover para a lixeira?', trashConfirmMessage:v => v.count + ' item(ns) poderão ser restaurados pela Lixeira.',
         alreadyTrashed:'O item já está na lixeira. Use Shift+Delete para apagar permanentemente.',
         trashEmptyHelp:'Os itens enviados à lixeira aparecerão aqui.',
+        restoreTrash:'Restaurar tudo',
         emptyTrash:'Esvaziar lixeira', emptyTrashTitle:'Esvaziar a lixeira?', emptyTrashMessage:'Todos os arquivos, pastas e versões da lixeira serão apagados permanentemente. Esta ação não pode ser desfeita.',
         deleteFilesTitle:'Apagar arquivos?', deleteFilesMessage:v => v.count + ' item(ns) serão removidos permanentemente.',
         deleteFolderTitle:'Apagar pasta?', deleteFolderMessage:v => '"' + v.name + '" e todos os arquivos dentro dela serão removidos permanentemente.',
@@ -281,6 +282,7 @@ const I18N = {
         trashConfirmTitle:'Move to trash?', trashConfirmMessage:v => v.count + ' item(s) can be restored from Trash.',
         alreadyTrashed:'This item is already in Trash. Use Shift+Delete to delete permanently.',
         trashEmptyHelp:'Items moved to Trash will appear here.',
+        restoreTrash:'Restore all',
         emptyTrash:'Empty trash', emptyTrashTitle:'Empty the trash?', emptyTrashMessage:'All files, folders and versions in Trash will be permanently deleted. This action cannot be undone.',
         deleteFilesTitle:'Delete files?', deleteFilesMessage:v => v.count + ' item(s) will be permanently removed.',
         deleteFolderTitle:'Delete folder?', deleteFolderMessage:v => '"' + v.name + '" and every file inside it will be permanently removed.',
@@ -609,6 +611,7 @@ function applyI18n() {
     setA11y('sidebar-devices', 'sidebarDevices');
     setText('sidebar-trash-text', 'sidebarTrash');
     setText('empty-trash-label', 'emptyTrash');
+    setText('restore-trash-label', 'restoreTrash');
     setA11y('sidebar-trash', 'sidebarTrash');
     setText('sel-restore-text', 'restore');
     setText('ctx-restore-text', 'restore');
@@ -995,6 +998,64 @@ function appIdentityKey(app) {
     return 'metadata:' + ((app && app.metadataMessageId) || '');
 }
 
+let confirmedApps = [], confirmedFavorites = [], confirmedDevices = [];
+let pendingLibraryChanges = [];
+
+function projectLibraryChanges() {
+    if (!pendingLibraryChanges.length) {
+        allApps = confirmedApps;
+        specialItems = confirmedFavorites;
+        deviceItems = confirmedDevices;
+        return;
+    }
+    const libraryKeys = new Set(confirmedApps.map(appIdentityKey));
+    const favoriteKeys = new Set(confirmedFavorites.map(appIdentityKey));
+    const deviceKeys = new Set(confirmedDevices.map(appIdentityKey));
+    const byId = new Map([...confirmedFavorites, ...confirmedDevices, ...confirmedApps].map(app => [appIdentityKey(app), app]));
+    const folderParents = new Map([...byId.values()].filter(app => app.type === 'folder').map(app => [app.folderId, app.parentFolderId]));
+    for (const { source, destination } of pendingLibraryChanges) {
+        const key = appIdentityKey(source);
+        const current = byId.get(key) || source;
+        if (source.type === 'folder') {
+            const previousPath = (source.path === '/' ? '' : source.path) + '/' + source.name;
+            const nextPath = destination && (destination.path === '/' ? '' : destination.path) + '/' + destination.name;
+            for (const [id, app] of byId) {
+                let parent = app.parentFolderId;
+                const seen = new Set();
+                while (parent && parent !== source.folderId && !seen.has(parent)) {
+                    seen.add(parent);
+                    parent = folderParents.get(parent);
+                }
+                if (parent !== source.folderId) continue;
+                const path = app.path || '/';
+                if (!nextPath) byId.delete(id);
+                else if (path === previousPath || path.startsWith(previousPath + '/'))
+                    byId.set(id, { ...app, path:nextPath + path.slice(previousPath.length) });
+            }
+            folderParents.set(source.folderId, destination?.parentFolderId);
+        }
+        if (!destination) { byId.delete(key); continue; }
+        byId.set(key, { ...current, parentFolderId:destination.parentFolderId, path:destination.path, trash:destination.trash,
+            modifiedAt:destination.modifiedAt });
+        libraryKeys.add(key);
+        if (current.favorite) favoriteKeys.add(key);
+        if (destination.parentFolderId === 'synchronized') deviceKeys.add(key);
+        else deviceKeys.delete(key);
+    }
+    allApps = [...byId].filter(([key]) => libraryKeys.has(key)).map(([, app]) => app);
+    specialItems = [...byId].filter(([key, app]) => favoriteKeys.has(key) && !isTrashApp(app)).map(([, app]) => app);
+    deviceItems = [...byId].filter(([key, app]) => deviceKeys.has(key) && !isTrashApp(app)).map(([, app]) => app);
+}
+
+window._onPendingLibraryChanges = changes => {
+    pendingLibraryChanges = Array.isArray(changes) ? changes : [];
+    projectLibraryChanges();
+    syncOpenMarkdownApps();
+    if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
+    render();
+    scheduleVisibleThumbnails();
+};
+
 function fileRequestId(app) {
     return app?.requestId || app?.threadId || app?.metadataMessageId || app?.fileId || '';
 }
@@ -1004,14 +1065,15 @@ let registryValidationUsesCache = false;
 window._onRegistryLoadStarted = hasCache => {
     registryValidationUsesCache = Boolean(hasCache);
     if (!registryValidationUsesCache) folderLoadingPath = '/';
-    if (!registryValidationUsesCache) allApps = [];
+    if (!registryValidationUsesCache) { confirmedApps = []; projectLibraryChanges(); }
     setStatus(registryValidationUsesCache ? t('validatingServer') : t('loading'), true);
     render();
 };
 
 window._onCachedAppsLoaded = apps => {
     if (!Array.isArray(apps)) return;
-    allApps = apps;
+    confirmedApps = apps;
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     render();
     refreshSidebarSummary();
@@ -1047,9 +1109,10 @@ window._onLibraryStatistics = statistics => {
 
 window._onAppsBatch = apps => {
     if (!Array.isArray(apps) || !apps.length) return;
-    const byId = new Map(allApps.map(app => [appIdentityKey(app), app]));
+    const byId = new Map(confirmedApps.map(app => [appIdentityKey(app), app]));
     apps.forEach(app => byId.set(appIdentityKey(app), app));
-    allApps = [...byId.values()];
+    confirmedApps = [...byId.values()];
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
     if (!uploadPublicationRenderTimer) uploadPublicationRenderTimer = setTimeout(() => {
@@ -1062,9 +1125,10 @@ window._onAppsBatch = apps => {
 window._onAppsRemoved = apps => {
     if (!Array.isArray(apps) || !apps.length) return;
     const removed = new Set(apps.map(appIdentityKey));
-    allApps = allApps.filter(app => !removed.has(appIdentityKey(app)));
-    specialItems = specialItems.filter(app => !removed.has(appIdentityKey(app)));
-    deviceItems = deviceItems.filter(app => !removed.has(appIdentityKey(app)));
+    confirmedApps = confirmedApps.filter(app => !removed.has(appIdentityKey(app)));
+    confirmedFavorites = confirmedFavorites.filter(app => !removed.has(appIdentityKey(app)));
+    confirmedDevices = confirmedDevices.filter(app => !removed.has(appIdentityKey(app)));
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     render();
     refreshSidebarSummary();
@@ -1073,7 +1137,8 @@ window._onAppsRemoved = apps => {
 window._onAppsLoaded = apps => {
     if (folderLoadingPath === '/') folderLoadingPath = '';
     if (currentPath === '/@trash') { trashLoaded = true; folderLoadingPath = ''; }
-    allApps = apps;
+    confirmedApps = apps;
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     render();
     refreshSidebarSummary();
@@ -1088,7 +1153,8 @@ window._onTrashEmptying = active => {
 window._onFolderIndexReconciled = (folderId, entries) => {
     if (!Array.isArray(entries)) return;
     const id = String(folderId || 'root').toLowerCase();
-    allApps = allApps.filter(entry => String(entry.parentFolderId || 'root').toLowerCase() !== id).concat(entries);
+    confirmedApps = confirmedApps.filter(entry => String(entry.parentFolderId || 'root').toLowerCase() !== id).concat(entries);
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     if (!['files','trash'].includes(activeLibraryView) || (!searchQuery && !currentFolderIds.some(folder => String(folder).toLowerCase() === id))) return;
     if (isSettingsOpen() || activeWorkspaceTab !== 'files') { libraryReconciliationPending = true; return; }
@@ -1100,7 +1166,8 @@ window._onLocalAppsChanged = apps => {
     if (!Array.isArray(apps)) return;
     folderFileCounts.clear();
     requestedFolderStatistics.clear();
-    allApps = apps;
+    confirmedApps = apps;
+    projectLibraryChanges();
     syncOpenMarkdownApps();
     render();
     refreshSidebarSummary();
@@ -1118,12 +1185,13 @@ window._onServerReadState = active => {
 window._onSpecialItemsLoaded = (view, items) => {
     if (!Array.isArray(items)) return;
     if (view === 'favorites') {
-        specialItems = items;
+        confirmedFavorites = items;
         favoritesLoaded = true;
     } else if (view === 'devices') {
-        deviceItems = items;
+        confirmedDevices = items;
         devicesLoaded = true;
     }
+    projectLibraryChanges();
     if (activeLibraryView === view) {
         folderLoadingPath = '';
         render();
@@ -1137,10 +1205,10 @@ window._onServerIndexRefreshed = rebuilt => {
 window._onFavoriteChanged = entry => {
     if (!entry) return;
     const key = appIdentityKey(entry);
-    allApps = allApps.map(app => appIdentityKey(app) === key ? Object.assign(app, entry) : app);
-    specialItems = entry.favorite
-        ? [...specialItems.filter(app => appIdentityKey(app) !== key), entry]
-        : specialItems.filter(app => appIdentityKey(app) !== key);
+    confirmedApps = confirmedApps.map(app => appIdentityKey(app) === key ? Object.assign(app, entry) : app);
+    confirmedFavorites = confirmedFavorites.filter(app => appIdentityKey(app) !== key);
+    if (entry.favorite) confirmedFavorites.push(entry);
+    projectLibraryChanges();
     render();
 };
 window._onFolderStatistics = (path, statistics) => {
@@ -2981,6 +3049,11 @@ document.addEventListener('DOMContentLoaded', () => {
     $('sidebar-settings').addEventListener('click', () => { closeSidebarNewMenu(); openSettings(); });
 
     $('btn-refresh').addEventListener('click',       refreshCurrentFolder);
+    $('btn-restore-trash').addEventListener('click', () => {
+        if (activeLibraryView !== 'trash' || currentPath !== '/@trash') return;
+        window.bridge.restoreTrash();
+        clearSelection();
+    });
     $('btn-empty-trash').addEventListener('click', () => {
         if (trashEmptying || activeLibraryView !== 'trash' || currentPath !== '/@trash') return;
         askConfirm(t('emptyTrashTitle'), t('emptyTrashMessage'), () => {
@@ -3149,7 +3222,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Settings
     $('btn-settings')?.addEventListener('click',   openSettings);
-    $('settings-close').addEventListener('click',  closeSettings);
     if ($('btn-save-settings')) $('btn-save-settings').addEventListener('click', saveSettings);
     if ($('btn-clear-cache')) $('btn-clear-cache').addEventListener('click', () => {
         setStatus(t('loading'), true);
@@ -4812,9 +4884,10 @@ function finishMarkdownAutoSave(id, payload) {
     entry.lastSavedMarkdown = entry.pendingMarkdown ?? getEditorMarkdown(entry);
     entry.pendingMarkdown = null;
     entry.app = Object.assign(entry.app, payload);
-    const idx = allApps.findIndex(a => (oldMetadataMessageId && a.metadataMessageId === oldMetadataMessageId) || (oldThreadId && fileRequestId(a) === oldThreadId));
-    if (idx >= 0) allApps[idx] = Object.assign(allApps[idx], payload);
-    else allApps.push(Object.assign({}, payload));
+    const idx = confirmedApps.findIndex(a => (oldMetadataMessageId && a.metadataMessageId === oldMetadataMessageId) || (oldThreadId && fileRequestId(a) === oldThreadId));
+    if (idx >= 0) confirmedApps[idx] = Object.assign(confirmedApps[idx], payload);
+    else confirmedApps.push(Object.assign({}, payload));
+    projectLibraryChanges();
     filesNeedRefresh = true;
     if (activeWorkspaceTab === 'files') refreshFilesIfNeeded();
     updateMarkdownSaveState(entry, 'saved');
@@ -6147,8 +6220,6 @@ function isSettingsOpen() { return settingsPanel.getAttribute('aria-hidden') ===
 function syncSettingsPageLanguage() {
     document.querySelectorAll('[data-settings-text]').forEach(node => node.textContent = t(node.dataset.settingsText));
     document.querySelector('.settings-categories')?.setAttribute('aria-label', t('settingsCategories'));
-    $('settings-close')?.setAttribute('aria-label', t('back'));
-    if ($('settings-close')) $('settings-close').title = t('back');
     syncEncryptionSettings();
     syncUploadSettings();
     if (typeof syncSettingsSelects === 'function') syncSettingsSelects();
@@ -6157,6 +6228,10 @@ function selectSettingsCategory(category, focus = false) {
     if (typeof closeSettingsSelect === 'function') closeSettingsSelect();
     const button = settingsPanel.querySelector('[data-settings-category="' + category + '"]');
     if (!button) return;
+    if (activeSettingsCategory === category) {
+        if (focus) button.focus({ preventScroll:true });
+        return;
+    }
     activeSettingsCategory = category;
     settingsPanel.querySelectorAll('[data-settings-category]').forEach(tab => {
         const active = tab === button;
@@ -6194,7 +6269,7 @@ function openSettings() {
     $('btn-sidebar-new').disabled = true;
     $('btn-sidebar-new').setAttribute('aria-disabled', 'true');
     closeSidebarNewMenu(); hideCtx();
-    selectSettingsCategory(activeSettingsCategory);
+    animateWorkspaceContent($('settings-pane-' + activeSettingsCategory));
     syncSidebarSelection(); updateNavButtons();
     if (window.bridge?.getPreviewCacheSize) window.bridge.getPreviewCacheSize();
     scheduleNativeTitleBarDragRegion(0);
@@ -6364,7 +6439,7 @@ function configureContextMenu(mode, app = null) {
     showCtxPart('ctx-rename', isItem && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-favorite', isItem && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-folder-colors', isItem && !inTrash && isFolder && !!app.metadataMessageId);
-    showCtxPart('ctx-restore', inTrash && app.parentFolderId === 'trash');
+    showCtxPart('ctx-restore', inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-delete', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-item-sep', isItem);
 
@@ -6552,11 +6627,13 @@ function syncRenderedItems(container, items, kind, create) {
 
 function render() {
     if (uploadPublicationRenderTimer) { clearTimeout(uploadPublicationRenderTimer); uploadPublicationRenderTimer = 0; }
-    $('btn-empty-trash').classList.toggle('hidden', activeLibraryView !== 'trash' || currentPath !== '/@trash');
+    const trashRootView = activeLibraryView === 'trash' && currentPath === '/@trash';
+    $('btn-empty-trash').classList.toggle('hidden', !trashRootView);
+    $('btn-restore-trash').classList.toggle('hidden', !trashRootView);
+    $('btn-restore-trash').disabled = !allApps.some(app => app.parentFolderId === 'trash');
     const viewApps = appsForActiveView();
     const favoritesView = activeLibraryView === 'favorites';
     const devicesRootView = activeLibraryView === 'devices' && currentPath === '/@synchronized';
-    const trashRootView = activeLibraryView === 'trash' && currentPath === '/@trash';
     const favoriteSource = favoritesView
         ? viewApps.filter(app => !searchQuery || (app.name || '').toLowerCase().includes(searchQuery))
         : [];
@@ -7030,7 +7107,7 @@ function updateSelectionUI() {
     bar.classList.toggle('hidden', count === 0);
     $('selection-count').textContent = t('selectedCount', { count });
     $('sel-delete-text').textContent = t(activeLibraryView === 'trash' ? 'permanentDelete' : 'moveToTrash');
-    $('sel-restore').classList.toggle('hidden', !count || selectedApps.some(app => app.parentFolderId !== 'trash'));
+    $('sel-restore').classList.toggle('hidden', !count || selectedApps.some(app => !isTrashApp(app)));
 }
 function clearSelection() {
     selectedKeys.clear();
@@ -7139,13 +7216,12 @@ function requestDelete(items, permanently = false) {
     askConfirm(permanently ? deleteConfirmTitle(items) : t('trashConfirmTitle'),
         permanently ? deleteConfirmMessage(items) : t('trashConfirmMessage', { count:items.length }),
         () => {
-            setStatus(t('deleting'), true);
             window.bridge.deleteItems(JSON.stringify(items.map(app => app.metadataMessageId).filter(Boolean)), permanently);
             clearSelection();
         }, permanently ? 'permanentDelete' : 'moveToTrash');
 }
 function restoreItems(items) {
-    const ids = items.filter(app => app.parentFolderId === 'trash' && app.metadataMessageId).map(app => app.metadataMessageId);
+    const ids = items.filter(app => isTrashApp(app) && app.metadataMessageId).map(app => app.metadataMessageId);
     if (!ids.length) return;
     window.bridge.restoreItems(JSON.stringify(ids));
     clearSelection();

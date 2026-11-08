@@ -59,7 +59,7 @@ public sealed partial class AppRegistry
         var normalizedFolderId = NormalizeFolderId(folderId);
         var cached = _store.LoadCachedEntriesForFolder(normalizedFolderId);
         // Confirmed upload metadata can be newer than the serial until the batch ends.
-        var serial = Volatile.Read(ref _uploadIndexBatches) > 0 ? null
+        var serial = Volatile.Read(ref _uploadIndexBatches) > 0 || _publishingLibraryFolders.ContainsKey(normalizedFolderId) ? null
             : await _serials.LoadCachedFolderAsync(normalizedFolderId, cancellationToken);
         var entries = serial == null
             ? cached
@@ -591,6 +591,8 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken = default)
     {
         var normalizedFolderId = NormalizeFolderId(folderId);
+        if (_publishingLibraryFolders.ContainsKey(normalizedFolderId))
+            return LoadCachedFolderAsync(normalizedFolderId, folderPath, cancellationToken);
         return _folderRefreshes.GetOrAdd(
             normalizedFolderId,
             _ => RefreshFolderCoreAsync(normalizedFolderId, folderPath, cancellationToken));
@@ -1174,7 +1176,8 @@ public sealed partial class AppRegistry
     public async Task DeleteEntryAsync(
         AppEntry entry,
         CancellationToken cancellationToken = default,
-        bool synchronizeSerials = true)
+        bool synchronizeSerials = true,
+        bool allowMissing = false)
     {
         await using var priority = SharedStorage.PrioritizeMutations();
         var folderMapping = entry.Type == "folder" && !string.IsNullOrWhiteSpace(entry.FolderId)
@@ -1186,7 +1189,8 @@ public sealed partial class AppRegistry
         var metadataChannel = entry.Type == "file" ? await SharedStorage.LocateMetadataAsync(entry, cancellationToken) : parent.ThreadId;
         await using (await _discord.AcquireThreadWriteAsync(parent.ThreadId, cancellationToken))
         {
-            await _metadata.DeleteEntryAsync(_discord, metadataChannel, entry, cancellationToken);
+            try { await _metadata.DeleteEntryAsync(_discord, metadataChannel, entry, cancellationToken); }
+            catch (DiscordApiException error) when (allowMissing && (int)error.StatusCode == 404) { }
             List<AppEntry> siblings;
             await _entryMutationGate.WaitAsync(cancellationToken);
             try
@@ -1216,12 +1220,14 @@ public sealed partial class AppRegistry
             await _serials.DeleteFolderAsync(folderMapping, cancellationToken);
             if (!string.IsNullOrWhiteSpace(folderMapping.NamesMessageId))
             {
-                await _discord.DeleteMessageAsync(_settings.NamesChannelId, folderMapping.NamesMessageId, cancellationToken);
+                try { await _discord.DeleteMessageAsync(_settings.NamesChannelId, folderMapping.NamesMessageId, cancellationToken); }
+                catch (DiscordApiException error) when (allowMissing && (int)error.StatusCode == 404) { }
             }
 
             if (!string.IsNullOrWhiteSpace(folderMapping.ThreadId))
             {
-                await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken);
+                try { await _discord.DeleteChannelAsync(folderMapping.ThreadId, cancellationToken); }
+                catch (DiscordApiException error) when (allowMissing && (int)error.StatusCode == 404) { }
             }
 
             lock (_mappingPublicationSync)
@@ -1333,6 +1339,7 @@ public sealed partial class AppRegistry
         string folderPath,
         CancellationToken cancellationToken)
     {
+        var revision = Volatile.Read(ref _libraryPublicationRevision);
         try
         {
             if (!_mappings.ContainsKey(folderId))
@@ -1369,6 +1376,9 @@ public sealed partial class AppRegistry
             RecordDescriptors(entries);
             if (!folderId.Equals(TrashFolderId, StringComparison.OrdinalIgnoreCase))
                 await ConsolidateDuplicateFolderEntriesAsync(folderId, entries, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (revision != Volatile.Read(ref _libraryPublicationRevision) || _publishingLibraryFolders.ContainsKey(folderId))
+                return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
             _store.CacheFolderEntries(folderId, entries);
             await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
             await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
@@ -1673,9 +1683,10 @@ public sealed partial class AppRegistry
         string folderId,
         string folderPath,
         IEnumerable<AppEntry> entries,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool publishImmediately = false)
     {
-        if (DeferFolderSerial(folderId)) return;
+        if (!publishImmediately && DeferFolderSerial(folderId)) return;
         await _serialSynchronizationGate.WaitAsync(cancellationToken);
         try
         {
