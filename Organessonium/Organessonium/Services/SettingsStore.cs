@@ -321,6 +321,27 @@ public sealed class SettingsStore : IEncryptionSecretStore
     internal AppEntry? LoadCachedFileEntry(string folderId, string metadataMessageId) =>
         LoadCachedEntriesForFolder(folderId, metadataMessageId).FirstOrDefault();
 
+    internal AppEntry? LoadCachedFileByRequestId(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+        lock (_lock)
+        {
+            using var connection = Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT COALESCE(parent_folder_id, ''), names_message_id FROM app_entries
+                WHERE type = 'file' AND (names_message_id = $id OR file_id = $id) LIMIT 1
+                """;
+            command.Parameters.AddWithValue("$id", id);
+            using var reader = command.ExecuteReader();
+            if (!reader.Read()) return null;
+            var folderId = reader.GetString(0);
+            var messageId = reader.GetString(1);
+            reader.Close();
+            return LoadCachedFileEntry(folderId, messageId);
+        }
+    }
+
     private List<AppEntry> LoadCachedEntriesForFolder(string folderId, string? metadataMessageId)
     {
         var normalizedFolderId = string.IsNullOrWhiteSpace(folderId) ? "root" : folderId;

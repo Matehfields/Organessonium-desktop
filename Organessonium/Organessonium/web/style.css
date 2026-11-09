@@ -370,7 +370,7 @@ html[data-integrated-titlebar="true"] .titlebar-drag-region{display:block;}
     font:inherit;
     font-size:12px;
 }
-.workspace-tab span:not(.tab-close){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.workspace-tab > span:not(.tab-close,.svg-icon){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .workspace-tab:hover{background:var(--surface2);color:var(--text-primary);}
 .workspace-tab.active{
     background:var(--bg);
@@ -692,14 +692,19 @@ html[data-motion="reduced"] .sidebar-selection-indicator{transition:none;}
 .markdown-editor-page table,.markdown-preview-page table{
     width:100%;
     border-collapse:collapse;
-    margin:14px 0;
-    table-layout:fixed;
+    margin:16px 0;
 }
 .markdown-editor-page th,.markdown-editor-page td,.markdown-preview-page th,.markdown-preview-page td{
     border:1px solid var(--border);
-    padding:8px 10px;
-    vertical-align:top;
+    min-width:3.5em;
+    height:2.65em;
+    padding:7px 10px;
+    text-align:left;
+    vertical-align:middle;
     overflow-wrap:anywhere;
+}
+.markdown-editor-page tbody tr:nth-child(even),.markdown-preview-page tbody tr:nth-child(even){
+    background:color-mix(in srgb,var(--surface2) 55%,transparent);
 }
 .markdown-editor-page th,.markdown-preview-page th{
     background:var(--surface2);
@@ -2699,6 +2704,8 @@ html[data-motion="reduced"] .ctx-menu-enter{animation:none;}
     font-weight:600;
 }
 .editor-link-modal{max-width:460px;}
+.editor-table-dimensions{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end;}
+.editor-table-dimensions input{margin-top:6px;}
 .editor-image-modal{max-width:560px;}
 .editor-image-tabs{
     display:grid;

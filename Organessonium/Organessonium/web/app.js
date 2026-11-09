@@ -34,7 +34,8 @@ let dragMoveKeys = [];
 let itemDragState = null, dragSuppressClickUntil = 0;
 let workspaceTabs = null, editorArea = null, activeWorkspaceTab = 'files';
 let markdownTabs = new Map(), pendingMarkdownEditorApp = null;
-let editorLinkState = null, editorImageState = null;
+let editorLinkState = null, editorImageState = null, editorTableState = null;
+let markdownImageViewSequence = 0;
 let pendingPastedMarkdownImages = new Map();
 let renameTarget = null;
 let filesNeedRefresh = false;
@@ -217,7 +218,8 @@ const I18N = {
         editorDocument:'Documento', editorFormat:'Formatar', editorInsert:'Inserir',
         editorView:'Visualizar', editorRaw:'Markdown puro', editorRich:'Editor visual',
         editorZoom:'Zoom', editorZoomReset:'Redefinir zoom',
-        editorTable:'Tabela',
+        editorTable:'Tabela', editorInsertTable:'Inserir tabela',
+        editorTableRows:'Linhas (incluindo cabeçalho)', editorTableColumns:'Colunas',
         editorFind:'Buscar', editorFindPlaceholder:'Buscar no documento...', editorFindNoResults:'Sem resultados',
         editorReplace:'Buscar e substituir', editorReplacePlaceholder:'Substituir por...',
         editorReplaceCurrent:'Substituir', editorReplaceAll:'Substituir tudo',
@@ -371,7 +373,8 @@ const I18N = {
         editorDocument:'Document', editorFormat:'Format', editorInsert:'Insert',
         editorView:'View', editorRaw:'Raw Markdown', editorRich:'Visual editor',
         editorZoom:'Zoom', editorZoomReset:'Reset zoom',
-        editorTable:'Table',
+        editorTable:'Table', editorInsertTable:'Insert table',
+        editorTableRows:'Rows (including header)', editorTableColumns:'Columns',
         editorFind:'Find', editorFindPlaceholder:'Find in document...', editorFindNoResults:'No results',
         editorReplace:'Find and replace', editorReplacePlaceholder:'Replace with...',
         editorReplaceCurrent:'Replace', editorReplaceAll:'Replace all',
@@ -767,6 +770,11 @@ function applyI18n() {
     setText('upload-conflict-overwrite', 'uploadConflictOverwrite');
     setText('upload-conflict-apply-text', 'uploadConflictApplyAll');
     setText('editor-link-title', 'editorInsertLink');
+    setText('editor-table-title', 'editorInsertTable');
+    setText('editor-table-rows-label', 'editorTableRows');
+    setText('editor-table-columns-label', 'editorTableColumns');
+    setText('editor-table-cancel', 'cancel');
+    setText('editor-table-confirm', 'editorInsert');
     setText('editor-link-text-label', 'editorLinkText');
     setText('editor-link-url-label', 'editorLinkUrl');
     setText('editor-link-cancel', 'cancel');
@@ -1294,7 +1302,7 @@ function syncOpenMarkdownApps() {
             (entry.app.metadataMessageId && app.metadataMessageId === entry.app.metadataMessageId));
         if (!fresh) return;
         entry.app = Object.assign(entry.app, fresh);
-        const label = entry.tab && entry.tab.querySelector('span');
+        const label = entry.tab && entry.tab.querySelector('[data-tab-label]');
         if (label) label.textContent = truncate(entry.app.name || '', 24);
         const title = entry.panel && entry.panel.querySelector('.editor-doc-copy strong');
         if (title) {
@@ -2569,13 +2577,16 @@ window._onMarkdownImageCancelled = id => {
     pendingPastedMarkdownImages.delete(id);
 };
 window._onEncryptedMarkdownImageReady = (id, reference, url) => {
-    const entry = markdownTabs.get(id);
-    if (!entry || !entry.editor || !reference || !url) return;
+    const entry = [...markdownTabs.values()].find(tab => tab.imageViewId === id);
+    if (!entry) {
+        if (url) window.bridge?.closePreview(id);
+        return;
+    }
+    entry.loadingImages.delete(reference);
+    if (!url) return;
     entry.editor.querySelectorAll('img').forEach(img => {
         if (img.dataset.organessoniumImage === reference) {
             img.src = url;
-            img.dataset.organessoniumReady = 'true';
-            delete img.dataset.organessoniumLoading;
         }
     });
 };
@@ -3136,6 +3147,21 @@ document.addEventListener('DOMContentLoaded', () => {
     $('editor-link-overlay').addEventListener('click', e => { if (e.target.id === 'editor-link-overlay') closeEditorLinkDialog(); });
     $('editor-link-url').addEventListener('keydown', e => { if (e.key === 'Enter') confirmEditorLinkDialog(); if (e.key === 'Escape') closeEditorLinkDialog(); });
     $('editor-link-text').addEventListener('keydown', e => { if (e.key === 'Enter') $('editor-link-url').focus(); if (e.key === 'Escape') closeEditorLinkDialog(); });
+    $('editor-table-cancel').addEventListener('click', closeEditorTableDialog);
+    $('editor-table-overlay').addEventListener('click', e => { if (e.target.id === 'editor-table-overlay') closeEditorTableDialog(); });
+    $('editor-table-form').addEventListener('keydown', e => {
+        if (e.key !== 'Escape') return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeEditorTableDialog();
+    });
+    $('editor-table-form').addEventListener('submit', e => {
+        e.preventDefault();
+        if (!editorTableState) return;
+        const { entry, selection } = editorTableState;
+        closeEditorTableDialog();
+        insertMarkdownTable(entry, selection, $('editor-table-rows').valueAsNumber, $('editor-table-columns').valueAsNumber);
+    });
     $('editor-image-cancel').addEventListener('click', closeEditorImageDialog);
     $('editor-image-confirm').addEventListener('click', confirmEditorImageDialog);
     $('editor-image-local-choose').addEventListener('click', chooseLocalMarkdownImage);
@@ -3943,7 +3969,7 @@ function openMarkdownEditor(app) {
     const tab = document.createElement('button');
     tab.className = 'workspace-tab';
     tab.dataset.tabId = id;
-    tab.innerHTML = `${icon('edit_note',16)}<span>${esc(truncate(app.name, 24))}</span>
+    tab.innerHTML = `${icon('description',16)}<span data-tab-label>${esc(truncate(app.name, 24))}</span>
         <span class="tab-close" data-close-tab="${esc(id)}">${icon('close',14)}</span>`;
     workspaceTabs.appendChild(tab);
 
@@ -3963,7 +3989,7 @@ function openMarkdownEditor(app) {
         editor:null, rawEditor:null, saveState:null, rawToggle:null, zoomLabel:null,
         toolbarWrapCleanup:null,
         rawMode:false, zoom:1,
-        lastSavedMarkdown:null, pendingMarkdown:null, saveTimer:0, saving:false, queued:false
+        lastSavedMarkdown:null, savingMarkdown:null, saveTimer:0
     });
     pendingMarkdownEditorApp = { app, id };
     activateWorkspaceTab(id);
@@ -3987,6 +4013,13 @@ function finishMarkdownEditor(name, markdown) {
 function closeMarkdownTab(id) {
     const tab = markdownTabs.get(id);
     if (!tab) return;
+    if (tab.editor && (tab.savingMarkdown !== null || getEditorMarkdown(tab) !== tab.lastSavedMarkdown)) {
+        tab.closeAfterSave = true;
+        saveMarkdownNow(tab);
+        return;
+    }
+    clearTimeout(tab.saveTimer);
+    if (tab.imageViewId) window.bridge?.closePreview(tab.imageViewId);
     if (typeof tab.toolbarWrapCleanup === 'function') tab.toolbarWrapCleanup();
     tab.tab.remove();
     tab.panel.remove();
@@ -4092,6 +4125,8 @@ function createMarkdownEditor(markdown, entry, name) {
     const rawEditor = shell.querySelector('.markdown-raw-editor');
     entry.editor = editor;
     entry.rawEditor = rawEditor;
+    entry.imageViewId = 'markdown-images-' + (++markdownImageViewSequence);
+    entry.loadingImages = new Set();
     entry.saveState = shell.querySelector('[data-save-state]');
     entry.rawToggle = shell.querySelector('[data-raw-toggle]');
     entry.zoomLabel = shell.querySelector('[data-editor-zoom]');
@@ -4219,6 +4254,7 @@ function runMarkdownEditorCommand(entry, command) {
     if (command === 'zoomIn') { setEditorZoom(entry, (entry.zoom || 1) + 0.1); return; }
     if (command === 'zoomOut') { setEditorZoom(entry, (entry.zoom || 1) - 0.1); return; }
     if (command === 'zoomReset') { setEditorZoom(entry, 1); return; }
+    if (command === 'table') { openEditorTableDialog(entry); return; }
 
     if (entry.rawMode) {
         runRawMarkdownCommand(entry, command);
@@ -4235,9 +4271,6 @@ function runMarkdownEditorCommand(entry, command) {
         return;
     } else if (command === 'image') {
         openEditorImageDialog(entry);
-        return;
-    } else if (command === 'table') {
-        insertMarkdownTable(entry, captureEditorInsertionState(entry, false));
         return;
     } else {
         document.execCommand(command, false, null);
@@ -4276,14 +4309,17 @@ function toggleRawMarkdown(entry) {
     const scrollState = captureMarkdownEditorScroll(entry);
     if (!entry.rawMode) {
         entry.rawEditor.value = editorHtmlToMarkdown(entry.editor);
+        entry.renderedMarkdown = entry.rawEditor.value;
         entry.editor.classList.add('hidden');
         entry.rawEditor.classList.remove('hidden');
         entry.rawMode = true;
         autoSizeRawMarkdownEditor(entry);
         focusWithoutScroll(entry.rawEditor);
     } else {
-        entry.editor.innerHTML = markdownToHtml(entry.rawEditor.value) || '<p><br></p>';
-        normalizeEditorDom(entry.editor);
+        if (entry.rawEditor.value !== entry.renderedMarkdown) {
+            entry.editor.innerHTML = markdownToHtml(entry.rawEditor.value) || '<p><br></p>';
+            normalizeEditorDom(entry.editor);
+        }
         prepareEditorMedia(entry);
         entry.rawEditor.classList.add('hidden');
         entry.editor.classList.remove('hidden');
@@ -4611,7 +4647,6 @@ function runRawMarkdownCommand(entry, command) {
     else if (command === 'italic') wrapTextareaSelection(textarea, '*', '*', 'texto');
     else if (command === 'insertUnorderedList') toggleLinePrefix(textarea, '- ', /^[-*+]\s+/);
     else if (command === 'insertOrderedList') toggleOrderedPrefix(textarea);
-    else if (command === 'table') insertTextareaText(textarea, defaultMarkdownTable());
     else if (command === 'link') {
         openEditorLinkDialog(entry);
         return;
@@ -4804,17 +4839,13 @@ function prepareEditorMedia(entry) {
     editor.querySelectorAll('img').forEach(img => {
         img.draggable = true;
         img.setAttribute('contenteditable', 'false');
-        const original = img.dataset.organessoniumImage || img.getAttribute('src') || '';
-        const isEncryptedAttachment = original.startsWith('organessonium-image://v1/');
-        const isEncryptedDriveImage = original.startsWith('organessonium-drive-image://');
-        if ((!isEncryptedAttachment && !isEncryptedDriveImage) || img.dataset.organessoniumReady === 'true' || img.dataset.organessoniumLoading === 'true') return;
-        img.dataset.organessoniumImage = original;
-        img.dataset.organessoniumLoading = 'true';
-        if (isEncryptedAttachment && window.bridge?.resolveEncryptedMarkdownImage) {
-            window.bridge.resolveEncryptedMarkdownImage(entry.id, fileRequestId(entry.app), original);
-        } else if (isEncryptedDriveImage && window.bridge?.resolveEncryptedDriveMarkdownImage) {
-            window.bridge.resolveEncryptedDriveMarkdownImage(entry.id, original.slice('organessonium-drive-image://'.length));
-        }
+        const reference = img.dataset.organessoniumImage;
+        if (!reference || img.hasAttribute('src') || entry.loadingImages.has(reference)) return;
+        entry.loadingImages.add(reference);
+        if (reference.startsWith('organessonium-image://'))
+            window.bridge.resolveEncryptedMarkdownImage(entry.imageViewId, entry.app.fileId || fileRequestId(entry.app), reference);
+        else
+            window.bridge.resolveEncryptedDriveMarkdownImage(entry.imageViewId, reference.slice('organessonium-drive-image://'.length));
     });
 }
 
@@ -4885,31 +4916,27 @@ function applyEditorZoom(entry) {
 
 function scheduleMarkdownAutoSave(entry) {
     if (!entry || (!entry.editor && !entry.rawEditor)) return;
+    clearTimeout(entry.saveTimer);
+    if (entry.savingMarkdown !== null) return;
     const markdown = getEditorMarkdown(entry);
     if (markdown === entry.lastSavedMarkdown) {
         updateMarkdownSaveState(entry, 'saved');
         return;
     }
-    entry.pendingMarkdown = markdown;
     updateMarkdownSaveState(entry, 'dirty');
-    clearTimeout(entry.saveTimer);
     entry.saveTimer = setTimeout(() => saveMarkdownNow(entry), 1800);
 }
 
 function saveMarkdownNow(entry) {
     if (!entry || (!entry.editor && !entry.rawEditor)) return;
-    const markdown = entry.pendingMarkdown ?? getEditorMarkdown(entry);
+    clearTimeout(entry.saveTimer);
+    if (entry.savingMarkdown !== null) return;
+    const markdown = getEditorMarkdown(entry);
     if (markdown === entry.lastSavedMarkdown) {
         updateMarkdownSaveState(entry, 'saved');
         return;
     }
-    if (entry.saving) {
-        entry.queued = true;
-        return;
-    }
-    entry.saving = true;
-    entry.queued = false;
-    entry.pendingMarkdown = markdown;
+    entry.savingMarkdown = markdown;
     updateMarkdownSaveState(entry, 'saving');
     window.bridge.saveMarkdown(entry.id, fileRequestId(entry.app), entry.app.metadataMessageId || '', entry.app.name, entry.app.path || '/', markdown);
 }
@@ -4919,9 +4946,8 @@ function finishMarkdownAutoSave(id, payload) {
     if (!entry) return;
     const oldThreadId = fileRequestId(entry.app);
     const oldMetadataMessageId = entry.app.metadataMessageId;
-    entry.saving = false;
-    entry.lastSavedMarkdown = entry.pendingMarkdown ?? getEditorMarkdown(entry);
-    entry.pendingMarkdown = null;
+    entry.lastSavedMarkdown = entry.savingMarkdown;
+    entry.savingMarkdown = null;
     entry.app = Object.assign(entry.app, payload);
     const idx = confirmedApps.findIndex(a => (oldMetadataMessageId && a.metadataMessageId === oldMetadataMessageId) || (oldThreadId && fileRequestId(a) === oldThreadId));
     if (idx >= 0) confirmedApps[idx] = Object.assign(confirmedApps[idx], payload);
@@ -4931,15 +4957,17 @@ function finishMarkdownAutoSave(id, payload) {
     if (activeWorkspaceTab === 'files') refreshFilesIfNeeded();
     updateMarkdownSaveState(entry, 'saved');
     setStatus(t('editorSaved'), false);
-    if (entry.queued || getEditorMarkdown(entry) !== entry.lastSavedMarkdown) {
-        scheduleMarkdownAutoSave(entry);
-    }
+    if (getEditorMarkdown(entry) !== entry.lastSavedMarkdown) {
+        if (entry.closeAfterSave) saveMarkdownNow(entry);
+        else scheduleMarkdownAutoSave(entry);
+    } else if (entry.closeAfterSave) closeMarkdownTab(id);
 }
 
 function failMarkdownAutoSave(id, msg) {
     const entry = markdownTabs.get(id);
     if (!entry) return;
-    entry.saving = false;
+    entry.savingMarkdown = null;
+    entry.closeAfterSave = false;
     updateMarkdownSaveState(entry, 'error');
     setStatus(t('editorSaveError') + (msg ? ': ' + msg : ''), false);
 }
@@ -5001,30 +5029,35 @@ function inlineMarkdown(node) {
     if (tag === 'em' || tag === 'i') return '*' + inner + '*';
     if (tag === 'code') return '`' + node.innerText.replace(/`/g, '\\`') + '`';
     if (tag === 'a') return '[' + (inner || node.href) + '](' + (node.getAttribute('href') || '') + ')';
-    if (tag === 'img') return '![' + (node.getAttribute('alt') || '') + '](' + (node.dataset.organessoniumImage || node.getAttribute('src') || '') + ')';
+    if (tag === 'img') {
+        const src = node.dataset.organessoniumImage || node.getAttribute('src') || '';
+        return '![' + escapeMarkdownLabel(node.getAttribute('alt')) + '](' + escapeMarkdownUrl(src) + ')';
+    }
     if (tag === 'br') return '\n';
     return inner;
 }
 
 function tableToMarkdown(table) {
-    const rows = Array.from(table.querySelectorAll('tr'))
-        .map(row => Array.from(row.children)
-            .filter(cell => /^(td|th)$/i.test(cell.tagName))
-            .map(cell => escapeMarkdownCell(inlineMarkdown(cell).replace(/\n+/g, ' ').trim())))
-        .filter(cells => cells.length);
+    const rows = Array.from(table.rows).filter(row => row.cells.length);
     if (!rows.length) return '';
-    const widths = Math.max(...rows.map(row => row.length));
-    rows.forEach(row => { while (row.length < widths) row.push(''); });
-    const header = rows[0];
-    const body = rows.slice(1);
-    const separator = Array.from({ length:widths }, () => '---');
+    const width = rows.reduce((max, row) => Math.max(max, row.cells.length), 0);
+    const cells = rows.map(row => Array.from({ length:width }, (_, index) => {
+        const cell = row.cells[index];
+        return cell ? escapeMarkdownCell(inlineMarkdown(cell).replace(/\n+/g, ' ').trim()) : '';
+    }));
+    const markers = { left:':---', center:':---:', right:'---:' };
+    const separator = cells[0].map((_, index) => markers[rows[0].cells[index]?.style.textAlign] || '---');
+    return formatMarkdownTable(cells, separator);
+}
+
+function formatMarkdownTable([header, ...body], separator) {
     return [header, separator, ...body]
         .map(row => '| ' + row.join(' | ') + ' |')
         .join('\n');
 }
 
 function escapeMarkdownCell(text) {
-    return String(text || '').replace(/\|/g, '\\|');
+    return text.replace(/[\\|]/g, '\\$&');
 }
 
 function markdownToHtml(markdown) {
@@ -5041,11 +5074,11 @@ function markdownToHtml(markdown) {
         }
         if (inCode) { code.push(line); continue; }
         if (!line.trim()) { closeList(); continue; }
-        if (isMarkdownTableHeader(line, lines[i + 1])) {
+        const table = collectMarkdownTable(lines, i);
+        if (table) {
             closeList();
-            const parsed = collectMarkdownTable(lines, i);
-            html.push(parsed.html);
-            i = parsed.nextIndex - 1;
+            html.push(table.html);
+            i = table.nextIndex - 1;
             continue;
         }
         const h = line.match(/^(#{1,6})\s+(.+)$/);
@@ -5065,30 +5098,29 @@ function markdownToHtml(markdown) {
     return html.join('');
 }
 
-function isMarkdownTableHeader(line, separator) {
-    return splitMarkdownTableRow(line).length > 1
-        && splitMarkdownTableRow(separator).length > 1
-        && splitMarkdownTableRow(separator).every(cell => /^:?-{3,}:?$/.test(cell.trim()));
-}
-
 function collectMarkdownTable(lines, start) {
     const header = splitMarkdownTableRow(lines[start]);
+    if (!header.length) return null;
+    const separator = splitMarkdownTableRow(lines[start + 1]);
+    if (separator.length !== header.length || !separator.every(cell => /^:?-{3,}:?$/.test(cell))) return null;
+    const alignment = separator.map(cell => cell.endsWith(':') ? (cell.startsWith(':') ? 'center' : 'right') : cell.startsWith(':') ? 'left' : '');
     const rows = [];
+    let width = header.length;
     let index = start + 2;
-    while (index < lines.length && splitMarkdownTableRow(lines[index]).length > 1) {
-        rows.push(splitMarkdownTableRow(lines[index]));
+    while (index < lines.length) {
+        const row = splitMarkdownTableRow(lines[index]);
+        if (!row.length) break;
+        width = Math.max(width, row.length);
+        rows.push(row);
         index++;
     }
-    const columnCount = Math.max(header.length, ...rows.map(row => row.length), 0);
-    const normalize = row => {
-        const next = row.slice(0, columnCount);
-        while (next.length < columnCount) next.push('');
-        return next;
-    };
-    const headHtml = normalize(header).map(cell => '<th>' + markdownInline(cell.trim()) + '</th>').join('');
-    const bodyHtml = rows.map(row => '<tr>' + normalize(row).map(cell => '<td>' + markdownInline(cell.trim()) + '</td>').join('') + '</tr>').join('');
+    const renderRow = (row, tag) => '<tr>' + Array.from({ length:width }, (_, column) => {
+        const style = alignment[column] ? ' style="text-align:' + alignment[column] + '"' : '';
+        const scope = tag === 'th' ? ' scope="col"' : '';
+        return '<' + tag + scope + style + '>' + (markdownInline(row[column] || '') || '<br>') + '</' + tag + '>';
+    }).join('') + '</tr>';
     return {
-        html:'<table><thead><tr>' + headHtml + '</tr></thead><tbody>' + bodyHtml + '</tbody></table>',
+        html:'<table><thead>' + renderRow(header, 'th') + '</thead><tbody>' + rows.map(row => renderRow(row, 'td')).join('') + '</tbody></table>',
         nextIndex:index
     };
 }
@@ -5097,32 +5129,48 @@ function splitMarkdownTableRow(line) {
     const text = String(line || '').trim();
     if (!text.includes('|')) return [];
     const cells = [];
-    let cell = '', escaped = false;
-    for (const ch of text.replace(/^\|/, '').replace(/\|$/, '')) {
-        if (escaped) {
-            cell += ch;
-            escaped = false;
-        } else if (ch === '\\') {
-            escaped = true;
+    let hasSeparator = text.startsWith('|'), cell = '', endedAtSeparator = false;
+    for (let index = hasSeparator ? 1 : 0; index < text.length; index++) {
+        const ch = text[index];
+        endedAtSeparator = false;
+        if (ch === '\\' && (text[index + 1] === '|' || text[index + 1] === '\\')) {
+            cell += text[++index];
         } else if (ch === '|') {
-            cells.push(cell);
+            cells.push(cell.trim());
             cell = '';
+            hasSeparator = endedAtSeparator = true;
         } else {
             cell += ch;
         }
     }
-    cells.push(cell);
-    return cells;
+    if (!endedAtSeparator) cells.push(cell.trim());
+    return hasSeparator ? cells : [];
 }
 
 function markdownInline(text) {
-    let s = esc(text);
-    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_, alt, src) => '<img src="' + esc(src) + '" alt="' + esc(alt) + '">');
-    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => '<a href="' + esc(href) + '">' + label + '</a>');
-    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
-    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/_([^_]+)_/g, '<em>$1</em>');
-    return s;
+    // Keep inline markup from interpreting punctuation inside URLs and attributes.
+    const fragments = [];
+    const protect = html => {
+        fragments.push(html);
+        return '\0' + (fragments.length - 1) + '\0';
+    };
+    const renderText = value => markdownEmphasis(esc(value)).replace(/\0(\d+)\0/g, (_, index) => fragments[index]);
+    const unescapeLabel = value => value.replace(/\\([\\\]])/g, '$1');
+    const plain = text.replace(/\0/g, '\uFFFD').replace(/`([^`]+)`|!\[((?:\\.|[^\\\]])*)\]\(([^)\s]+)\)/g,
+        (_, code, alt, url) => protect(code !== undefined ? '<code>' + esc(code) + '</code>' : markdownImageHtml(url, unescapeLabel(alt))));
+    return renderText(plain.replace(/\[((?:\\.|[^\\\]])+)\]\(([^)\s]+)\)/g, (_, label, url) =>
+        protect('<a href="' + esc(url) + '">' + renderText(unescapeLabel(label)) + '</a>')));
+}
+
+function markdownEmphasis(text) {
+    return text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>').replace(/_([^_]+)_/g, '<em>$1</em>');
+}
+
+function markdownImageHtml(url, alt) {
+    const internal = url.startsWith('organessonium-image://v1/') || url.startsWith('organessonium-drive-image://');
+    const source = internal ? 'data-organessonium-image' : 'src';
+    return '<img ' + source + '="' + esc(url) + '" alt="' + esc(alt) + '">';
 }
 
 function setupMomentumScroll(el, options = {}) {
@@ -5701,7 +5749,7 @@ function createMarkdownDocument() {
     const tab = document.createElement('button');
     tab.className = 'workspace-tab';
     tab.dataset.tabId = id;
-    tab.innerHTML = `${icon('edit_note',16)}<span>${esc(truncate(name, 24))}</span>
+    tab.innerHTML = `${icon('description',16)}<span data-tab-label>${esc(truncate(name, 24))}</span>
         <span class="tab-close" data-close-tab="${esc(id)}">${icon('close',14)}</span>`;
     workspaceTabs.appendChild(tab);
 
@@ -5714,7 +5762,7 @@ function createMarkdownDocument() {
         editor:null, rawEditor:null, saveState:null, rawToggle:null, zoomLabel:null,
         toolbarWrapCleanup:null,
         rawMode:false, zoom:1,
-        lastSavedMarkdown:null, pendingMarkdown:'', saveTimer:0, saving:false, queued:false
+        lastSavedMarkdown:null, savingMarkdown:null, saveTimer:0
     };
     markdownTabs.set(id, entry);
     panel.appendChild(createMarkdownEditor('', entry, name));
@@ -6050,33 +6098,58 @@ function insertEditorImage(entry, state, url, alt) {
         return;
     }
     restoreEditorInsertionState(entry, state);
-    document.execCommand('insertHTML', false, '<img src="' + esc(url) + '" alt="' + esc(safeAlt) + '">');
+    document.execCommand('insertHTML', false, markdownImageHtml(url, safeAlt));
     normalizeEditorDom(entry.editor);
     prepareEditorMedia(entry);
     refreshEditorToolbarState(entry);
     entry.editor.dispatchEvent(new Event('input', { bubbles:true }));
 }
 
-function insertMarkdownTable(entry, state) {
-    if (!entry) return;
-    if (state && state.raw && entry.rawEditor) {
-        replaceTextareaRange(entry.rawEditor, state.start, state.end, defaultMarkdownTable());
+function openEditorTableDialog(entry) {
+    editorTableState = { entry, selection:captureEditorInsertionState(entry, false) };
+    $('editor-table-rows').value = '3';
+    $('editor-table-columns').value = '3';
+    $('editor-table-overlay').classList.remove('hidden');
+    $('editor-table-rows').select();
+}
+
+function closeEditorTableDialog() {
+    $('editor-table-overlay').classList.add('hidden');
+    if (editorTableState) restoreEditorInsertionState(editorTableState.entry, editorTableState.selection);
+    editorTableState = null;
+}
+
+function insertMarkdownTable(entry, state, rowCount, columnCount) {
+    const label = resolveLanguage() === 'en' ? 'Column' : 'Coluna';
+    const header = Array.from({ length:columnCount }, (_, index) => label + ' ' + (index + 1));
+    const rows = [header, ...Array.from({ length:rowCount - 1 }, () => header.map(() => ''))];
+    const markdown = formatMarkdownTable(rows, header.map(() => '---'));
+    if (state.raw) {
+        const prefix = state.start ? '\n\n' : '';
+        insertTextareaText(entry.rawEditor, prefix + markdown + '\n\n');
         entry.rawEditor.dispatchEvent(new Event('input', { bubbles:true }));
         return;
     }
-    const label = resolveLanguage() === 'en' ? 'Column' : 'Coluna';
-    const html = '<table><thead><tr><th>' + label + ' 1</th><th>' + label + ' 2</th><th>' + label + ' 3</th></tr></thead><tbody><tr><td><br></td><td><br></td><td><br></td></tr><tr><td><br></td><td><br></td><td><br></td></tr></tbody></table><p><br></p>';
-    restoreEditorInsertionState(entry, state);
-    document.execCommand('insertHTML', false, html);
+    const editor = entry.editor;
+    let range = state.range;
+    let block = range?.endContainer;
+    while (block && block !== editor && block.parentNode !== editor) block = block.parentNode;
+    const isTextBlock = (block?.nodeName === 'P' || block?.nodeName === 'DIV') && block.contains(range.startContainer) && !block.querySelector('table');
+    if (!isTextBlock) {
+        // Give Chromium a caret outside cells and lists before inserting a block.
+        const anchor = document.createElement('p');
+        anchor.appendChild(document.createElement('br'));
+        if (block === editor) editor.insertBefore(anchor, editor.childNodes[range.endOffset] || null);
+        else if (block) block.after(anchor);
+        else editor.appendChild(anchor);
+        range = document.createRange();
+        range.setStart(anchor, 0);
+    }
+    restoreEditorInsertionState(entry, { raw:false, range });
+    document.execCommand('insertHTML', false, markdownToHtml(markdown) + '<p><br></p>');
     normalizeEditorDom(entry.editor);
-    prepareEditorMedia(entry);
     refreshEditorToolbarState(entry);
     entry.editor.dispatchEvent(new Event('input', { bubbles:true }));
-}
-
-function defaultMarkdownTable() {
-    const label = resolveLanguage() === 'en' ? 'Column' : 'Coluna';
-    return '| ' + label + ' 1 | ' + label + ' 2 | ' + label + ' 3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n';
 }
 
 function replaceTextareaRange(textarea, start, end, text) {
@@ -6085,7 +6158,7 @@ function replaceTextareaRange(textarea, start, end, text) {
 }
 
 function escapeMarkdownLabel(text) {
-    return String(text || '').replace(/]/g, '\\]');
+    return String(text || '').replace(/[\\\]]/g, '\\$&');
 }
 
 function escapeMarkdownUrl(url) {

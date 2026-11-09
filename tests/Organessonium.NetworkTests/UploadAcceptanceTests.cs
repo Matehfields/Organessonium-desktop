@@ -39,7 +39,8 @@ internal static partial class Program
     private static Task<TestOutcome> UploadAcceptanceSecondaryAsync() => UploadAcceptanceSecondaryAsync(false);
     private static Task<TestOutcome> VideoUploadIsolationSecondaryAsync() => UploadAcceptanceSecondaryAsync(true);
     private static Task<TestOutcome> TransferCloseConfirmationSecondaryAsync() => UploadAcceptanceSecondaryAsync(false, true);
-    private static Task<TestOutcome> UploadAcceptanceSecondaryAsync(bool videoIsolation, bool closeOnly = false) => OnHiddenDispatcherAsync(async () =>
+    private static Task<TestOutcome> MarkdownEditorSecondaryAsync() => UploadAcceptanceSecondaryAsync(false, markdownEditor: true);
+    private static Task<TestOutcome> UploadAcceptanceSecondaryAsync(bool videoIsolation, bool closeOnly = false, bool markdownEditor = false) => OnHiddenDispatcherAsync(async () =>
     {
         AcceptanceRect secondary = default;
         EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (monitor, _, _, _) =>
@@ -52,12 +53,12 @@ internal static partial class Program
         using var h = new SharedHarness();
         h.Settings.PreviewEnabled = true; h.Settings.MaxParallelUploads = 16; h.Settings.UploadThreads = 16;
         h.Settings.GenerateVideoPreviews = videoIsolation;
-        if (videoIsolation || closeOnly) h.Settings.Language = "pt-BR";
+        if (videoIsolation || closeOnly || markdownEditor) h.Settings.Language = "pt-BR";
         h.Store.SaveLibraryStatistics(new LibraryStatistics(0, 0, 0));
         var unconfigured = h.Settings.Clone(); unconfigured.BotToken = ""; h.Store.Save(unconfigured);
         var window = new Organessonium.MainWindow(h.Store)
         {
-            Title = "Organessônium - Teste isolado de upload", ShowActivated = false,
+            Title = markdownEditor ? "Organessônium - Teste isolado do editor" : "Organessônium - Teste isolado de upload", ShowActivated = false,
             WindowState = WindowState.Normal,
             WindowStartupLocation = WindowStartupLocation.Manual, Left = secondary.Left + 20, Top = secondary.Top + 20,
             Width = Math.Min(1280, secondary.Right - secondary.Left - 40), Height = Math.Min(850, secondary.Bottom - secondary.Top - 60)
@@ -81,8 +82,10 @@ internal static partial class Program
             typeof(DiscordSession).GetProperty("Settings")!.SetValue(session, h.Settings);
             controller.SetSession(session);
             typeof(AppController).GetField("_registry", flags)!.SetValue(controller, h.Registry);
+            if (markdownEditor) ConfigureMarkdownFixtureImages(h, view.CoreWebView2);
             typeof(Organessonium.MainWindow).GetMethod("LoadLocalPage", flags)!.Invoke(window, ["index.html"]);
             while (await view.ExecuteScriptAsync("location.pathname==='/index.html'&&typeof allApps!=='undefined'") != "true") await Task.Delay(50, timeout.Token);
+            if (markdownEditor) return await CheckMarkdownEditorAsync(h, controller, view.CoreWebView2, capture: true);
             if (videoIsolation) return await CheckVideoUploadIsolationAsync(h, controller, view, window);
             if (closeOnly) return await CheckTransferCloseConfirmationAsync(h, controller, view, window, closed.Task);
             var targets = (System.Collections.IDictionary)typeof(Organessonium.MainWindow).GetField("_oleDropTargets", flags)!.GetValue(window)!;

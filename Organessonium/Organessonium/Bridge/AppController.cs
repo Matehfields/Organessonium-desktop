@@ -2645,7 +2645,7 @@ public sealed partial class AppController : IAsyncDisposable
         ForumUploader uploader,
         AppRegistry registry,
         AppSettings settings,
-        UiThrottle throttle,
+        UiThrottle? throttle,
         CancellationToken cancellationToken,
         TransferState? existingTransferState = null,
         AdaptiveUploadGate? adaptiveUploadGate = null,
@@ -3144,7 +3144,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task<PreviewUploadIds> TryUploadGeneratedPreviewAsync(
         string opId, int fileIndex, int fileTotal, FileInfo file, string name, string threadId,
-        ForumUploader uploader, AppSettings settings, UiThrottle throttle,
+        ForumUploader uploader, AppSettings settings, UiThrottle? throttle,
         Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken,
         TransferState? transferState = null, bool useBatchUi = false,
         UploadProgressTracker? progressTracker = null, EncryptedPayloadContext? previewEncryption = null,
@@ -3304,7 +3304,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task<VideoPreviewUploadResult> UploadVideoPreview480Async(
         string opId, int fileIndex, int fileTotal, string threadId, string originalName,
-        RamMediaPreview generated, ForumUploader uploader, UiThrottle throttle,
+        RamMediaPreview generated, ForumUploader uploader, UiThrottle? throttle,
         Func<TimeSpan, Task> onRateLimitWait, CancellationToken cancellationToken, bool useBatchUi,
         int maxParallelParts, UploadProgressTracker? progressTracker, EncryptedPayloadContext? videoEncryption,
         bool useAttachmentReferences = false, SharedUploadContext? sharedUpload = null)
@@ -3860,11 +3860,11 @@ public sealed partial class AppController : IAsyncDisposable
     private async Task SaveMarkdownAsync(JsonElement[] args)
     {
         var tabId = ArgString(args, 0);
-        var threadId = ArgString(args, 1);
         var metadataMessageId = ArgString(args, 2);
         var name = ArgString(args, 3);
         var path = ArgString(args, 4);
         var markdown = ArgString(args, 5);
+        var operation = NewId();
         DirectoryInfo? tempDir = null;
         FileInfo? file = null;
 
@@ -3889,13 +3889,10 @@ public sealed partial class AppController : IAsyncDisposable
             var replacement = existing == null ? null : FileVersioning.PrepareReplacement(existing);
             var uploader = new ForumUploader(RequireApi(), settings.AppsForumId,
                 Organessonium.Services.MetadataEncryption.MetadataCodec.ForEncryption(_encryption, () => _store.Load().EncryptionMode));
-            var operation = NewId();
-            await OpsAddAsync(operation, "upload", safeName);
             var updated = await UploadSingleAsync(operation, 0, 1, file, path, all, uploader, registry,
-                settings, new UiThrottle(), CancellationToken.None, replacement: replacement);
+                settings, null, CancellationToken.None, replacement: replacement);
             ReplaceLocalEntry(all, updated);
             await PublishLocalRegistryAsync(registry, all);
-            await OpsUpdateAsync(operation, "done", "Concluído");
             await _bridge.CallAsync("_onMarkdownSaved", tabId, updated);
         }
         catch (Exception ex)
@@ -3904,6 +3901,7 @@ public sealed partial class AppController : IAsyncDisposable
         }
         finally
         {
+            _operationTransferStates.TryRemove(TransferKey(operation, 0), out _);
             try { file?.Delete(); } catch { }
             if (tempDir != null)
             {
@@ -4028,8 +4026,10 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private async Task SendMarkdownImageFileAsync(string tabId, string threadId, FileInfo file)
+    private async Task SendMarkdownImageFileAsync(string tabId, string documentId, FileInfo file)
     {
+        var document = FindLoadedEntry(documentId) ?? throw new InvalidOperationException("Documento Markdown não encontrado.");
+        var threadId = document.ThreadId;
         await _bridge.CallAsync("_onStatus", "Enviando imagem do Markdown...", true);
         var api = RequireApi();
         var settings = _store.Load();
@@ -4037,9 +4037,8 @@ public sealed partial class AppController : IAsyncDisposable
         var fileId = Guid.NewGuid().ToString("N");
         var context = new EncryptedPayloadContext(fileId, encryption, EncryptedPayloadRoles.MarkdownImage, 0);
         DiscordMessageDto message;
-        try
+        await using (await api.AcquireThreadWriteAsync(threadId, CancellationToken.None))
         {
-            await api.UnarchiveThreadAsync(threadId);
             using var memory = new UploadMemoryCoordinator(1);
             using var budget = await RamUploadBudget.ReserveAsync(1, default);
             using var staged = await memory.PreparePartAsync(_encryption, file, file.Length,
@@ -4048,17 +4047,6 @@ public sealed partial class AppController : IAsyncDisposable
                 threadId,
                 PayloadMessage(context, 1),
                 staged);
-        }
-        finally
-        {
-            try
-            {
-                await api.ArchiveThreadAsync(threadId);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("MarkdownImageArchiveThread", ex, threadId);
-            }
         }
 
         var attachment = message.Attachments.FirstOrDefault();
@@ -4086,21 +4074,9 @@ public sealed partial class AppController : IAsyncDisposable
 
         try
         {
-            var all = CurrentLocalEntries();
-            var image = FindLoadedEntry(threadId);
-            if (image?.Encryption != null)
-            {
-                await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = "organessonium-drive-image://" + threadId, name = image.Name });
-                return;
-            }
-
-            var url = await Downloader().GetFirstAttachmentUrlAsync(threadId);
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                throw new InvalidOperationException("Nenhum anexo encontrado para esta imagem.");
-            }
-
-            await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url, name = image?.Name ?? "imagem" });
+            var image = FindLoadedEntry(threadId) ?? throw new InvalidOperationException("Imagem não encontrada.");
+            var imageId = string.IsNullOrEmpty(image.FileId) ? image.RequestId : image.FileId;
+            await _bridge.CallAsync("_onMarkdownImageReady", tabId, new { url = "organessonium-drive-image://" + imageId, name = image.Name });
         }
         catch (Exception ex)
         {
@@ -4117,44 +4093,64 @@ public sealed partial class AppController : IAsyncDisposable
         }
     }
 
-    private async Task ResolveEncryptedMarkdownImageAsync(string tabId, string threadId, string value)
+    private Task ResolveEncryptedMarkdownImageAsync(string tabId, string documentId, string value) =>
+        ResolveMarkdownImagePreviewAsync(tabId, value, async () =>
+        {
+            if (!MarkdownEncryptedImageReference.TryParse(value, out var reference))
+                throw new InvalidDataException("A referência da imagem criptografada é inválida.");
+            var document = await FindLoadedFileDetailsAsync(documentId)
+                ?? throw new InvalidOperationException("Documento Markdown não encontrado.");
+            var threads = document.Versions.Select(version => version.Payload.ThreadId)
+                .Prepend(document.ThreadId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal);
+            var encryption = new EncryptedPayloadContext(reference.FileId, reference.Encryption, EncryptedPayloadRoles.MarkdownImage, 0);
+            var downloader = Downloader();
+            foreach (var thread in threads)
+            {
+                try
+                {
+                    var bytes = await downloader.DownloadMessageAttachmentBytesAsync(thread, reference.MessageId, encryption: encryption);
+                    if (bytes is { Length: > 0 }) return _previewResources.RegisterBytes(bytes, reference.MimeType);
+                }
+                catch (DiscordApiException error) when ((int)error.StatusCode == 404) { }
+            }
+            throw new InvalidDataException("Não foi possível abrir a imagem criptografada.");
+        });
+
+    private Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageId) =>
+        ResolveMarkdownImagePreviewAsync(tabId, "organessonium-drive-image://" + imageId, async () =>
+        {
+            var entry = FindLoadedEntry(imageId) ?? _store.LoadCachedFileByRequestId(imageId)
+                ?? throw new InvalidOperationException("Imagem não encontrada.");
+            var image = await Registry().LoadFileDetailsAsync(entry);
+            var directory = _previewDirs.GetOrAdd(tabId, CreatePreviewTempDir).CreateSubdirectory(NewId());
+            try
+            {
+                var file = await Downloader().DownloadAndAssembleAsync(image, directory, _ => { });
+                return _previewResources.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
+            }
+            catch
+            {
+                CleanDir(directory);
+                throw;
+            }
+        });
+
+    private async Task ResolveMarkdownImagePreviewAsync(string tabId, string reference, Func<Task<string>> createUrl)
     {
-        if (!MarkdownEncryptedImageReference.TryParse(value, out var reference))
+        var url = GetPreviewUrl(tabId, reference);
+        if (url == null)
         {
-            throw new InvalidOperationException("A referência da imagem criptografada é inválida.");
+            try
+            {
+                url = await createUrl();
+                TrackPreviewUrl(tabId, reference, url);
+            }
+            catch (Exception error)
+            {
+                AppLogger.Error("MarkdownImagePreview", error);
+            }
         }
-
-        var bytes = await Downloader().DownloadMessageAttachmentBytesAsync(
-            threadId,
-            reference.MessageId,
-            encryption: new EncryptedPayloadContext(
-                reference.FileId,
-                reference.Encryption,
-                EncryptedPayloadRoles.MarkdownImage,
-                0));
-        if (bytes is not { Length: > 0 })
-        {
-            throw new InvalidOperationException("Não foi possível abrir a imagem criptografada.");
-        }
-
-        var url = _previewResources.RegisterBytes(bytes, reference.MimeType);
-        await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, value, url);
-    }
-
-    private async Task ResolveEncryptedDriveMarkdownImageAsync(string tabId, string imageThreadId)
-    {
-        var image = FindLoadedEntry(imageThreadId);
-        if (image?.Encryption == null) throw new InvalidDataException("Imagem criptografada não encontrada.");
-        if (image == null)
-        {
-            throw new InvalidOperationException("Não foi possível localizar a imagem criptografada.");
-        }
-
-        var tempDir = Directory.CreateTempSubdirectory("organessonium_markdown_image_");
-        _previewDirs["markdown-image-" + NewId()] = tempDir;
-        var file = await Downloader().DownloadAndAssembleAsync(image, tempDir, _ => { });
-        var url = _previewResources.Register(file, string.IsNullOrWhiteSpace(image.MimeType) ? GuessFileMime(image.Name) : image.MimeType);
-        await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, "organessonium-drive-image://" + imageThreadId, url);
+        await _bridge.CallAsync("_onEncryptedMarkdownImageReady", tabId, reference, url);
     }
 
     private async Task SetupEncryptionAsync(string action, string passphrase, bool acknowledged)
@@ -4997,12 +4993,13 @@ public sealed partial class AppController : IAsyncDisposable
         int fileTotal,
         int itemPercent,
         string message,
-        UiThrottle throttle,
+        UiThrottle? throttle,
         bool force,
         bool useBatchUi,
         string batchStatus = "active",
         UploadProgressTracker? progressTracker = null)
     {
+        if (throttle == null) return;
         if (useBatchUi)
         {
             var now = Environment.TickCount64;

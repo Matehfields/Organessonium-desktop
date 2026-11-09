@@ -39,9 +39,9 @@ public sealed record MarkdownEncryptedImageReference(
 
         try
         {
-            var salt = Encoding.UTF8.GetString(FromBase64Url(parts[2]));
+            var salt = Encoding.UTF8.GetString(FromBase64Url(parts[2])).TrimEnd('=').Replace('+', '-').Replace('/', '_');
             var mime = Encoding.UTF8.GetString(FromBase64Url(parts[4]));
-            if (Convert.FromBase64String(salt).Length < 16 || string.IsNullOrWhiteSpace(mime))
+            if (EncryptionMetadataCodec.DecodeSalt(salt).Length != 16 || string.IsNullOrWhiteSpace(mime))
             {
                 return false;
             }
