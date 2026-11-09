@@ -64,7 +64,8 @@ public sealed class MetadataService
         string channelId,
         AppEntry entry,
         CancellationToken cancellationToken = default,
-        Func<TimeSpan, Task>? onRateLimitWait = null)
+        Func<TimeSpan, Task>? onRateLimitWait = null,
+        bool replayUnknownResult = true)
     {
         entry.Normalize();
         var payload = await CreateWritePayloadAsync(entry, cancellationToken);
@@ -75,7 +76,8 @@ public sealed class MetadataService
                     channelId,
                     payload.Content,
                     cancellationToken,
-                    onRateLimitWait)
+                    onRateLimitWait,
+                    replayUnknownResult: replayUnknownResult)
                 : await SendMetadataFileAsync(
                     discord,
                     channelId,

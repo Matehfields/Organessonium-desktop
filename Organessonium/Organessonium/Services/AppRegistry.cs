@@ -955,7 +955,10 @@ public sealed partial class AppRegistry
         AppEntry entry,
         CancellationToken cancellationToken,
         Func<TimeSpan, Task>? onRateLimitWait,
-        bool synchronizeSerials)
+        bool synchronizeSerials,
+        FolderCreationCheckpoint? creation = null,
+        bool recoveringCreation = false,
+        Action? checkpoint = null)
     {
         entry.Normalize();
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
@@ -966,7 +969,9 @@ public sealed partial class AppRegistry
         await OpenEntryIndexAsync(parent.ThreadId, synchronizeSerials, cancellationToken, onRateLimitWait);
         if (entry.Type == "folder")
         {
-            var existing = await FindExistingFolderAsync(entry, parentFolderId, cancellationToken);
+            var existing = creation == null
+                ? await FindExistingFolderAsync(entry, parentFolderId, cancellationToken)
+                : await FindQueuedFolderAsync(entry, parent, cancellationToken);
             if (existing != null)
             {
                 var existingMapping = await GetMappingAsync(existing.FolderId, cancellationToken);
@@ -980,13 +985,16 @@ public sealed partial class AppRegistry
                 return entry.MetadataMessageId;
             }
 
-            var created = await EnsureFolderIndexAsync(entry, cancellationToken, synchronizeSerials);
+            if (recoveringCreation && !_mappings.ContainsKey(entry.FolderId))
+                creation!.ThreadId = await RecoverFolderIndexThreadAsync(entry, creation, cancellationToken);
+            var created = await EnsureFolderIndexAsync(entry, cancellationToken, synchronizeSerials, creation, checkpoint);
             entry.ThreadId = created.ThreadId;
         }
 
         try
         {
-            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait,
+                replayUnknownResult: creation == null);
             var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
             ReplaceEntry(siblings, entry);
             _store.CacheFolderEntries(parentFolderId, siblings);
@@ -1625,7 +1633,9 @@ public sealed partial class AppRegistry
     private async Task<FolderIndexMapping> EnsureFolderIndexAsync(
         AppEntry folder,
         CancellationToken cancellationToken,
-        bool synchronizeSerials = true)
+        bool synchronizeSerials = true,
+        FolderCreationCheckpoint? creation = null,
+        Action? checkpoint = null)
     {
         if (_mappings.TryGetValue(folder.FolderId, out var existing))
         {
@@ -1638,7 +1648,9 @@ public sealed partial class AppRegistry
             folder.Name,
             PathRules.ChildPath(folder),
             cancellationToken,
-            synchronizeSerials);
+            synchronizeSerials,
+            creation,
+            checkpoint);
     }
 
     private async Task<FolderIndexMapping> CreateFolderIndexAsync(
@@ -1647,19 +1659,30 @@ public sealed partial class AppRegistry
         string name,
         string folderPath,
         CancellationToken cancellationToken,
-        bool synchronizeSerials = true)
+        bool synchronizeSerials = true,
+        FolderCreationCheckpoint? creation = null,
+        Action? checkpoint = null)
     {
-        var header = _metadata.SerializeFolderIndexHeader(folderId, parentFolderId, name);
-        var post = await _discord.CreateForumPostAsync(
-            _settings.FoldersForumId,
-            FolderThreadTitle(name, folderId),
-            header,
-            cancellationToken);
-        var draft = new FolderIndexMapping(folderId, post.ThreadId, "");
+        var threadId = creation?.ThreadId;
+        if (string.IsNullOrWhiteSpace(threadId))
+        {
+            var header = _metadata.SerializeFolderIndexHeader(folderId, parentFolderId, name);
+            var post = await _discord.CreateForumPostAsync(_settings.FoldersForumId,
+                creation?.PostTitle ?? FolderThreadTitle(name, folderId), header, cancellationToken,
+                replayUnknownResult: creation == null);
+            threadId = post.ThreadId;
+            if (creation != null)
+            {
+                creation.ThreadId = threadId;
+                checkpoint!();
+            }
+        }
+        var draft = new FolderIndexMapping(folderId, threadId, "");
         var message = await _discord.CreateMessageAsync(
             _settings.NamesChannelId,
             _metadata.SerializeFolderIndex(draft),
-            cancellationToken);
+            cancellationToken,
+            replayUnknownResult: creation == null);
         var mapping = draft with { NamesMessageId = message.Id };
         lock (_mappingPublicationSync)
         {
@@ -1675,7 +1698,7 @@ public sealed partial class AppRegistry
         {
             _deferredFolderSerials[folderId] = 0;
         }
-        await ArchiveFolderThreadAsync(post.ThreadId, cancellationToken);
+        await ArchiveFolderThreadAsync(threadId, cancellationToken);
         return _mappings[folderId];
     }
 

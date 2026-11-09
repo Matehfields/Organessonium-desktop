@@ -43,6 +43,41 @@ public sealed partial class AppController
     private Task DeleteItemsAsync(string idsJson, bool permanently) =>
         QueueLibraryMutationAsync(permanently ? LibraryMutationKind.Delete : LibraryMutationKind.Trash, idsJson);
 
+    private LibraryMutation? PendingFolderCreation(string path) =>
+        _libraryMutations?.Pending.FirstOrDefault(job => job.Kind == LibraryMutationKind.CreateFolder &&
+            PathRules.ChildPath(job.Changes[0].Source).Equals(path, StringComparison.OrdinalIgnoreCase));
+
+    private async Task AwaitFolderCreationAsync(string path)
+    {
+        if (PendingFolderCreation(PathRules.Normalize(path)) is not { } pending) return;
+        await pending.Completion.Task.WaitAsync(_libraryMutations!.Token);
+        if (FolderIdForPath(CurrentLocalEntries(), path) == null)
+            throw new InvalidOperationException("A pasta de destino não está disponível.");
+    }
+
+    private async Task CreateFolderAsync(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        var path = _currentPath;
+        var folder = AppEntry.Folder(PathRules.CleanFileName(name.Trim()), path);
+        var session = LibraryMutations();
+        if (PendingFolderCreation(PathRules.ChildPath(folder)) != null)
+        {
+            await _bridge.CallAsync("_onStatus", "Pasta aguardando sincronização.", false);
+            return;
+        }
+        folder.ParentFolderId = path == "/" ? AppRegistry.RootFolderId :
+            PendingFolderCreation(path)?.Changes[0].Source.FolderId ?? FolderIdForPath(CurrentLocalEntries(), path) ??
+            await session.Registry.ResolveFolderIdByPathAsync(path, session.Token);
+        if (string.IsNullOrWhiteSpace(folder.ParentFolderId))
+            throw new InvalidOperationException("A pasta de destino não está disponível.");
+        var job = new LibraryMutation(LibraryMutationKind.CreateFolder, [new(folder, folder, CreatingFolder: true)], TransferState.Now())
+        {
+            FolderCreation = new FolderCreationCheckpoint("index-" + NewId())
+        };
+        await EnqueueLibraryMutationAsync(session, job);
+    }
+
     private async Task QueueLibraryMutationAsync(LibraryMutationKind kind, string? idsJson = null, string? path = null)
     {
         var session = LibraryMutations();
@@ -120,10 +155,17 @@ public sealed partial class AppController
         if (changes.Count == 0) return;
 
         var job = new LibraryMutation(kind, changes, timestamp) { ReadWholeTrash = ids == null };
+        await EnqueueLibraryMutationAsync(session, job);
+    }
+
+    private async Task EnqueueLibraryMutationAsync(LibraryMutationSession session, LibraryMutation job)
+    {
         session.Pending.Add(job);
         try { SaveLibraryMutations(session); }
         catch { session.Pending.Remove(job); throw; }
         await PublishPendingLibraryChangesAsync(session);
+        if (job.Kind == LibraryMutationKind.CreateFolder)
+            await _bridge.CallAsync("_onStatus", "Pasta disponível localmente.", false);
         StartLibraryMutationWorker(session);
         await job.Completion.Task.WaitAsync(session.Token);
     }
@@ -160,7 +202,15 @@ public sealed partial class AppController
                         SaveLibraryMutations(session);
                         await PublishPendingLibraryChangesAsync(session);
                     }
-                    if (job.Kind == LibraryMutationKind.Delete)
+                    if (job.Kind == LibraryMutationKind.CreateFolder)
+                    {
+                        var folder = await registry.CreateQueuedFolderAsync(job, () => SaveLibraryMutations(session), token);
+                        completed.Add(folder);
+                        var latest = CurrentLocalEntries();
+                        ReplaceLocalEntry(latest, folder);
+                        await PublishLocalRegistryAsync(registry, latest, refreshStatistics: false, incremental: true, changedEntry: folder);
+                    }
+                    else if (job.Kind == LibraryMutationKind.Delete)
                     {
                         await registry.PublishPendingDeletionSerialsAsync(job, () => SaveLibraryMutations(session), token);
                         var failed = await DeleteLibraryEntriesAsync(registry, job.Changes.Select(change => change.Source).ToList(), token);
@@ -187,7 +237,8 @@ public sealed partial class AppController
                 catch (Exception error)
                 {
                     AppLogger.Error("Registry.LibraryMutation", error);
-                    if (job.SerialPublished || job.Relocations?.Any(move => move.Destination.MetadataMessageId.Length > 0) == true ||
+                    if (job.SerialPublished || job.FolderCreation is { ThreadId: not null } or { Published: not null } ||
+                        job.Relocations?.Any(move => move.Destination.MetadataMessageId.Length > 0) == true ||
                         NetworkRetryPolicy.IsTransient(error) || error is DiscordApiException api && NetworkRetryPolicy.IsTransientStatus(api.StatusCode))
                     {
                         await NetworkRetryPolicy.DelayAsync(++retry, token);
@@ -198,6 +249,8 @@ public sealed partial class AppController
 
                 var byId = completed.ToDictionary(EntryCacheKey, StringComparer.OrdinalIgnoreCase);
                 var affected = job.Changes.Select(change => EntryCacheKey(change.Source)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var requestedFolder = job.Kind == LibraryMutationKind.CreateFolder ? job.Changes[0].Source : null;
+                var createdFolder = requestedFolder != null ? completed.SingleOrDefault() : null;
                 foreach (var pending in session.Pending.Skip(1))
                 {
                     for (var i = pending.Changes.Count - 1; i >= 0; i--)
@@ -206,6 +259,23 @@ public sealed partial class AppController
                         var id = EntryCacheKey(change.Source);
                         if (byId.TryGetValue(id, out var current)) pending.Changes[i] = change with { Source = current };
                         else if (affected.Contains(id)) pending.Changes.RemoveAt(i);
+                        else if (requestedFolder != null)
+                        {
+                            var requestedPath = PathRules.ChildPath(requestedFolder);
+                            var sourceDepends = change.Source.ParentFolderId == requestedFolder.FolderId;
+                            var destinationDepends = change.Destination?.ParentFolderId == requestedFolder.FolderId;
+                            if (createdFolder == null && (sourceDepends || destinationDepends ||
+                                IsInsideFolder(change.Source, requestedPath) ||
+                                (change.Destination != null && IsInsideFolder(change.Destination, requestedPath))))
+                                pending.Changes.RemoveAt(i);
+                            else if (createdFolder != null && (sourceDepends || destinationDepends))
+                                pending.Changes[i] = change with
+                                {
+                                    Source = sourceDepends ? change.Source.AtLocation(createdFolder.FolderId, change.Source.Path) : change.Source,
+                                    Destination = destinationDepends
+                                        ? change.Destination!.AtLocation(createdFolder.FolderId, change.Destination.Path) : change.Destination
+                                };
+                        }
                     }
                 }
                 session.Pending.RemoveAt(0);
@@ -219,7 +289,11 @@ public sealed partial class AppController
                 await PublishPendingLibraryChangesAsync(session);
                 if (rejected == null)
                 {
-                    await _bridge.CallAsync("_onStatus", "OK Alteração sincronizada.", false);
+                    var status = requestedFolder == null ? "OK Alteração sincronizada." :
+                        requestedFolder.FolderId == createdFolder?.FolderId ? "OK Pasta criada." : "OK A pasta já existe.";
+                    await _bridge.CallAsync("_onStatus", status, false);
+                    if (createdFolder != null && requestedFolder!.FolderId != createdFolder.FolderId && _currentPath == PathRules.ChildPath(createdFolder))
+                        _ = RunAsync(() => LoadFolderAtPathAsync(_currentPath, createdFolder.FolderId));
                     _ = RunAsync(() => PublishLibraryFileCountAsync(registry));
                 }
                 else if (!_loggingOut) await ErrorAsync(rejected.Message);

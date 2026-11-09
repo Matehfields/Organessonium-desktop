@@ -94,9 +94,28 @@ internal static partial class Program
             await view.ExecuteScriptAsync("window.__pauseCalls=[];window.bridge.toggleTransferPause=(...args)=>window.__pauseCalls.push(args);window._opsUploadBatch('pause-ui',['foto.jpg']);document.querySelector('#op-file-pause-ui-0 .transfer-pause-toggle').click();window._opsUploadFileProgress('pause-ui',0,'paused',55,'Pausado');window._opsAdd('download-ui','download','foto.jpg');window._opsUpdate('download-ui','paused','Pausado');");
             await Check("window.__pauseCalls.length===1&&document.querySelector('#op-file-pause-ui-0 .transfer-pause-toggle').textContent==='play_arrow'&&document.querySelector('#op-download-ui .transfer-pause-toggle').textContent==='play_arrow'&&document.querySelector('#op-file-pause-ui-0 .transfer-pause-toggle').getAttribute('aria-label').includes('Retomar')", "o controle no ícone não pausou ou não exibiu a retomada");
             await view.ExecuteScriptAsync("window._opsTransferResumed('pause-ui',0)");
-            await Check("document.querySelector('#op-file-pause-ui-0').dataset.fileStatus==='waiting'&&!document.querySelector('#op-file-pause-ui-0 .op-file-progress').classList.contains('active')", "a retomada marcou o arquivo como ativo antes de receber uma vaga");
+            await Check("document.querySelector('#op-file-pause-ui-0').dataset.fileStatus==='queued'&&$('op-file-detail-pause-ui-0').textContent==='Aguardando upload'&&!document.querySelector('#op-file-pause-ui-0 .op-file-progress').classList.contains('active')", "a retomada marcou o arquivo como ativo antes de receber uma vaga");
             await view.ExecuteScriptAsync("window._opsUploadFileProgress('pause-ui',0,'active',56,'Retomando');window._opsTransferResumed('download-ui');window._opsUpdate('download-ui','active','Retomando');");
             await Check("document.querySelector('#op-file-pause-ui-0 .transfer-pause-toggle').textContent==='pause'&&document.querySelector('#op-download-ui .transfer-pause-toggle').textContent==='pause'", "o controle não voltou a permitir pausa");
+            await Check("""
+                (() => {
+                    const pause=document.querySelector('#op-file-pause-ui-0 .transfer-pause-toggle').getBoundingClientRect();
+                    const cancel=document.querySelector('#op-file-pause-ui-0 .op-file-cancel').getBoundingClientRect();
+                    return pause.width===pause.height&&pause.width===cancel.width;
+                })()
+                """, "o botão de pausa não é circular como o de cancelar");
+            await view.ExecuteScriptAsync("$('btn-sidebar-new').click()");
+            await Check("['sidebar-new-text','sidebar-new-folder-text','sidebar-new-markdown-text','sidebar-upload-files-text','sidebar-upload-folder-text'].map(id=>$(id).textContent).join('|')==='Novo|Pasta|Arquivo de texto (.md)|Upload de arquivos|Upload de pastas'", "o menu Novo não exibiu os nomes solicitados");
+            await view.ExecuteScriptAsync("closeSidebarNewMenu();$('preview-overlay').classList.remove('hidden')");
+            await Check("""
+                (() => ['btn-back','btn-grid','preview-close','preview-dl','ops-toggle','ops-close'].every(id => {
+                    const button=$(id), icon=button?.querySelector('.svg-icon');
+                    if (!icon) return false;
+                    const b=button.getBoundingClientRect(), i=icon.getBoundingClientRect();
+                    return b.width>0&&i.width>0&&Math.abs(b.x+b.width/2-i.x-i.width/2)<1&&Math.abs(b.y+b.height/2-i.y-i.height/2)<1;
+                }))()
+                """, "os ícones da navegação, da prévia ou das transferências ficaram fora do centro");
+            await view.ExecuteScriptAsync("$('preview-overlay').classList.add('hidden')");
             await view.ExecuteScriptAsync("navigate('/',false,'root');typeFilter='all';dateFilter='all';searchQuery='';sortMode='name-asc';window.__large=Array.from({length:6653},(_,i)=>({type:'file',fileId:'large-'+i,metadataMessageId:'large-meta-'+i,threadId:'large-thread-'+i,name:'Image-'+String(i).padStart(4,'0')+'.jpg',path:'/',parentFolderId:'root',sizeBytes:3000000}));_onAppsLoaded(window.__large);window.__retained=document.querySelector('.cards-grid .file-card');window.__retained.click();window.__burstStart=performance.now();for(let i=0;i<40;i++)_onAppsBatch([{type:'file',fileId:'burst-'+i,metadataMessageId:'burst-meta-'+i,threadId:'burst-thread-'+i,name:'000-new-'+i+'.jpg',path:'/',parentFolderId:'root',sizeBytes:3000000}]);window.__burstMilliseconds=performance.now()-window.__burstStart;");
             await Task.Delay(250);
             await Check("allApps.length===6693&&document.querySelectorAll('.cards-grid .file-card').length===100&&document.querySelectorAll('.cards-grid [data-key^=\"burst-meta-\"]').length===40&&window.__retained.isConnected&&window.__retained.classList.contains('selected')&&window.__burstMilliseconds<1000", "o lote grande bloqueou a interface, não apareceu ou recriou a seleção existente");

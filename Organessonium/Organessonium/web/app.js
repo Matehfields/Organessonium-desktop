@@ -88,6 +88,7 @@ const I18N = {
         back:'Voltar', forward:'Avançar', gridView:'Grade', listView:'Lista', refresh:'Atualizar', newFolder:'Nova pasta', newMarkdown:'Novo arquivo Markdown', newMarkdownDefault:'Novo documento.md',
         uploadFolder:'Enviar pasta', upload:'Enviar', settings:'Configurações',
         sidebarNew:'Novo', sidebarFiles:'Arquivos', sidebarFavorites:'Favoritos', sidebarDevices:'Dispositivos', sidebarTransfers:'Transferências', sidebarStorage:'Armazenamento no servidor',
+        sidebarNewFolder:'Pasta', sidebarNewMarkdown:'Arquivo de texto (.md)', sidebarUploadFiles:'Upload de arquivos', sidebarUploadFolders:'Upload de pastas',
         sidebarItems:'Itens no servidor', sidebarItemSuffix:'itens', sidebarFolders:'Pastas', sidebarCollapse:'Recolher barra lateral', sidebarExpand:'Expandir barra lateral',
         sortName:'Nome', sortSize:'Tamanho', sortDate:'Data',
         filterType:'Tipo', filterModified:'Modificado', filterAll:'Todos', filterFolders:'Pastas', filterImages:'Imagens', filterVideos:'Vídeos', filterAudio:'Áudio', filterDocuments:'Documentos', filterArchives:'Arquivos compactados', filterOther:'Outros',
@@ -163,7 +164,10 @@ const I18N = {
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
         enablePreviews:'Ativar miniaturas', simultaneousPreviews:'Miniaturas simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
         forceUploadParallelism:'Forçar 16 workers (RAM até 1 GB)', forceUploadParallelismHelp:'Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.',
-        uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Na fila', cancelUpload:'Cancelar',
+        uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Aguardando upload', cancelUpload:'Cancelar',
+        uploadsFinalizing:v => 'Finalizando uploads ' + v.done + '/' + v.total,
+        uploadsComplete:v => 'Uploads concluídos ' + v.done + '/' + v.total,
+        uploadCompletedCount:v => v.done + '/' + v.total + ' concluídos',
         sendingProgress:v => 'Enviando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Baixando ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         transferEta:v => 'Tempo restante estimado: ' + v.eta,
@@ -238,6 +242,7 @@ const I18N = {
         back:'Back', forward:'Forward', gridView:'Grid view', listView:'List view', refresh:'Refresh', newFolder:'New folder', newMarkdown:'New Markdown file', newMarkdownDefault:'Untitled document.md',
         uploadFolder:'Upload folder', upload:'Upload', settings:'Settings',
         sidebarNew:'New', sidebarFiles:'Files', sidebarFavorites:'Favorites', sidebarDevices:'Devices', sidebarTransfers:'Transfers', sidebarStorage:'Server storage',
+        sidebarNewFolder:'Folder', sidebarNewMarkdown:'Text file (.md)', sidebarUploadFiles:'Upload files', sidebarUploadFolders:'Upload folders',
         sidebarItems:'Items on server', sidebarItemSuffix:'items', sidebarFolders:'Folders', sidebarCollapse:'Collapse sidebar', sidebarExpand:'Expand sidebar',
         sortName:'Name', sortSize:'Size', sortDate:'Date',
         filterType:'Type', filterModified:'Modified', filterAll:'All', filterFolders:'Folders', filterImages:'Images', filterVideos:'Videos', filterAudio:'Audio', filterDocuments:'Documents', filterArchives:'Archives', filterOther:'Other',
@@ -313,7 +318,10 @@ const I18N = {
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
         enablePreviews:'Enable thumbnails', simultaneousPreviews:'Simultaneous thumbnails', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
         forceUploadParallelism:'Force 16 workers (RAM up to 1 GB)', forceUploadParallelismHelp:'Applies immediately to running uploads. Bypasses only dynamic worker adjustment; keeps the global RAM ceiling and Discord limits. Chunks are encrypted in RAM without ciphertext disk fallback.',
-        uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Queued', cancelUpload:'Cancel',
+        uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Waiting to upload', cancelUpload:'Cancel',
+        uploadsFinalizing:v => 'Finalizing uploads ' + v.done + '/' + v.total,
+        uploadsComplete:v => 'Uploads complete ' + v.done + '/' + v.total,
+        uploadCompletedCount:v => v.done + '/' + v.total + ' complete',
         sendingProgress:v => 'Uploading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         downloadingProgress:v => 'Downloading ' + v.done + '/' + v.total + ' (' + v.speed + ')',
         transferEta:v => 'Estimated time remaining: ' + v.eta,
@@ -597,12 +605,12 @@ function applyI18n() {
     setA11y('btn-refresh', 'refresh');
     setA11y('btn-settings', 'settings');
     setA11y('background-activity-close', 'close');
-    setText('sidebar-new-text', 'upload');
-    setA11y('btn-sidebar-new', 'upload');
-    setText('sidebar-new-folder-text', 'newFolder');
-    setText('sidebar-new-markdown-text', 'newMarkdown');
-    setText('sidebar-upload-files-text', 'uploadFiles');
-    setText('sidebar-upload-folder-text', 'uploadFolder');
+    setText('sidebar-new-text', 'sidebarNew');
+    setA11y('btn-sidebar-new', 'sidebarNew');
+    setText('sidebar-new-folder-text', 'sidebarNewFolder');
+    setText('sidebar-new-markdown-text', 'sidebarNewMarkdown');
+    setText('sidebar-upload-files-text', 'sidebarUploadFiles');
+    setText('sidebar-upload-folder-text', 'sidebarUploadFolders');
     setText('sidebar-files-text', 'sidebarFiles');
     setA11y('sidebar-files', 'sidebarFiles');
     setText('sidebar-favorites-text', 'sidebarFavorites');
@@ -1013,8 +1021,21 @@ function projectLibraryChanges() {
     const deviceKeys = new Set(confirmedDevices.map(appIdentityKey));
     const byId = new Map([...confirmedFavorites, ...confirmedDevices, ...confirmedApps].map(app => [appIdentityKey(app), app]));
     const folderParents = new Map([...byId.values()].filter(app => app.type === 'folder').map(app => [app.folderId, app.parentFolderId]));
-    for (const { source, destination } of pendingLibraryChanges) {
+    for (const { source, destination, creatingFolder } of pendingLibraryChanges) {
         const key = appIdentityKey(source);
+        if (creatingFolder) {
+            const existing = [...byId.values()].find(app => app.type === 'folder' &&
+                app.parentFolderId === destination.parentFolderId && app.name.toLowerCase() === destination.name.toLowerCase());
+            if (existing) {
+                if (existing.folderId !== destination.folderId)
+                    currentFolderIds = currentFolderIds.map(id => id === destination.folderId ? existing.folderId : id);
+            } else {
+                byId.set(key, { ...destination, pendingCreation:true });
+                libraryKeys.add(key);
+                folderParents.set(destination.folderId, destination.parentFolderId);
+            }
+            continue;
+        }
         const current = byId.get(key) || source;
         if (source.type === 'folder') {
             const previousPath = (source.path === '/' ? '' : source.path) + '/' + source.name;
@@ -2591,7 +2612,7 @@ function updateTransferPauseButton(container, id, index, status) {
         container.appendChild(button);
     }
     const paused = status === 'paused';
-    button.disabled = ['done','error','cancelled'].includes(status);
+    button.disabled = ['finalizing','done','error','cancelled'].includes(status);
     button.innerHTML = icon(paused ? 'play_arrow' : 'pause', 17);
     button.setAttribute('aria-label', t(paused ? 'resumeTransfer' : 'pauseTransfer'));
     button.title = button.getAttribute('aria-label');
@@ -2604,7 +2625,7 @@ window._opsTransferResumed = (id, index = -1) => {
         const row = $('op-file-' + id + '-' + index);
         if (row && !['done','error','cancelled'].includes(row.dataset.fileStatus)) {
             row.dataset.fileStatus = 'queued';
-            window._opsUploadFileProgress(id, index, 'waiting', -1, t('waiting'));
+            window._opsUploadFileProgress(id, index, 'queued', -1, t('queuedUpload'));
         }
     } else {
         const item = $('op-' + id);
@@ -2689,15 +2710,16 @@ window._opsUploadBatch = (id, names, sizes) => {
 window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
     const row = $('op-file-' + id + '-' + fileIndex);
     if (!row) return;
-    const normalizedStatus = ['active', 'processing', 'waiting', 'paused', 'done', 'error', 'cancelled'].includes(status) ? status : 'active';
-    if (row.dataset.fileStatus === 'paused' && ['active','processing','waiting'].includes(normalizedStatus)) return;
-    if (['done', 'error', 'cancelled'].includes(row.dataset.fileStatus) && ['active','processing'].includes(normalizedStatus)) return;
+    const normalizedStatus = ['queued','active','processing','finalizing','waiting','paused','done','error','cancelled'].includes(status) ? status : 'active';
+    if (row.dataset.fileStatus === 'paused' && ['queued','active','processing','finalizing','waiting'].includes(normalizedStatus)) return;
+    if (row.dataset.fileStatus === 'finalizing' && ['queued','active','processing','waiting'].includes(normalizedStatus)) return;
+    if (['done','error','cancelled'].includes(row.dataset.fileStatus)) return;
     row.dataset.fileStatus = normalizedStatus;
     updateTransferPauseButton(row.querySelector('.op-file-icon'), id, fileIndex, normalizedStatus);
     const cancelButton = row.querySelector('.op-file-cancel');
     if (cancelButton) cancelButton.disabled = ['done','error','cancelled'].includes(normalizedStatus);
     const detail = $('op-file-detail-' + id + '-' + fileIndex);
-    if (detail && message) detail.textContent = message;
+    if (detail) detail.textContent = normalizedStatus === 'queued' ? t('queuedUpload') : message || detail.textContent;
     const indicator = $('op-file-progress-' + id + '-' + fileIndex);
     if (!indicator) return;
     const incomingPercent = Number(percent);
@@ -2727,6 +2749,7 @@ window._opsUploadFileProgress = (id, fileIndex, status, percent, message) => {
 window._opsUpdate = (id, status, msg) => {
     const item = $('op-'+id); if (!item) return;
     if (item.dataset.opStatus === 'paused' && ['active','waiting'].includes(status)) return;
+    if (item.classList.contains('op-batch') && ['done','error','cancelled'].includes(item.dataset.opStatus) && status === 'active') return;
     item.dataset.opStatus = status || 'active';
     if (item.dataset.opType === 'cleanup') {
         item.setAttribute('aria-busy', status === 'active' ? 'true' : 'false');
@@ -2746,11 +2769,6 @@ window._opsUpdate = (id, status, msg) => {
     if (item.classList.contains('op-batch')) {
         if (status === 'done') {
             setOpProgress(id, 100);
-            item.querySelectorAll('.op-file-row').forEach(row => {
-                if (['active','processing','queued'].includes(row.dataset.fileStatus)) {
-                    window._opsUploadFileProgress(id, Number(row.id.split('-').pop()), 'done', 100, t('uploadProgress'));
-                }
-            });
             setTimeout(() => { transferRateStates.delete(id); item.remove(); if (!opsList.children.length) opsPanel.classList.add('hidden'); refreshOpsTitle(); }, 4500);
         } else if (status === 'cancelled') {
             item.querySelectorAll('.op-file-row').forEach(row => {
@@ -2793,6 +2811,9 @@ window._opsUpdate = (id, status, msg) => {
 };
 
 window._opsProgress = (id, percent, msg) => {
+    const item = $('op-' + id);
+    if (item?.dataset.batchPhase || Number(item?.dataset.batchCompleted) > 0)
+        msg = t('uploadCompletedCount', { done:Number(item.dataset.batchCompleted), total:Number(item.dataset.itemCount) });
     window._opsUpdate(id, 'active', msg);
     setOpProgress(id, percent);
 };
@@ -2842,7 +2863,7 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
         }
     }
     const bytes = state.highWaterBytes;
-    const completed = Math.max(Number(item.dataset.metricCompleted) || 0, Number(completedItems) || 0);
+    const completed = Math.max(Number(item.dataset.batchCompleted) || 0, Number(item.dataset.metricCompleted) || 0, Number(completedItems) || 0);
     state.etaSamples ||= [];
     state.etaSamples.push([now,bytes,completed]);
     while (state.etaSamples.length > 1 && state.etaSamples[1][0] <= now - 60000) state.etaSamples.shift();
@@ -2866,7 +2887,7 @@ window._opsTransferMetrics = (id, direction, completedItems, totalItems, transfe
         const publicationEta = direction === 'upload' && Number(totalItems) > 1 && completedRate > 0
             ? Math.max(0,Number(totalItems) - completed) / completedRate : 0;
         const etaSeconds = Math.max(payloadEta,publicationEta);
-        etaEl.textContent = item.dataset.opStatus === 'active' && etaSeconds > 0
+        etaEl.textContent = item.dataset.opStatus === 'active' && !item.dataset.batchPhase && etaSeconds > 0
             ? t('transferEta', { eta:formatTransferEta(etaSeconds) })
             : '';
         etaEl.classList.toggle('hidden', !etaEl.textContent);
@@ -2901,7 +2922,7 @@ function requestVisibleFolderStatistics() {
     if (activeLibraryView === 'favorites' || (activeLibraryView === 'devices' && currentPath === '/@synchronized')) return;
     const requestedAt = Date.now();
     const folderIds = allApps
-        .filter(app => app.type === 'folder' && (app.path || '/') === currentPath && app.folderId)
+        .filter(app => app.type === 'folder' && !app.pendingCreation && (app.path || '/') === currentPath && app.folderId)
         .map(app => app.folderId)
         .filter(folderId => !folderFileCounts.has(folderId) && (requestedAt - (requestedFolderStatistics.get(folderId) || 0)) > 1000);
     if (!folderIds.length) return;
@@ -2920,16 +2941,29 @@ function scheduleVisibleFolderStatistics() {
 function refreshBatchProgress(id) {
     const item = $('op-' + id);
     if (!item || !item.classList.contains('op-batch')) return;
-    const rows = Array.from(item.querySelectorAll('.op-file-row'));
+    const rows = item.querySelectorAll('.op-file-row');
     if (!rows.length) return;
-    if (item.dataset.opStatus === 'done' || rows.every(row => row.dataset.fileStatus === 'done')) {
-        setOpProgress(id, 100);
-        return;
+    let completed = 0, finished = 0, finalizing = 0, weight = 0, progress = 0;
+    for (const row of rows) {
+        const status = row.dataset.fileStatus;
+        const terminal = status === 'done' || status === 'error' || status === 'cancelled';
+        const bytes = Number(row.dataset.byteSize) || 1;
+        if (status === 'done') completed++;
+        if (status === 'finalizing') finalizing++;
+        if (terminal) finished++;
+        weight += bytes;
+        progress += bytes * (terminal ? 100 : Math.max(0, Number(row.dataset.progress) || 0));
     }
-    const weight = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1), 0);
-    const total = rows.reduce((sum, row) => sum + (Number(row.dataset.byteSize) || 1) *
-        (['done','error','cancelled'].includes(row.dataset.fileStatus) ? 100 : Math.max(0, Number(row.dataset.progress) || 0)), 0);
-    setOpProgress(id, Math.min(99, total / weight));
+    const phase = completed === rows.length ? 'done' : finalizing && finished + finalizing === rows.length ? 'finalizing' : '';
+    const titleChanged = item.dataset.batchCompleted !== String(completed) || item.dataset.batchPhase !== phase;
+    item.dataset.batchCompleted = String(completed);
+    item.dataset.batchPhase = phase;
+    item.querySelector('.op-batch-cancel').disabled = finished === rows.length;
+    if (item.dataset.opStatus === 'active' && (completed || phase))
+        $('op-msg-' + id).textContent = t('uploadCompletedCount', { done:completed, total:rows.length });
+    if (phase) $('op-eta-' + id)?.classList.add('hidden');
+    setOpProgress(id, item.dataset.opStatus === 'done' || phase === 'done' ? 100 : Math.min(99, progress / weight));
+    if (titleChanged) refreshOpsTitle();
 }
 
 function formatTransferRate(bytesPerSecond) {
@@ -2967,6 +3001,15 @@ function refreshOpsTitle() {
         $('ops-title').textContent = t('transfers');
         return;
     }
+    if (items.length === 1 && items[0].classList.contains('op-batch')) {
+        const item = items[0];
+        const values = { done:Number(item.dataset.batchCompleted) || 0, total:Number(item.dataset.itemCount) || 1,
+            speed:item.dataset.metricSpeed || formatTransferRate(0) };
+        const phase = item.dataset.batchPhase;
+        $('ops-title').textContent = item.dataset.opStatus === 'done' || phase === 'done' ? t('uploadsComplete', values)
+            : phase === 'finalizing' ? t('uploadsFinalizing', values) : t('sendingProgress', values);
+        return;
+    }
     if (items.length === 1 && items[0].dataset.metricReady === 'true') {
         const item = items[0];
         const values = {
@@ -2977,10 +3020,6 @@ function refreshOpsTitle() {
         $('ops-title').textContent = item.dataset.metricDirection === 'upload'
             ? t('sendingProgress', values)
             : t('downloadingProgress', values);
-        return;
-    }
-    if (items.length === 1 && items[0].classList.contains('op-batch') && items[0].dataset.opType === 'upload') {
-        $('ops-title').textContent = t('uploadingItems', { count:Number(items[0].dataset.itemCount) || 0 });
         return;
     }
     const types = new Set(items.map(el => el.dataset.opType || 'download'));
@@ -6434,7 +6473,7 @@ function configureContextMenu(mode, app = null) {
     showCtxPart('ctx-copy', isItem && !isFolder && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-info', isItem && !!app.metadataMessageId);
     showCtxPart('ctx-versions', isItem && !isFolder && Array.isArray(app.versions) && app.versions.length > 0);
-    showCtxPart('ctx-download', isItem && !!app.threadId);
+    showCtxPart('ctx-download', isItem && !!app.threadId && !app.pendingCreation);
     showCtxPart('ctx-move', isItem && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-rename', isItem && !inTrash && !!app.metadataMessageId);
     showCtxPart('ctx-favorite', isItem && !inTrash && !!app.metadataMessageId);

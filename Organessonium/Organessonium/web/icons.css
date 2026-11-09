@@ -31,6 +31,15 @@
 }
 
 .icon-filled{font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 24;}
+:where(button, .tab-close) > [data-icon]{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex-shrink:0;
+    line-height:0;
+    vertical-align:middle;
+}
+:where(button, .tab-close) > .svg-icon{vertical-align:middle;}
 [data-theme="light"]{--icon-neutral:#5f6368;}
 .svg-icon.icon-media{color:#ea4335;}
 .item-favorite .svg-icon{color:#fbbc04;}

@@ -320,7 +320,8 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         string content,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool serializeRoute = true)
+        bool serializeRoute = true,
+        bool replayUnknownResult = true)
     {
         DiscordLimits.ValidateMessage(content);
         var payload = JsonSerializer.Serialize(new { content }, JsonOptions.Web);
@@ -329,7 +330,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             var request = new HttpRequestMessage(HttpMethod.Post, $"channels/{channelId}/messages");
             request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
             return request;
-        }, cancellationToken, onRateLimitWait, serializeRoute: serializeRoute);
+        }, cancellationToken, onRateLimitWait, serializeRoute: serializeRoute, replayUnknownResult: replayUnknownResult);
         return await ReadJsonAsync<DiscordMessageDto>(response, cancellationToken);
     }
 

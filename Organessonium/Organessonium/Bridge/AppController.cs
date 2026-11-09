@@ -877,6 +877,11 @@ public sealed partial class AppController : IAsyncDisposable
         bool refreshMappings = false)
     {
         var normalizedPath = PathRules.Normalize(folderPath);
+        if (PendingFolderCreation(normalizedPath) != null)
+        {
+            await _bridge.CallAsync("_onFolderLoadState", normalizedPath, false);
+            return;
+        }
         var folderIds = ParseFolderIds(folderIdsJson);
         if (folderIds.Count == 0)
         {
@@ -1968,39 +1973,6 @@ public sealed partial class AppController : IAsyncDisposable
             progress.TotalBytes);
     }
 
-    private async Task CreateFolderAsync(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return;
-        }
-
-        await SetBackgroundActivityAsync("Em andamento...", true);
-        try
-        {
-            var clean = PathRules.CleanFileName(name.Trim());
-            var registry = Registry();
-            var all = CurrentLocalEntries();
-            var folder = AppEntry.Folder(clean, _currentPath);
-            folder.ParentFolderId = FolderIdForPath(all, _currentPath);
-            var requestedFolderId = folder.FolderId;
-            await registry.AddEntryAsync(folder);
-            var latest = CurrentLocalEntries();
-            ReplaceLocalEntry(latest, folder);
-            await PublishLocalRegistryAsync(registry, latest, incremental: true, changedEntry: folder);
-            await _bridge.CallAsync(
-                "_onStatus",
-                folder.FolderId.Equals(requestedFolderId, StringComparison.OrdinalIgnoreCase)
-                    ? "OK Pasta criada."
-                    : "OK A pasta já existe.",
-                false);
-        }
-        finally
-        {
-            await SetBackgroundActivityAsync("", false);
-        }
-    }
-
     private static string MovedChildPath(string oldFolderPath, string newFolderPath, string childPath)
     {
         return PathRules.Normalize(newFolderPath + childPath[oldFolderPath.Length..]);
@@ -2120,6 +2092,7 @@ public sealed partial class AppController : IAsyncDisposable
     {
         using var networkWait = NetworkRetryPolicy.TransferScope();
         var basePath = _currentPath;
+        await AwaitFolderCreationAsync(basePath);
         var tasks = new List<UploadTask>();
         var folderCount = 0;
         var skipped = 0;
@@ -2471,7 +2444,6 @@ public sealed partial class AppController : IAsyncDisposable
                 fileToken.ThrowIfCancellationRequested();
                 var activeNow = Interlocked.Increment(ref active);
                 activeCounted = true;
-                await OpsUploadFileProgressAsync(opId, index, "active", 0, "Preparando...");
                 await OpsProgressAsync(opId, Percent(Volatile.Read(ref done) + Volatile.Read(ref failed), tasks.Count), $"{activeNow} upload(s) ativo(s)");
                 var uploaded = await Task.Run(() => UploadSingleAsync(
                     opId,
@@ -2528,7 +2500,6 @@ public sealed partial class AppController : IAsyncDisposable
                 }
                 await publication;
                 var completed = Interlocked.Increment(ref done);
-                await OpsUploadFileProgressAsync(opId, index, "done", 100, "Concluído");
                 await OpsTransferMetricsAsync(
                     opId,
                     "upload",
@@ -2713,6 +2684,7 @@ public sealed partial class AppController : IAsyncDisposable
             throttle,
             true,
             useBatchUi,
+            batchStatus: "queued",
             progressTracker: progressTracker);
 
         using var preparedVideo = existingTransferState?.UploadedChunks.Count > 0 && !existingTransferState.FastStartApplied
@@ -2823,6 +2795,7 @@ public sealed partial class AppController : IAsyncDisposable
                 throttle,
                 true,
                 useBatchUi,
+                batchStatus: "queued",
                 progressTracker: progressTracker);
             targetPath = PathRules.Normalize(string.IsNullOrWhiteSpace(transferState.TargetPath) ? targetPath : transferState.TargetPath);
             var useMemoryPipeline = transferState.Encryption != null;
@@ -2867,7 +2840,7 @@ public sealed partial class AppController : IAsyncDisposable
                 transferState.UploadedChunks.Count < totalChunks)
             {
                 await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, -1,
-                    "Verificando partes do upload anterior...", throttle, true, useBatchUi, progressTracker: progressTracker);
+                    "Verificando partes do upload anterior...", throttle, true, useBatchUi, batchStatus: "queued", progressTracker: progressTracker);
                 var recovered = await sharedUpload.Manager.RecoverChunksAsync(sharedUpload.Reservation,
                     EncryptedPayloadRoles.Original, totalChunks, cancellationToken);
                 foreach (var reference in recovered.Where(reference => !transferState.UploadedChunks.Any(chunk => chunk.Index == reference.Index)))
@@ -2890,15 +2863,18 @@ public sealed partial class AppController : IAsyncDisposable
                 (logical, wire) => { if (onBytesUploaded != null) _ = onBytesUploaded(logical, wire); });
             foreach (var index in uploadedMap.Keys) byteProgress.Confirm(index);
             var confirmedParts = uploadedMap.Count;
+            var restoredParts = confirmedParts;
+            var sendingOriginal = false;
             var partsSync = new object();
-            void ReportUploadedParts(int uploadedParts)
+            void ReportUploadedParts(int uploadedParts, bool bodyStarted = false)
             {
                 lock (partsSync)
                 {
                     uploadedParts = Math.Max(confirmedParts, uploadedParts);
                     Interlocked.Exchange(ref confirmedParts, uploadedParts);
+                    sendingOriginal |= bodyStarted || uploadedParts > restoredParts;
+                    if (!sendingOriginal && uploadedParts < totalChunks) return;
                     var bytePercent = sourceLength <= 0 ? 0 : (int)Math.Clamp(byteProgress.LogicalBytes * 100d / sourceLength, 0, 100);
-                    var partPercent = bytePercent;
                     var message = byteProgress.LogicalBytes >= sourceLength && sourceLength > 0
                         ? "Concluindo"
                         : $"{FormatTransferBytes(byteProgress.LogicalBytes)} / {FormatTransferBytes(sourceLength)} enviados";
@@ -2906,7 +2882,7 @@ public sealed partial class AppController : IAsyncDisposable
                         opId,
                         fileIndex,
                         fileTotal,
-                        progressTracker.Original(partPercent),
+                        progressTracker.Original(bytePercent),
                         message,
                         throttle,
                         uploadedParts >= totalChunks || bytePercent >= 100,
@@ -2983,7 +2959,7 @@ public sealed partial class AppController : IAsyncDisposable
                     transferState.ThreadId,
                     transferState.BatchId,
                     uploadedMap,
-                    ReportUploadedParts,
+                    parts => ReportUploadedParts(parts),
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportChunkRateLimitWaitAsync,
@@ -3003,7 +2979,7 @@ public sealed partial class AppController : IAsyncDisposable
                     onPartTransferProgress: (index, wire) =>
                     {
                         byteProgress.Report(index, wire);
-                        ReportUploadedParts(Volatile.Read(ref confirmedParts));
+                        ReportUploadedParts(Volatile.Read(ref confirmedParts), wire > 0);
                     }, sharedUpload: sharedUpload);
             }
             else
@@ -3016,14 +2992,14 @@ public sealed partial class AppController : IAsyncDisposable
                     transferState.ThreadId,
                     transferState.BatchId,
                     uploadedMap,
-                    ReportUploadedParts,
+                    parts => ReportUploadedParts(parts),
                     HandleUploadedChunkAsync,
                     cancellationToken,
                     ReportChunkRateLimitWaitAsync,
                     maxParallelParts: partParallelism,
                     adaptiveUploadGate: adaptiveUploadGate,
                     onTransferActivity: transferActivity == null ? null : transferActivity.SetActive,
-                    onPartTransferProgress: (index, wire) => { byteProgress.Report(index, wire); ReportUploadedParts(Volatile.Read(ref confirmedParts)); });
+                    onPartTransferProgress: (index, wire) => { byteProgress.Report(index, wire); ReportUploadedParts(Volatile.Read(ref confirmedParts), wire > 0); });
             }
             threadId = upload.ThreadId;
             if (streamingChecksums != null) await streamingChecksums.CompleteAsync(cancellationToken);
@@ -3061,10 +3037,11 @@ public sealed partial class AppController : IAsyncDisposable
                 fileIndex,
                 fileTotal,
                 progressTracker.Metadata(0),
-                "Concluindo",
+                "Finalizando upload...",
                 throttle,
                 true,
                 useBatchUi,
+                batchStatus: "finalizing",
                 progressTracker: progressTracker);
             var now = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
             var entry = AppEntry.File(name, threadId, now, sourceLength, targetPath);
@@ -3099,19 +3076,22 @@ public sealed partial class AppController : IAsyncDisposable
                 fileIndex,
                 fileTotal,
                 progressTracker.Metadata(70),
-                "Concluindo",
+                "Finalizando upload...",
                 throttle,
                 true,
                 useBatchUi,
+                batchStatus: "finalizing",
                 progressTracker: progressTracker);
             transferState.FileId = entry.FileId;
             transferState.MetadataMessageId = entry.MetadataMessageId;
             await _transferManager.CompleteAsync(transferState, settings.KeepTransferHistory, CancellationToken.None);
+            if (useBatchUi)
+                await OpsUploadFileProgressAsync(opId, fileIndex, "done", progressTracker.Done(), "Concluído");
             try
             {
-                await uploader.ArchiveThreadAsync(threadId, CancellationToken.None, ReportRateLimitWaitAsync);
+                await uploader.ArchiveThreadAsync(threadId, CancellationToken.None, useBatchUi ? null : ReportRateLimitWaitAsync);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!useBatchUi)
             {
                 throw;
             }
@@ -3120,16 +3100,9 @@ public sealed partial class AppController : IAsyncDisposable
                 AppLogger.Error("UploadArchiveThread", ex, threadId);
             }
 
-            await ReportUploadItemProgressAsync(
-                opId,
-                fileIndex,
-                fileTotal,
-                progressTracker.Done(),
-                "Concluído",
-                throttle,
-                true,
-                useBatchUi,
-                progressTracker: progressTracker);
+            if (!useBatchUi)
+                await ReportUploadItemProgressAsync(opId, fileIndex, fileTotal, progressTracker.Done(), "Concluído",
+                    throttle, true, false, progressTracker: progressTracker);
 
             return entry;
         }
@@ -3897,6 +3870,7 @@ public sealed partial class AppController : IAsyncDisposable
 
         try
         {
+            await AwaitFolderCreationAsync(path);
             var safeName = string.IsNullOrWhiteSpace(name) ? "document.md" : name;
             if (!Regex.IsMatch(safeName, @".*\.(md|markdown)$", RegexOptions.IgnoreCase))
             {

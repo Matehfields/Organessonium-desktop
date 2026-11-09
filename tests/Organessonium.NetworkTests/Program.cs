@@ -133,6 +133,7 @@ internal static partial class Program
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
         ("webViewLibraryRefreshAndLayout", WebViewLibraryRefreshAndLayoutAsync),
         ("webViewTrashLifecycle", WebViewTrashLifecycleAsync),
+        ("queuedFolderCreationHidden", QueuedFolderCreationHiddenAsync),
         ("favoriteAndDeviceMetadataCompatibility", FavoriteAndDeviceMetadataCompatibilityAsync),
         ("folderIndexMappingProtocol", FolderIndexMappingProtocolAsync),
         ("fourChannelSettingsRequireFoldersForum", FourChannelSettingsRequireFoldersForumAsync),
