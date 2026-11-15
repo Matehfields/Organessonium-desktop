@@ -644,6 +644,15 @@ $architectures = @(
     [pscustomobject]@{ Rid = 'win-x64'; Name = 'x64'; ProcessorArchitecture = 'x64'; PeMachine = 0x8664; UpgradeCode = '{6CA5E42D-31EF-49FC-9C65-C784DB28C1D5}' },
     [pscustomobject]@{ Rid = 'win-arm64'; Name = 'arm64'; ProcessorArchitecture = 'arm64'; PeMachine = 0xAA64; UpgradeCode = '{51F35ACC-553A-4F2B-A54F-18C7F0898D8B}' }
 )
+$hostArchitecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if (-not $hostArchitecture) {
+    $hostArchitecture = $env:PROCESSOR_ARCHITEW6432
+    if (-not $hostArchitecture) { $hostArchitecture = $env:PROCESSOR_ARCHITECTURE }
+    if ($hostArchitecture -eq 'AMD64') { $hostArchitecture = 'x64' }
+}
+if ($hostArchitecture -notin $architectures.Name) {
+    throw "Não foi possível identificar uma arquitetura Windows compatível para verificar a mídia embutida."
+}
 $publishedExecutables = @{}
 foreach ($architecture in $architectures) {
     $publishDirectory = Join-Path $publishRoot $architecture.Name
@@ -666,7 +675,7 @@ foreach ($architecture in $architectures) {
         throw "A publicação $($architecture.Rid) não produziu Organessonium.exe."
     }
     $publishedExecutables[$architecture.Name] = $publishedExe
-    if ($architecture.Name -eq [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()) {
+    if ($architecture.Name -eq $hostArchitecture) {
         Write-Step 'Verificando extracao e execucao da midia embutida, sem interface'
         Invoke-Native -FilePath $publishedExe -Arguments @('--verify-media-runtime')
     }
