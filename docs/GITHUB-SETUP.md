@@ -101,9 +101,25 @@ Sem certificado, a release funciona sem assinatura. Veja `docs/CODE-SIGNING.md`.
 
 ## 6. Release de mídia
 
-Antes de qualquer compilação completa, publique os ativos descritos em
+Antes de qualquer compilação no GitHub Actions, publique os ativos descritos em
 `docs/MEDIA-ASSETS.md` na release `media-assets-v1`. Sem eles, `build.yml` e `release.yml`
 falham na verificação de fontes.
+
+### 6.1 Build manual de portáteis e instaladores
+
+Depois de publicar a release de mídia:
+
+1. Abra **Actions → Full Build (manual) → Run workflow**.
+2. Selecione a branch `main`.
+3. Deixe `include_store_packages` desmarcado para compilar apenas os executáveis
+   portáteis, os MSIs, as fontes e os metadados.
+4. Execute e aguarde. O workflow baixa a mídia, roda os testes rápidos e valida os
+   artefatos.
+5. Baixe o artifact `organessonium-<versão>-build.<n>` ao final.
+
+Os MSIX e o MSIXBundle são opcionais e aumentam bastante o tempo e o tamanho do artifact.
+Para gerá-los no Actions, marque `include_store_packages`. Para compilá-los localmente,
+use `release/Build-Releases.ps1` sem `-SkipStorePackages`.
 
 ## 7. Primeira release estável
 

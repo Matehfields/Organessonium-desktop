@@ -293,12 +293,13 @@ Somente com autorização:
 
 ```powershell
 ./release/Get-MediaAssets.ps1 -Repository Matehfields/Organessonium-desktop
-./release/Build-Releases.ps1
+./release/Build-Releases.ps1 -SkipStorePackages
 ```
 
 O script valida fontes de mídia, gera publicações self-contained e framework-dependent,
-MSIs, MSIX, MSIXBundle, ZIP de código-fonte, fontes FFmpeg, `build-info.json` e
-`SHA256SUMS.txt` em `artifacts/releases/<versao>-build.<n>`.
+MSIs, ZIP de código-fonte, fontes FFmpeg, `build-info.json` e `SHA256SUMS.txt` em
+`artifacts/releases/<versao>-build.<n>`. Sem `-SkipStorePackages`, também gera os três
+MSIX e o MSIXBundle. O WACK só se aplica quando o MSIXBundle é gerado.
 
 ### 6.5 Limpeza do workspace
 
@@ -343,7 +344,9 @@ Não remova `artifacts/releases`, `runtime-package.zip` nem `media/sources`. Em
 - Permissão: `contents: read`.
 - Permite escolher branch, tag ou commit.
 - Baixa os ativos de mídia da release `media-assets-v1`.
-- Executa validações, testes rápidos e a compilação completa.
+- Executa validações, testes rápidos e a compilação.
+- Compila portáteis e MSIs por padrão, sem MSIX nem MSIXBundle. Marque
+  `include_store_packages` para incluir os pacotes da Store.
 - Valida metadados, artefatos e checksums.
 - Armazena os artefatos por 14 dias para análise.
 - **Não cria tag, release ou publicação.**
@@ -356,6 +359,7 @@ Não remova `artifacts/releases`, `runtime-package.zip` nem `media/sources`. Em
 - Exige seção revisada do `CHANGELOG.md`.
 - Usa o ambiente protegido `release`, com aprovação manual quando configurado.
 - Compila, testa, valida, cria rascunho, envia artefatos, confere tamanhos e publica.
+- Compila portáteis e MSIs por padrão; `include_store_packages` inclui MSIX e MSIXBundle.
 - Se o envio falhar, o rascunho permanece para recuperação.
 - Não sobrescreve release já publicada.
 
@@ -476,7 +480,8 @@ arquivos de mídia grandes, certificados ou mudanças de versão não autorizada
 - Limpeza do workspace: apenas `artifacts/releases` é preservado; saídas de teste,
   revisão e `media-build` são descartáveis.
 - `release/Build-Releases.ps1`: versão central, metadados, assinatura de portáteis,
-  `build-info.json` e ZIP de fonte atualizado.
+  `build-info.json`, ZIP de fonte atualizado e `-SkipStorePackages` para compilar sem
+  MSIX/MSIXBundle.
 - `release/Get-MediaAssets.ps1`, `release/Get-ReleaseNotes.ps1`,
   `release/Test-ReleaseArtifacts.ps1` e `release/Publish-Release.ps1`: automação segura.
 - `.github/workflows/ci.yml`, `build.yml` e `release.yml`: CI, build manual e release.

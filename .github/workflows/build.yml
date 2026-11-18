@@ -13,6 +13,11 @@ on:
         required: false
         default: false
         type: boolean
+      include_store_packages:
+        description: Compilar também MSIX e MSIXBundle para a Microsoft Store
+        required: false
+        default: false
+        type: boolean
       run_wack:
         description: Executar o Windows App Certification Kit
         required: false
@@ -28,7 +33,7 @@ concurrency:
 
 jobs:
   build:
-    name: Compilação completa sem publicação
+    name: Compilação manual sem publicação
     runs-on: windows-latest
     timeout-minutes: 300
     steps:
@@ -85,10 +90,11 @@ jobs:
           if ('${{ inputs.include_ui_tests }}' -eq 'true') { $arguments += '-IncludeUi' }
           ./tools/run-tests.ps1 @arguments
 
-      - name: Compilar distribuição completa
+      - name: Compilar distribuição
         shell: pwsh
         run: |
           $arguments = @()
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
           if ('${{ inputs.run_wack }}' -eq 'true') { $arguments += '-RunWack' }
           ./release/Build-Releases.ps1 @arguments
 
@@ -109,7 +115,10 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           BUILD: ${{ steps.version.outputs.build }}
-        run: ./release/Test-ReleaseArtifacts.ps1 -ArtifactDirectory "artifacts/releases/$env:VERSION-build.$env:BUILD"
+        run: |
+          $arguments = @('-ArtifactDirectory', "artifacts/releases/$env:VERSION-build.$env:BUILD")
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
+          ./release/Test-ReleaseArtifacts.ps1 @arguments
 
       - name: Armazenar artefatos para análise
         uses: actions/upload-artifact@v4

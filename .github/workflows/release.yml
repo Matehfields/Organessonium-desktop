@@ -13,7 +13,7 @@ on:
         default: false
         type: boolean
       include_store_packages:
-        description: Anexar também MSIX e MSIXBundle (arquivos grandes)
+        description: Compilar e anexar também MSIX e MSIXBundle (arquivos grandes)
         required: false
         default: false
         type: boolean
@@ -178,13 +178,16 @@ jobs:
           [System.IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:PFX_BASE64))
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "pfx_path=$path"
 
-      - name: Compilar distribuição completa
+      - name: Compilar distribuição
         shell: pwsh
         env:
           ORGANESSONIUM_PFX_PATH: ${{ steps.signing.outputs.pfx_path }}
           ORGANESSONIUM_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
           ORGANESSONIUM_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGNING_TIMESTAMP_URL }}
-        run: ./release/Build-Releases.ps1
+        run: |
+          $arguments = @()
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
+          ./release/Build-Releases.ps1 @arguments
 
       - name: Validar metadados de versão dos executáveis
         shell: pwsh
@@ -197,7 +200,10 @@ jobs:
 
       - name: Validar artefatos e checksums
         shell: pwsh
-        run: ./release/Test-ReleaseArtifacts.ps1 -ArtifactDirectory "artifacts/releases/$env:VERSION-build.$env:BUILD"
+        run: |
+          $arguments = @('-ArtifactDirectory', "artifacts/releases/$env:VERSION-build.$env:BUILD")
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
+          ./release/Test-ReleaseArtifacts.ps1 @arguments
 
       - name: Gerar notas revisadas da versão
         shell: pwsh

@@ -27,6 +27,9 @@ número de build independente. A fonte única dos dois valores é `Version.props
 - Regras de `.gitignore` para artefatos de build, testes, pacotes, certificados,
   configurações locais e arquivos de sistema.
 - Dependabot para dependências NuGet e GitHub Actions.
+- Opção `-SkipStorePackages` em `release/Build-Releases.ps1` e
+  `release/Test-ReleaseArtifacts.ps1` para compilar e validar apenas portáteis, MSIs,
+  fontes e metadados, sem MSIX nem MSIXBundle.
 
 ### Alterado
 
@@ -41,6 +44,13 @@ número de build independente. A fonte única dos dois valores é `Version.props
 - Regras de higiene do workspace documentadas em `AGENTS.md` e `git.md`, incluindo o
   fluxo de sincronização com o GitHub por `git push`.
 - Branch `main` publicada no remoto `origin`, com tracking configurado.
+- `build.yml` compila portáteis e MSIs por padrão; os pacotes da Store são opcionais por
+  `include_store_packages`. `release.yml` usa o mesmo controle.
+
+### Corrigido
+
+- A compilação do projeto de testes não exige mais os ativos de mídia; a verificação do
+  runtime FFmpeg ocorre apenas na publicação.
 
 ### Segurança
 

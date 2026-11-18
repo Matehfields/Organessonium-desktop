@@ -2,7 +2,8 @@
 param(
     [string]$Version,
     [switch]$KeepStaging,
-    [switch]$RunWack
+    [switch]$RunWack,
+    [switch]$SkipStorePackages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -843,9 +844,6 @@ foreach ($architecture in $architectures) {
     $msiPaths[$architecture.Name] = $msiPath
 }
 
-Write-Step 'Gerando os pacotes MSIX x86, x64 e ARM64'
-$makeAppx = Resolve-WindowsSdkTool -Name 'makeappx.exe'
-$msixPaths = @{}
 $pfxPath = $env:ORGANESSONIUM_PFX_PATH
 $signTool = $null
 $signArguments = $null
@@ -860,71 +858,83 @@ if (-not [string]::IsNullOrWhiteSpace($pfxPath)) {
     }
 }
 
-foreach ($architecture in $architectures) {
-    $msixStageDirectory = Join-Path $msixStageRoot $architecture.Name
-    $assetsDirectory = Join-Path $msixStageDirectory 'Assets'
-    $null = New-Item -ItemType Directory -Force -Path $assetsDirectory
-    Copy-Item -LiteralPath $publishedExecutables[$architecture.Name] -Destination (Join-Path $msixStageDirectory 'Organessonium.exe') -Force
-    $storeMedia = Join-Path $msixStageDirectory 'media'
-    $null = New-Item -ItemType Directory -Force -Path $storeMedia
-    foreach ($notice in @('GPL-3.0.txt', 'BtbN-LICENSE.txt', 'NOTICE.md', 'THIRD-PARTY-NOTICES.txt', 'source-manifest.json')) {
-        Copy-Item -LiteralPath (Join-Path $mediaRoot $notice) -Destination $storeMedia
-    }
-    # Store users receive the exact corresponding source with the binary. No
-    # mutable download URL, login or later manual source request is necessary.
-    $storeSources = Join-Path $msixStageDirectory 'media\sources'
-    $null = New-Item -ItemType Directory -Force -Path $storeSources
-    Copy-Item -LiteralPath $ffmpegSourceZip -Destination (Join-Path $storeSources 'ffmpeg-corresponding-source.zip')
-    Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'StoreLogo.png') -Width 50 -Height 50 -LogoSize 44
-    Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square44x44Logo.png') -Width 44 -Height 44 -LogoSize 38
-    Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square150x150Logo.png') -Width 150 -Height 150 -LogoSize 128
-    Write-MsixManifest `
-        -Path (Join-Path $msixStageDirectory 'AppxManifest.xml') `
-        -Architecture $architecture.ProcessorArchitecture `
-        -PackageVersion $packageVersion `
-        -ManifestSettings $settings
-
-    $msixPath = Join-Path $msixOutputDirectory ("Organessonium_{0}_{1}.msix" -f $packageVersion, $architecture.Name)
-    Invoke-Native -FilePath $makeAppx -Arguments @('pack', '/d', $msixStageDirectory, '/p', $msixPath, '/o')
-    if ($null -ne $signTool) {
-        Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msixPath))
-    }
-    Test-MsixArtifact `
-        -Path $msixPath `
-        -UnpackDirectory (Join-Path $verifyDirectory ('msix-' + $architecture.Name)) `
-        -Architecture $architecture.ProcessorArchitecture `
-        -ExpectedVersion $packageVersion `
-        -ExpectedSettings $settings `
-        -MakeAppx $makeAppx
-    $msixPaths[$architecture.Name] = $msixPath
-}
-
-Write-Step 'Gerando o MSIXBundle único da Microsoft Store'
-$bundlePath = Join-Path $outputDirectory ("Organessonium_{0}.msixbundle" -f $packageVersion)
-Invoke-Native -FilePath $makeAppx -Arguments @(
-    'bundle', '/d', $msixOutputDirectory, '/p', $bundlePath, '/bv', $packageVersion, '/o'
-)
 if ($null -ne $signTool) {
-    Write-Step 'Assinando executáveis portáteis, MSIs e MSIXBundle com SignTool'
+    Write-Step 'Assinando executáveis portáteis e MSIs com SignTool'
     foreach ($portableExe in $portablePaths) {
         Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($portableExe))
     }
     foreach ($msiPath in $msiPaths.Values) {
         Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msiPath))
     }
-    Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($bundlePath))
 }
-Test-MsixBundleArtifact `
-    -Path $bundlePath `
-    -UnbundleDirectory (Join-Path $verifyDirectory 'bundle') `
-    -ExpectedVersion $packageVersion `
-    -ExpectedSettings $settings `
-    -MakeAppx $makeAppx
+
+$msixPaths = @{}
+$bundlePath = $null
+if (-not $SkipStorePackages) {
+    Write-Step 'Gerando os pacotes MSIX x86, x64 e ARM64'
+    $makeAppx = Resolve-WindowsSdkTool -Name 'makeappx.exe'
+    foreach ($architecture in $architectures) {
+        $msixStageDirectory = Join-Path $msixStageRoot $architecture.Name
+        $assetsDirectory = Join-Path $msixStageDirectory 'Assets'
+        $null = New-Item -ItemType Directory -Force -Path $assetsDirectory
+        Copy-Item -LiteralPath $publishedExecutables[$architecture.Name] -Destination (Join-Path $msixStageDirectory 'Organessonium.exe') -Force
+        $storeMedia = Join-Path $msixStageDirectory 'media'
+        $null = New-Item -ItemType Directory -Force -Path $storeMedia
+        foreach ($notice in @('GPL-3.0.txt', 'BtbN-LICENSE.txt', 'NOTICE.md', 'THIRD-PARTY-NOTICES.txt', 'source-manifest.json')) {
+            Copy-Item -LiteralPath (Join-Path $mediaRoot $notice) -Destination $storeMedia
+        }
+        # Store users receive the exact corresponding source with the binary. No
+        # mutable download URL, login or later manual source request is necessary.
+        $storeSources = Join-Path $msixStageDirectory 'media\sources'
+        $null = New-Item -ItemType Directory -Force -Path $storeSources
+        Copy-Item -LiteralPath $ffmpegSourceZip -Destination (Join-Path $storeSources 'ffmpeg-corresponding-source.zip')
+        Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'StoreLogo.png') -Width 50 -Height 50 -LogoSize 44
+        Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square44x44Logo.png') -Width 44 -Height 44 -LogoSize 38
+        Convert-IconToPng -Source $iconPath -Destination (Join-Path $assetsDirectory 'Square150x150Logo.png') -Width 150 -Height 150 -LogoSize 128
+        Write-MsixManifest `
+            -Path (Join-Path $msixStageDirectory 'AppxManifest.xml') `
+            -Architecture $architecture.ProcessorArchitecture `
+            -PackageVersion $packageVersion `
+            -ManifestSettings $settings
+
+        $msixPath = Join-Path $msixOutputDirectory ("Organessonium_{0}_{1}.msix" -f $packageVersion, $architecture.Name)
+        Invoke-Native -FilePath $makeAppx -Arguments @('pack', '/d', $msixStageDirectory, '/p', $msixPath, '/o')
+        if ($null -ne $signTool) {
+            Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msixPath))
+        }
+        Test-MsixArtifact `
+            -Path $msixPath `
+            -UnpackDirectory (Join-Path $verifyDirectory ('msix-' + $architecture.Name)) `
+            -Architecture $architecture.ProcessorArchitecture `
+            -ExpectedVersion $packageVersion `
+            -ExpectedSettings $settings `
+            -MakeAppx $makeAppx
+        $msixPaths[$architecture.Name] = $msixPath
+    }
+
+    Write-Step 'Gerando o MSIXBundle único da Microsoft Store'
+    $bundlePath = Join-Path $outputDirectory ("Organessonium_{0}.msixbundle" -f $packageVersion)
+    Invoke-Native -FilePath $makeAppx -Arguments @(
+        'bundle', '/d', $msixOutputDirectory, '/p', $bundlePath, '/bv', $packageVersion, '/o'
+    )
+    if ($null -ne $signTool) {
+        Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($bundlePath))
+    }
+    Test-MsixBundleArtifact `
+        -Path $bundlePath `
+        -UnbundleDirectory (Join-Path $verifyDirectory 'bundle') `
+        -ExpectedVersion $packageVersion `
+        -ExpectedSettings $settings `
+        -MakeAppx $makeAppx
+}
 
 $wackPath = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\App Certification Kit\appcert.exe'
-$wackStatus = if (Test-Path -LiteralPath $wackPath) { 'não executado (use -RunWack)' } else { 'não instalado' }
+$wackStatus = if ($SkipStorePackages) { 'ignorado (-SkipStorePackages)' } elseif (Test-Path -LiteralPath $wackPath) { 'não executado (use -RunWack)' } else { 'não instalado' }
 if ($RunWack) {
-    if (-not (Test-Path -LiteralPath $wackPath)) {
+    if ($SkipStorePackages) {
+        Write-Warning 'O WACK não foi executado porque -SkipStorePackages não gera o MSIXBundle.'
+    }
+    elseif (-not (Test-Path -LiteralPath $wackPath)) {
         Write-Warning 'O Windows App Certification Kit não está instalado. Os demais artefatos foram mantidos.'
     }
     else {
@@ -950,7 +960,10 @@ if ($RunWack) {
 }
 
 Write-Step 'Gerando hashes SHA-256'
-$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath, $buildInfoPath) + @($msixPaths.Values) + $portablePaths
+$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $buildInfoPath) + $portablePaths
+if (-not $SkipStorePackages) {
+    $releaseFiles += @($msixPaths.Values) + @($bundlePath)
+}
 $hashLines = foreach ($file in $releaseFiles) {
     $relativeOutputPath = [System.IO.Path]::GetFullPath($file).Substring([System.IO.Path]::GetFullPath($outputDirectory).Length).TrimStart('\').Replace('\', '/')
     '{0}  {1}' -f (Get-Sha256Hex -Path $file), $relativeOutputPath
@@ -976,8 +989,13 @@ $storeIdentityStatus = if ($settings.storeIdentityName -eq 'Organessonium.Deskto
 
 Write-Host "`nRelease Organessonium $publicVersion (build $buildNumber) concluída." -ForegroundColor Green
 Write-Host "`nMSI framework-dependent e sem compressão:`n- x86: OK`n- x64: OK`n- ARM64: OK"
-Write-Host "`nMSIX:`n- x86: OK`n- x64: OK`n- ARM64: OK"
-Write-Host "`nMSIXBundle:`n- x86 + x64 + ARM64: OK`n- versão: $packageVersion"
+if (-not $SkipStorePackages) {
+    Write-Host "`nMSIX:`n- x86: OK`n- x64: OK`n- ARM64: OK"
+    Write-Host "`nMSIXBundle:`n- x86 + x64 + ARM64: OK`n- versão: $packageVersion"
+}
+else {
+    Write-Host "`nMSIX e MSIXBundle: ignorados (-SkipStorePackages)" -ForegroundColor Yellow
+}
 Write-Host "`nSource ZIP:`n- OK"
 Write-Host "`nMicrosoft Store identity:`n- $storeIdentityStatus"
 Write-Host "`nWACK:`n- $wackStatus"
@@ -986,6 +1004,6 @@ Get-ChildItem -LiteralPath $outputDirectory -File -Recurse |
     Sort-Object FullName |
     Select-Object @{ Name = 'Arquivo'; Expression = { $_.FullName.Substring($outputDirectory.Length).TrimStart('\').Replace('\', '/') } }, Length |
     Format-Table -AutoSize
-if ($storeIdentityStatus -eq 'utilizando placeholder') {
+if (-not $SkipStorePackages -and $storeIdentityStatus -eq 'utilizando placeholder') {
     Write-Warning 'O MSIXBundle usa a identidade local padrão. Antes de enviar à Store, copie release-settings.local.example.json para release-settings.local.json e use os valores exatos do Partner Center.'
 }

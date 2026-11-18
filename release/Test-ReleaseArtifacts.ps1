@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ArtifactDirectory,
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+    [switch]$SkipStorePackages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,12 +28,16 @@ $expected = @(
     'Organessonium-windows-source.zip',
     'ffmpeg-corresponding-source.zip',
     'build-info.json',
-    'SHA256SUMS.txt',
-    ('msix/Organessonium_{0}_x86.msix' -f $info.PackageVersion),
-    ('msix/Organessonium_{0}_x64.msix' -f $info.PackageVersion),
-    ('msix/Organessonium_{0}_arm64.msix' -f $info.PackageVersion),
-    ('Organessonium_{0}.msixbundle' -f $info.PackageVersion)
+    'SHA256SUMS.txt'
 )
+if (-not $SkipStorePackages) {
+    $expected += @(
+        ('msix/Organessonium_{0}_x86.msix' -f $info.PackageVersion),
+        ('msix/Organessonium_{0}_x64.msix' -f $info.PackageVersion),
+        ('msix/Organessonium_{0}_arm64.msix' -f $info.PackageVersion),
+        ('Organessonium_{0}.msixbundle' -f $info.PackageVersion)
+    )
+}
 
 $failures = [System.Collections.Generic.List[string]]::new()
 foreach ($relativePath in $expected) {

@@ -50,7 +50,11 @@ if ([string]$buildInfo.commit -ne $tagCommit) {
     throw "Os artefatos foram gerados do commit $($buildInfo.commit), mas a tag $Tag aponta para $tagCommit."
 }
 
-& (Join-Path $PSScriptRoot 'Test-ReleaseArtifacts.ps1') -ArtifactDirectory $directory -RepositoryRoot $repoRoot
+$testArguments = @('-ArtifactDirectory', $directory, '-RepositoryRoot', $repoRoot)
+if (-not $IncludeStorePackages) {
+    $testArguments += '-SkipStorePackages'
+}
+& (Join-Path $PSScriptRoot 'Test-ReleaseArtifacts.ps1') @testArguments
 if ($LASTEXITCODE -ne 0) {
     throw 'A validação dos artefatos falhou; a release não será publicada.'
 }
