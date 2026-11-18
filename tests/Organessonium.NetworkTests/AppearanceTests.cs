@@ -223,6 +223,18 @@ internal static partial class Program
             RequireSync(processFailures.Count == 0, "o WebView falhou durante a reprodução: " + string.Join(",", processFailures));
             AppMemoryBudget.RegisterWebViewProcesses(environment.GetProcessInfos().Select(info => info.ProcessId));
             RequireSync(AppMemoryBudget.PeakCommittedBytes < AppMemoryBudget.LimitBytes, "a reprodução atingiu o limite de 1 GB");
+            var reclaimed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stoppedHealthyVideo = false;
+            using (var guard = new VideoPlaybackMemoryGuard(() => true,
+                () => { stoppedHealthyVideo = true; return Task.CompletedTask; },
+                () => { reclaimed.TrySetResult(); return Task.CompletedTask; }, () => VideoPlaybackMemoryGuard.ReclaimBytes))
+            {
+                await reclaimed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Task.Delay(200);
+                RequireSync(!stoppedHealthyVideo, "a pressão moderada interrompeu um vídeo saudável");
+                await Check("(()=>{const v=document.querySelector('#preview-body video');return !v.paused&&v.currentTime>9.5&&!!v.querySelector('source')&&!v.error})()",
+                    "a recuperação de memória ociosa retirou a reprodução original");
+            }
             var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
             var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var active = true;
@@ -231,7 +243,7 @@ internal static partial class Program
                 active = false;
                 await await dispatcher.InvokeAsync(() => view.ExecuteScriptAsync("window._onVideoMemoryPressure(fileRequestId(previewAppRef))"));
                 released.TrySetResult();
-            }, () => VideoPlaybackMemoryGuard.PressureBytes))
+            }, () => Task.CompletedTask, () => VideoPlaybackMemoryGuard.PressureBytes))
             {
                 await released.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 await Check("(()=>{const shell=document.querySelector('.preview-media-player-shell.video'),v=shell.querySelector('video'),f=shell.querySelector('.preview-media-fallback');return v.paused&&!v.querySelector('source')&&!f.classList.contains('hidden')&&f.textContent.includes('memória')})()",

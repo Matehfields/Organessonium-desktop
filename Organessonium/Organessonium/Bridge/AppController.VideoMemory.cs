@@ -6,6 +6,14 @@ public sealed partial class AppController
 {
     private readonly VideoPlaybackMemoryGuard _videoMemoryGuard;
 
+    private static Task ReclaimVideoMemoryAsync() => Task.Run(() =>
+    {
+        // Drop only disposable RAM caches. Keep the current decoder, source and video chunks alive.
+        ThumbnailCache.Clear();
+        RamUploadBudget.Pool.TrimFreeBuffers();
+        UploadBufferMemoryReclaimer.Reclaim();
+    });
+
     private async Task ReleaseVideoMemoryAsync()
     {
         var sessions = _videoSessions.ToArray();

@@ -162,7 +162,7 @@ public sealed partial class AppController : IAsyncDisposable
         var playbackStore = new VideoPlaybackProgressStore(store.DatabasePath);
         playbackStore.Prune();
         _videoProgress = new VideoPlaybackTracker(playbackStore);
-        _videoMemoryGuard = new VideoPlaybackMemoryGuard(() => !_loggingOut && !_videoSessions.IsEmpty, ReleaseVideoMemoryAsync);
+        _videoMemoryGuard = new VideoPlaybackMemoryGuard(() => !_loggingOut && !_videoSessions.IsEmpty, ReleaseVideoMemoryAsync, ReclaimVideoMemoryAsync);
         if (Application.Current is App { SyncHost: { } syncHost }) AttachSyncHost(syncHost);
     }
 
@@ -689,6 +689,7 @@ public sealed partial class AppController : IAsyncDisposable
                 await _bridge.CallAsync("_onCachedAppsLoaded", cached);
             }
             if (hasCache) await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+            WarmRootFolderStatistics(cached);
 
             _ = RunAsync(async () =>
             {
@@ -698,6 +699,7 @@ public sealed partial class AppController : IAsyncDisposable
                     var refreshed = await registry.LoadFolderSerialAsync(AppRegistry.RootFolderId, "/");
                     ReplaceLoadedFolder(AppRegistry.RootFolderId, refreshed);
                     await _bridge.CallAsync("_onAppsLoaded", _loadedApps);
+                    WarmRootFolderStatistics(refreshed);
                     await PublishLibraryFileCountAsync(registry);
                 }
                 catch (OperationCanceledException)
@@ -1158,6 +1160,23 @@ public sealed partial class AppController : IAsyncDisposable
             await _bridge.CallAsync("_onLibraryFileCount", statistics.FileCount);
         }
         finally { _statisticsPublicationGate.Release(); }
+    }
+
+    private void WarmRootFolderStatistics(IReadOnlyList<AppEntry> entries)
+    {
+        var folderIds = entries
+            .Where(entry => IsFolderEntry(entry) &&
+                            entry.ParentFolderId == AppRegistry.RootFolderId &&
+                            !string.IsNullOrWhiteSpace(entry.FolderId) &&
+                            entry.FolderId != AppRegistry.SynchronizedRootFolderId)
+            .Select(entry => entry.FolderId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (folderIds.Count > 0)
+        {
+            _ = RunAsync(() => LoadVisibleFolderStatisticsAsync(
+                JsonSerializer.Serialize(folderIds, JsonOptions.Web), "/"));
+        }
     }
 
     private async Task LoadVisibleFolderStatisticsAsync(string visibleFolderIdsJson, string? requestedPath = null)
@@ -1825,6 +1844,9 @@ public sealed partial class AppController : IAsyncDisposable
             return existing;
         }
 
+        if (AppMemoryBudget.CommittedBytes() >= VideoPlaybackMemoryGuard.ReclaimBytes - 128L * 1024 * 1024)
+            await ReclaimVideoMemoryAsync();
+        cancellation.ThrowIfCancellationRequested();
         var provider = await Downloader().OpenVideoChunksAsync(entry, lowQuality, cancellation);
         var video = new VideoStreamSession(provider, _store.Load().VideoPrefetchChunks);
         try

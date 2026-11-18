@@ -2,6 +2,74 @@
 
 Este repositório contém a versão desktop C# WPF + WebView2 do Organessônium. O aplicativo usa o Discord como armazenamento de payloads, com um índice hierárquico por pasta para que a abertura da raiz não dependa da quantidade total de arquivos no servidor.
 
+## Requisitos
+
+- Windows 10 versão 2004 (build 19041) ou posterior, x64.
+- [.NET SDK 10.0.401](https://dotnet.microsoft.com/download), fixado em `global.json`.
+- Git.
+- WebView2 Runtime para executar a interface.
+- Windows 10/11 SDK instalado pelo Visual Studio Installer, necessário apenas para gerar MSI/MSIX.
+- Ativos de mídia verificados, necessários apenas para a compilação de distribuição.
+
+## Compilar e executar
+
+```powershell
+git clone https://github.com/Matehfields/Organessonium-desktop.git
+cd Organessonium-desktop
+dotnet restore Organessonium/Organessonium.slnx
+dotnet build Organessonium/Organessonium.slnx -c Release
+dotnet run --project Organessonium/Organessonium/Organessonium.csproj
+```
+
+O código compila em um clone limpo. O runtime do FFmpeg e as fontes correspondentes não são versionados; a geração da distribuição completa exige os ativos descritos em [docs/MEDIA-ASSETS.md](docs/MEDIA-ASSETS.md). A restauração usa apenas o feed oficial do NuGet definido em `NuGet.config`.
+
+## Testes
+
+Suíte rápida, sem FFmpeg, mídia ou janelas:
+
+```powershell
+pwsh ./tools/run-tests.ps1 -Configuration Release -SkipMedia
+```
+
+Acrescente `-IncludeUi` para os testes que abrem janelas WebView2. Os testes de mídia exigem `runtime-package.zip` e, em alguns casos, `ffprobe.exe` de uma distribuição completa do FFmpeg. Consulte [git.md](git.md) para os detalhes e limitações.
+
+## Versionamento
+
+`Version.props` é a única fonte da versão pública e do número de build. Não edite números de versão em `.csproj`, scripts ou manifests.
+
+```powershell
+pwsh ./tools/version.ps1 show
+pwsh ./tools/version.ps1 bump-build -ExpectedBuild <build-lida-no-inicio>
+```
+
+- A versão pública segue SemVer e só muda com autorização explícita do mantenedor.
+- A build é incrementada exatamente uma vez por rodada concluída, antes do commit correspondente.
+- Derivados: `AssemblyVersion A.B.C.0`, `FileVersion A.B.C.build`, `InformationalVersion A.B.C+build.N` e pacotes Windows `A.B.C.0`.
+
+## Distribuição e publicação
+
+A compilação completa de distribuição e qualquer publicação exigem autorização explícita.
+
+```powershell
+pwsh ./release/Get-MediaAssets.ps1 -Repository Matehfields/Organessonium-desktop
+pwsh ./release/Build-Releases.ps1
+```
+
+Os artefatos são gerados em `artifacts/releases/<versao>-build.<n>`, com MSIs, MSIX, MSIXBundle, executáveis portáteis, ZIP de código-fonte, fontes FFmpeg, `build-info.json` e `SHA256SUMS.txt`. Os workflows `build.yml` e `release.yml` são acionados manualmente; o release usa rascunho, tag anotada e o ambiente protegido `release`.
+
+Documentação relacionada:
+
+- [git.md](git.md): branches, commits, testes, compilação e publicação.
+- [docs/GITHUB-SETUP.md](docs/GITHUB-SETUP.md): configuração manual, primeira sincronização e primeira release.
+- [docs/CODE-SIGNING.md](docs/CODE-SIGNING.md): assinatura digital opcional.
+- [CHANGELOG.md](CHANGELOG.md): mudanças por versão.
+- [CONTRIBUTING.md](CONTRIBUTING.md) e [SECURITY.md](SECURITY.md): contribuições e relato de vulnerabilidades.
+- [AGENTS.md](AGENTS.md): regras para agentes de programação.
+
+## Licença
+
+O projeto ainda não possui licença de uso e redistribuição definida. O código pode ser público para consulta, mas isso não concede automaticamente direitos de uso, modificação ou redistribuição. Veja [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Arquitetura de dados
 
 - `Bridge/AppController.cs` coordena upload, download, previews, transferências e a ponte WebView2.
@@ -358,7 +426,7 @@ Os cards usam `content-visibility: auto` para permitir que o navegador organize 
 
 Configurações > Prévias inclui `Chunks de vídeo antecipados`, chave `videoPrefetchChunks`, padrão 1 e intervalo de 0 a 6. Zero desativa antecipação, mantendo as leituras necessárias. O valor vale para sessões novas. Durante reprodução, o app mantém uma janela limitada de chunks, deduplica downloads simultâneos e cancela prefetch obsoleto em seek, pausa ou fechamento. O cache plaintext tem teto de 192 MiB e o player recusa chunks individuais acima de 64 MiB; esses limites não alteram o protocolo de upload de 20 MiB. Falhas temporárias têm retry cancelável; falha definitiva aparece no fallback do player. Download completo, checkpoints e cancelamento continuam independentes da reprodução.
 
-O download de cada chunk do player passa pela admissão global de RAM antes de iniciar a CDN ou alocar ciphertext/plaintext, considerando a capacidade arredondada do pool cifrado. Espera por memória é assíncrona e cancelável; fechar a sessão desliga esse pool, mesmo que uma resposta COM ainda retenha a sessão. `VideoPlaybackMemoryGuard`, ligado ao ciclo de vida do controller, verifica a memória agregada a cada 100 ms enquanto existem sessões de vídeo. O limiar conservador de 672 MiB deixa margem para alocações nativas do decoder antes do teto global de 1 GB. Sob pressão, o controller cancela e retira os recursos, a UI descarrega a fonte do player, os trabalhos pendentes são drenados e a memória gerenciada liberada é recolhida fora do Dispatcher. Só então a UI solicita uma única tentativa da prévia 480p já existente, preservando a posição e o estado de reprodução. Sem essa prévia, se ela falhar ou se continuar havendo pressão, o painel informa a interrupção para proteger o app e mantém as ações de download/abertura externa. Não gera nem publica outra prévia durante a reprodução, não remove o original, não aumenta o teto de RAM e não garante reprodução de todo codec/resolução em qualidade completa dentro desse orçamento.
+O download de cada chunk do player passa pela admissão global de RAM antes de iniciar a CDN ou alocar ciphertext/plaintext, considerando a capacidade arredondada do pool cifrado. Espera por memória é assíncrona e cancelável; fechar a sessão desliga esse pool, mesmo que uma resposta COM ainda retenha a sessão. Antes de abrir um decoder com a memória agregada acima de 544 MiB, o controller descarta apenas caches ociosos de RAM e recolhe objetos liberados fora do Dispatcher. `VideoPlaybackMemoryGuard` verifica a memória agregada a cada 100 ms enquanto existem sessões de vídeo. A partir de 672 MiB, essa mesma recuperação ocorre no máximo uma vez a cada cinco segundos, sem retirar a fonte, pausar, trocar a qualidade ou descartar os chunks atuais. Somente se a memória continuar em 864 MiB ou mais após a recuperação o controller cancela e retira os recursos e a UI descarrega o decoder. Depois de drenar os trabalhos, a UI solicita uma única tentativa da prévia 480p já existente, preservando a posição e o estado de reprodução. Sem essa prévia, se ela falhar ou se continuar havendo pressão crítica, o painel informa a interrupção e mantém as ações de download/abertura externa. MOV não é bloqueado por extensão ou tamanho comprimido; a reprodução original continua sob pressão moderada. A limpeza não apaga cache persistido, não gera nem publica outra prévia, não remove o original e não aumenta o teto global de 1 GB. Consumo e suporte do decoder ainda dependem do codec/resolução e do runtime instalado.
 
 As URLs `https://media.organessonium.local/preview/<GUID>` são recursos internos interceptados por `WebResourceRequested`, não um servidor HTTPS real. Para vídeo, cada resposta fornece até 512 KiB disponíveis em RAM, com `206`, `Content-Range`, `Content-Length`, `Accept-Ranges` e `Cache-Control: no-store`. O Chromium solicita as faixas seguintes quando necessário. Isso evita que o WebView2 drene uma resposta integral antes de reproduzir. Há no máximo quatro respostas vivas por recurso; EOF/fechamento limpa e devolve o buffer a um pool limitado, sem alocar outro array grande a cada faixa. A leitura CDN cifrada também reutiliza buffers limitados à sessão do vídeo e os limpa após autenticar, inclusive em erro/cancelamento; somente o comprimento declarado do anexo entra na descriptografia. O cache plaintext e o teto global de memória não aumentam. Imagens, PDF e áudio preservam seus caches e usam o mesmo host virtual, sem listener localhost.
 
@@ -522,19 +590,20 @@ O diário e as confirmações de sincronização usam o mesmo codec antes de ser
 
 `dotnet publish` e `build-releases.bat` executam `media/Verify-Sources.ps1` antes da publicação. Releases públicas são bloqueadas enquanto as fontes não estiverem conferidas ou se houver divergência de SHA-256 entre o manifesto, o pacote embutido e as fontes correspondentes. O runtime nativo, suas DLLs e os avisos ficam em `media/runtime-package.zip`, embutido como recurso do assembly. `EmbeddedMediaRuntime` prepara esse pacote uma vez por sessão em `%LOCALAPPDATA%\Organessonium\Media\<sha256>`, por I/O em background, com lock entre processos, conferência dos arquivos existentes e renomeação de arquivos parciais validados. Não usa TEMP nem extrai conteúdo do usuário. Uma nova versão tem outro diretório de cache. O EXE portátil não exige pasta `media` externa. Instalações de desenvolvimento antigas sem o pacote ainda aceitam o motor externo. Licenças, inventário e procedimento de reconstrução estão em [media/NOTICE.md](Organessonium/Organessonium/media/NOTICE.md) e [media/build/README.md](Organessonium/Organessonium/media/build/README.md). A build controlada mantém os codecs anteriores, com fontes/receitas assinadas MSYS2, componentes adicionais fixados e crates Rust incluídos. O projeto de testes reutiliza a inicialização do Windows App SDK do assembly do app, sem gerar inicializadores duplicados.
 
-`build-releases.bat` gera os artefatos separadamente em `artifacts/releases/<versão>` sem alterar o pacote portátil existente. A versão pode vir de `release/release-settings.json` ou ser informada no comando, por exemplo `build-releases.bat 1.2.0.0`. Use sempre `A.B.C.0`: os três MSIX e o MSIXBundle recebem exatamente essa versão, enquanto o Windows Installer usa os três primeiros campos para controlar upgrades do MSI.
+`build-releases.bat` gera os artefatos em `artifacts/releases/<versão>-build.<n>` sem alterar o pacote portátil existente. A versão vem exclusivamente de `Version.props`; se um valor for informado no comando, por exemplo `build-releases.bat 1.2.0`, ele apenas confirma a versão pública atual e nunca a substitui. Os três MSIX e o MSIXBundle recebem `A.B.C.0`, enquanto o Windows Installer usa os três primeiros campos para controlar upgrades do MSI.
 
 `Organessonium.exe --verify-media-runtime` confere/prepara o pacote e executa uma pequena operação de mídia em RAM, retornando 0 em sucesso ou 1 em falha. Esse modo não abre WPF/WebView2, não carrega configurações nem acessa o Discord. O gerador usa essa verificação no EXE publicado da arquitetura da máquina; pacotes de outras arquiteturas recebem conferência estrutural, não uma alegação de execução em outro dispositivo.
 
-- `Organessonium-windows-source.zip` contém solução, C#/XAML/web, assets, documentação, ferramentas de construção do motor, licenças, pacote nativo embutido e `Organessonium/media/sources/ffmpeg-corresponding-source.zip`. O arquivo completo de fontes FFmpeg também é entregue separadamente. Assim, uma extração limpa compila/publica sem buscar um binário de mídia não identificado. Entradas usam `/`; `bin`, `obj`, caches, logs, bancos, certificados e configurações locais não entram. O gerador verifica dados locais/segredos antes de criar o ZIP. Não substitua este artefato pelo ZIP automático do GitHub, que não contém os inputs de mídia ignorados pelo Git.
+- `Organessonium-windows-source.zip` contém solução, C#/XAML/web, assets, documentação, ferramentas de construção do motor, licenças, pacote nativo embutido e `Organessonium/media/sources/ffmpeg-corresponding-source.zip`. Também inclui `Version.props`, `Directory.Build.props`, `global.json` e `NuGet.config`, permitindo compilar e conferir a versão em uma extração limpa. O arquivo completo de fontes FFmpeg também é entregue separadamente. Entradas usam `/`; `bin`, `obj`, caches, logs, bancos, certificados e configurações locais não entram. O gerador verifica dados locais/segredos antes de criar o ZIP. Não substitua este artefato pelo ZIP automático do GitHub, que não contém os inputs de mídia ignorados pelo Git.
 - `Organessonium-installer-x86.msi`, `Organessonium-installer-x64.msi` e `Organessonium-installer-arm64.msi` são produzidos pelas APIs nativas do Microsoft Windows Installer e pelo `MakeCab` do Windows. O Windows Installer exige um pacote distinto por arquitetura, portanto não existe um único MSI misto. Cada instalador contém a publicação multi-file framework-dependent correspondente, em cabinet sem compressão, e instala somente para o usuário atual em `%APPDATA%\Organessonium`, ao lado de `%APPDATA%\OrganessoniumData`, sem exigir elevação. Os atalhos do Menu Iniciar e da Área de Trabalho também pertencem apenas ao usuário atual. O instalador impede downgrade, preserva o `UpgradeCode` x64 existente e usa códigos fixos próprios para x86 e ARM64.
 - `msix/Organessonium_<versão>_x86.msix`, `msix/Organessonium_<versão>_x64.msix` e `msix/Organessonium_<versão>_arm64.msix` contêm, cada um, o executável self-contained e single-file da própria arquitetura.
 - `Organessonium_<versão>.msixbundle` reúne exatamente os três MSIX. Cada pacote inclui os avisos e as fontes completas do motor em `media/sources/ffmpeg-corresponding-source.zip`, sem depender de URL externa para entregá-las ao usuário da Store. Isso aumenta seu tamanho. O `MakeAppx` recebe `/bv` explicitamente.
 - `Organessonium-x86.exe`, `Organessonium-x64.exe` e `Organessonium-arm64.exe` são os portáteis self-contained, com motor e licenças embutidos. Publique o executável da arquitetura desejada junto do ZIP de código-fonte da mesma versão no GitHub.
-- `SHA256SUMS.txt` registra os hashes dos MSIs, MSIX, MSIXBundle, EXEs portáteis, ZIP de código-fonte e fontes FFmpeg.
+- `build-info.json` registra versão, build, versão de pacote, tag, commit, estado da árvore, data UTC e identificação do workflow.
+- `SHA256SUMS.txt` registra os hashes dos MSIs, MSIX, MSIXBundle, EXEs portáteis, ZIP de código-fonte, fontes FFmpeg e `build-info.json`.
 
 Para envio à Microsoft Store, use os valores de `storeIdentityName`, `storePublisher`, `storePublisherDisplayName` e `storeDisplayName` da reserva no Partner Center. O último campo define tanto `Package/Properties/DisplayName` quanto o nome visível do aplicativo no manifesto. Se for necessário usar valores diferentes dos padrões de `release/release-settings.json`, copie `release/release-settings.local.example.json` para `release/release-settings.local.json` e preencha os campos exatos. O arquivo local é ignorado pelo Git, não entra no ZIP e não deve ser publicado. O fluxo normal da Store não exige PFX: o bundle pode permanecer sem assinatura local e será processado pela Microsoft. O pacote MSIX continua instalado pela Store no contexto do usuário atual; `runFullTrust` permite executar o aplicativo desktop, mas não transforma a implantação em uma instalação para todos os usuários.
 
-O script exige o .NET SDK e o Windows 10/11 SDK instalados pelo Visual Studio Installer. Os MSIs não são self-contained: a máquina de destino precisa ter o .NET Desktop Runtime 10 e o Windows App SDK Runtime 1.8 da arquitetura correspondente. Se `ORGANESSONIUM_PFX_PATH` estiver definido, o script usa o `SignTool` oficial para assinar os pacotes; a senha pode ser passada apenas no ambiente por `ORGANESSONIUM_PFX_PASSWORD`, sem ser gravada no repositório. `ORGANESSONIUM_TIMESTAMP_URL` é opcional. O MSI destinado a distribuição pública deve ser assinado com um certificado confiável.
+O script exige o .NET SDK e o Windows 10/11 SDK instalados pelo Visual Studio Installer. Os MSIs não são self-contained: a máquina de destino precisa ter o .NET Desktop Runtime 10 e o Windows App SDK Runtime 1.8 da arquitetura correspondente. Se `ORGANESSONIUM_PFX_PATH` estiver definido, o script usa o `SignTool` oficial para assinar os executáveis portáteis, os MSIs, os MSIX e o MSIXBundle; a senha pode ser passada apenas no ambiente por `ORGANESSONIUM_PFX_PASSWORD`, sem ser gravada no repositório. `ORGANESSONIUM_TIMESTAMP_URL` é opcional. O MSI destinado a distribuição pública deve ser assinado com um certificado confiável.
 
-Ao final, o script valida conteúdo, arquitetura, versão, identidade e encoding de cada artefato, descompacta administrativamente os três MSIs e recompila uma extração limpa do ZIP. Para solicitar o Windows App Certification Kit, execute `build-releases.bat 1.2.0.0 -RunWack` em um terminal elevado. A ausência ou falha do WACK é reportada sem apagar os demais artefatos; a certificação final e a associação da identidade ainda dependem do Partner Center.
+Ao final, o script valida conteúdo, arquitetura, versão, identidade e encoding de cada artefato, descompacta administrativamente os três MSIs e recompila uma extração limpa do ZIP. Para solicitar o Windows App Certification Kit, execute `build-releases.bat -RunWack` em um terminal elevado. A ausência ou falha do WACK é reportada sem apagar os demais artefatos; a certificação final e a associação da identidade ainda dependem do Partner Center.

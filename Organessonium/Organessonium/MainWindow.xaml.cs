@@ -19,7 +19,6 @@ using Windows.Graphics;
 
 namespace Organessonium;
 
-
 public partial class MainWindow : Window
 {
     private const string LocalWebHost = "organessonium.local";
