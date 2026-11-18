@@ -46,6 +46,8 @@ número de build independente. A fonte única dos dois valores é `Version.props
 - Branch `main` publicada no remoto `origin`, com tracking configurado.
 - `build.yml` compila portáteis e MSIs por padrão; os pacotes da Store são opcionais por
   `include_store_packages`. `release.yml` usa o mesmo controle.
+- `build.yml` publica os artefatos antes dos testes rápidos. Uma falha de teste deixa o
+  job vermelho, mas não impede a análise dos portáteis e instaladores gerados.
 
 ### Corrigido
 

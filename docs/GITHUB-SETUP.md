@@ -113,9 +113,10 @@ Depois de publicar a release de mídia:
 2. Selecione a branch `main`.
 3. Deixe `include_store_packages` desmarcado para compilar apenas os executáveis
    portáteis, os MSIs, as fontes e os metadados.
-4. Execute e aguarde. O workflow baixa a mídia, roda os testes rápidos e valida os
-   artefatos.
-5. Baixe o artifact `organessonium-<versão>-build.<n>` ao final.
+4. Execute e aguarde. O workflow baixa a mídia, compila, valida os artefatos e publica o
+   artifact; os testes rápidos rodam depois do upload.
+5. Baixe o artifact `organessonium-<versão>-build.<n>` ao final. Se os testes falharem,
+   o job termina vermelho, mas o artifact já publicado continua disponível.
 
 Os MSIX e o MSIXBundle são opcionais e aumentam bastante o tempo e o tamanho do artifact.
 Para gerá-los no Actions, marque `include_store_packages`. Para compilá-los localmente,

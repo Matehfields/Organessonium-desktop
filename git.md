@@ -344,11 +344,13 @@ Não remova `artifacts/releases`, `runtime-package.zip` nem `media/sources`. Em
 - Permissão: `contents: read`.
 - Permite escolher branch, tag ou commit.
 - Baixa os ativos de mídia da release `media-assets-v1`.
-- Executa validações, testes rápidos e a compilação.
+- Executa validações e a compilação.
 - Compila portáteis e MSIs por padrão, sem MSIX nem MSIXBundle. Marque
   `include_store_packages` para incluir os pacotes da Store.
 - Valida metadados, artefatos e checksums.
 - Armazena os artefatos por 14 dias para análise.
+- Executa os testes rápidos depois do upload. Uma falha de teste deixa o job vermelho,
+  mas os artefatos já enviados permanecem disponíveis.
 - **Não cria tag, release ou publicação.**
 
 ### 7.3 `release.yml`

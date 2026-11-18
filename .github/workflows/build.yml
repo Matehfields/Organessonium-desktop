@@ -83,13 +83,6 @@ jobs:
           dotnet build tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj -c Release --no-restore
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Testes rápidos
-        shell: pwsh
-        run: |
-          $arguments = @('-Configuration', 'Release', '-SkipMedia', '-NoRestore', '-NoBuild')
-          if ('${{ inputs.include_ui_tests }}' -eq 'true') { $arguments += '-IncludeUi' }
-          ./tools/run-tests.ps1 @arguments
-
       - name: Compilar distribuição
         shell: pwsh
         run: |
@@ -128,3 +121,12 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      # A suíte roda depois do upload para que uma falha de teste não impeça a
+      # análise dos artefatos. O job continua vermelho quando os testes falham.
+      - name: Testes rápidos
+        shell: pwsh
+        run: |
+          $arguments = @('-Configuration', 'Release', '-SkipMedia', '-NoRestore', '-NoBuild')
+          if ('${{ inputs.include_ui_tests }}' -eq 'true') { $arguments += '-IncludeUi' }
+          ./tools/run-tests.ps1 @arguments
