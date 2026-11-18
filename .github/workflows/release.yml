@@ -159,9 +159,9 @@ jobs:
       - name: Testes obrigatórios (sem mídia)
         shell: pwsh
         run: |
-          $arguments = @('-Configuration', 'Release', '-SkipMedia', '-NoRestore', '-NoBuild')
-          if ('${{ inputs.include_ui_tests }}' -eq 'true') { $arguments += '-IncludeUi' }
-          ./tools/run-tests.ps1 @arguments
+          $parameters = @{ Configuration = 'Release'; SkipMedia = $true; NoRestore = $true; NoBuild = $true }
+          if ('${{ inputs.include_ui_tests }}' -eq 'true') { $parameters.IncludeUi = $true }
+          ./tools/run-tests.ps1 @parameters
 
       - name: Preparar certificado de assinatura (opcional)
         id: signing
@@ -185,9 +185,9 @@ jobs:
           ORGANESSONIUM_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
           ORGANESSONIUM_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGNING_TIMESTAMP_URL }}
         run: |
-          $arguments = @()
-          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
-          ./release/Build-Releases.ps1 @arguments
+          $parameters = @{}
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $parameters.SkipStorePackages = $true }
+          ./release/Build-Releases.ps1 @parameters
 
       - name: Validar metadados de versão dos executáveis
         shell: pwsh
@@ -201,9 +201,9 @@ jobs:
       - name: Validar artefatos e checksums
         shell: pwsh
         run: |
-          $arguments = @('-ArtifactDirectory', "artifacts/releases/$env:VERSION-build.$env:BUILD")
-          if ('${{ inputs.include_store_packages }}' -ne 'true') { $arguments += '-SkipStorePackages' }
-          ./release/Test-ReleaseArtifacts.ps1 @arguments
+          $parameters = @{ ArtifactDirectory = "artifacts/releases/$env:VERSION-build.$env:BUILD" }
+          if ('${{ inputs.include_store_packages }}' -ne 'true') { $parameters.SkipStorePackages = $true }
+          ./release/Test-ReleaseArtifacts.ps1 @parameters
 
       - name: Gerar notas revisadas da versão
         shell: pwsh
@@ -217,14 +217,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          $arguments = @(
-            '-Tag', $env:TAG,
-            '-NotesFile', (Join-Path $env:RUNNER_TEMP 'release-notes.md'),
-            '-ArtifactDirectory', "artifacts/releases/$env:VERSION-build.$env:BUILD",
-            '-Repository', '${{ github.repository }}'
-          )
-          if ('${{ inputs.include_store_packages }}' -eq 'true') { $arguments += '-IncludeStorePackages' }
-          ./release/Publish-Release.ps1 @arguments
+          $parameters = @{
+            Tag = $env:TAG
+            NotesFile = (Join-Path $env:RUNNER_TEMP 'release-notes.md')
+            ArtifactDirectory = "artifacts/releases/$env:VERSION-build.$env:BUILD"
+            Repository = '${{ github.repository }}'
+          }
+          if ('${{ inputs.include_store_packages }}' -eq 'true') { $parameters.IncludeStorePackages = $true }
+          ./release/Publish-Release.ps1 @parameters
 
       - name: Remover certificado temporário
         if: always()

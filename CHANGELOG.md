@@ -53,6 +53,8 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 - A compilação do projeto de testes não exige mais os ativos de mídia; a verificação do
   runtime FFmpeg ocorre apenas na publicação.
+- Os workflows montam parâmetros nomeados com hashtable; switches como
+  `-SkipStorePackages` não são mais atribuídos ao parâmetro `-Version`.
 
 ### Segurança
 
