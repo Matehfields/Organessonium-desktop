@@ -62,7 +62,7 @@
     </Content>
   </ItemGroup>
 
-  <Target Name="VerifyMediaRuntime" BeforeTargets="PrepareForPublish">
+  <Target Name="VerifyMediaRuntime" BeforeTargets="Publish">
     <Error Condition="!Exists('media\runtime-package.zip') And !Exists('media\ffmpeg.exe')" Text="FFmpeg ausente. Prepare o pacote de mídia conforme media/NOTICE.md antes de publicar." />
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\media\Verify-Sources.ps1&quot; -MediaDirectory &quot;$(MSBuildProjectDirectory)\media&quot;" />
   </Target>
