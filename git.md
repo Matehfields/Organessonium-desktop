@@ -135,7 +135,7 @@ O remoto `origin` aponta para:
 https://github.com/Matehfields/Organessonium-desktop.git
 ```
 
-O repositório remoto foi criado vazio. O primeiro envio da `main` cria o tracking:
+A branch `main` já está publicada. Em um clone novo, o primeiro envio cria o tracking:
 
 ```powershell
 git push -u origin main

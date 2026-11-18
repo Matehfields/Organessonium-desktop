@@ -1,9 +1,8 @@
 # Configuração manual do GitHub
 
-Este documento lista o que precisa ser feito no GitHub e as etapas para a primeira
-sincronização e a primeira release. Nada aqui foi executado automaticamente: o
-repositório local foi preparado, mas o primeiro push depende de autorização e
-autenticação.
+Este documento lista o que precisa ser feito no GitHub e as etapas para sincronização e
+release. A primeira sincronização já foi executada; o procedimento abaixo permanece
+válido para configuração, recuperação e novos clones.
 
 ## 1. Repositório remoto
 
@@ -13,26 +12,27 @@ URL:
 https://github.com/Matehfields/Organessonium-desktop
 ```
 
-O repositório remoto existe e está vazio. O repositório local usa a branch `main` e o
-remoto `origin` já está configurado.
+O repositório remoto existe e contém a branch `main`. O repositório local usa a branch
+`main` e o remoto `origin` já está configurado com tracking.
 
 ### Autenticação
 
 O Git está configurado com o credential helper `manager` (Git Credential Manager). O
 GitHub CLI (`gh`) não está instalado nesta máquina.
 
-No primeiro push, o Git Credential Manager pode abrir uma janela de login do GitHub. Se
-isso não acontecer, use um Personal Access Token (classic com escopo `repo` ou
-fine-grained com permissão de leitura/escrita em Contents) como senha quando o Git
-solicitar. Nunca cole o token em um arquivo do repositório.
+Em um novo clone ou no primeiro push de outra máquina, o Git Credential Manager pode
+abrir uma janela de login do GitHub. Se isso não acontecer, use um Personal Access Token
+(classic com escopo `repo` ou fine-grained com permissão de leitura/escrita em Contents)
+como senha quando o Git solicitar. Nunca cole o token em um arquivo do repositório.
 
-## 2. Primeira sincronização
+## 2. Sincronização
 
-O workspace foi limpo antes do primeiro envio. Permanecem apenas o código, a mídia
-verificada e as builds de publicação em `artifacts/releases`. `bin`, `obj`, caches,
-revisões e publicações intermediárias não são versionados.
+A primeira sincronização já foi executada. O workspace foi limpo antes do envio:
+permanecem apenas o código, a mídia verificada e as builds de publicação em
+`artifacts/releases`. `bin`, `obj`, caches, revisões e publicações intermediárias não são
+versionados.
 
-Executar somente com autorização:
+Para um novo clone, ou para repetir a configuração, execute com autorização:
 
 ```powershell
 git status

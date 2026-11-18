@@ -40,6 +40,7 @@ número de build independente. A fonte única dos dois valores é `Version.props
   publicações.
 - Regras de higiene do workspace documentadas em `AGENTS.md` e `git.md`, incluindo o
   fluxo de sincronização com o GitHub por `git push`.
+- Branch `main` publicada no remoto `origin`, com tracking configurado.
 
 ### Segurança
 
