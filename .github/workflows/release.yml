@@ -118,7 +118,7 @@ jobs:
           global-json-file: global.json
 
       - name: Cache de pacotes NuGet
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json', 'NuGet.config', 'Directory.Build.props', 'Version.props') }}
