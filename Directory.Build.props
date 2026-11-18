@@ -1,0 +1,25 @@
+<Project>
+  <!--
+    Propriedades comuns a todos os projetos do repositório.
+    A versão pública e a build vêm de Version.props; não repita números
+    de versão em arquivos .csproj, scripts ou manifests.
+  -->
+  <Import Project="$(MSBuildThisFileDirectory)Version.props" />
+
+  <PropertyGroup>
+    <!-- SemVer público usado por pacotes e pela propriedade Version do SDK. -->
+    <Version>$(OrganessoniumVersion)</Version>
+    <VersionPrefix>$(OrganessoniumVersion)</VersionPrefix>
+
+    <!-- Metadados Windows: quatro campos numéricos obrigatórios. -->
+    <AssemblyVersion>$(OrganessoniumVersion).0</AssemblyVersion>
+    <FileVersion>$(OrganessoniumVersion).$(OrganessoniumBuild)</FileVersion>
+
+    <!-- Identificador legível, sem deixar o SDK anexar o SHA do commit. -->
+    <InformationalVersion>$(OrganessoniumVersion)+build.$(OrganessoniumBuild)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <Product>Organessônium</Product>
+    <Company>Matehfields</Company>
+  </PropertyGroup>
+</Project>

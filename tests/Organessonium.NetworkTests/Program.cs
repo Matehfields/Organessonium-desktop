@@ -193,6 +193,20 @@ internal static partial class Program
         ("syncHeadlessTrayWindowLifecycle", SyncHeadlessTrayWindowLifecycleAsync)
     };
 
+    // Testes que exigem o runtime FFmpeg embutido ou os executáveis de mídia
+    // informados por ORGANESSONIUM_MEDIA_TEST_EXE/ORGANESSONIUM_FFMPEG_TEST_EXE.
+    // A CI rápida não baixa esses arquivos e usa --skip-media.
+    private static readonly HashSet<string> MediaDependentTests = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "embeddedMediaRuntime",
+        "appearanceHiddenBrowser",
+        "mediaPreviewWorkerRamOnly",
+        "thumbnailFormatsRamOnly",
+        "ffmpegLongPreviewStaged",
+        "thumbnailWaitsForMemoryAndCancels",
+        "generatedMediaHiddenBrowser"
+    };
+
     public static async Task<int> Main(string[] args)
     {
         if (args.FirstOrDefault() == "--memory-budget-child")
@@ -207,7 +221,9 @@ internal static partial class Program
         var passed = 0;
         var failed = 0;
         var allowUi = args.Contains("--include-ui", StringComparer.OrdinalIgnoreCase);
-        var names = args.Where(arg => !arg.Equals("--include-ui", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var skipMedia = args.Contains("--skip-media", StringComparer.OrdinalIgnoreCase);
+        var names = args.Where(arg => !arg.Equals("--include-ui", StringComparison.OrdinalIgnoreCase) &&
+            !arg.Equals("--skip-media", StringComparison.OrdinalIgnoreCase)).ToArray();
         static bool OpensWindow(string name) => name.StartsWith("webView", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("syncHeadlessTrayWindowLifecycle", StringComparison.OrdinalIgnoreCase);
         if (!allowUi && names.Any(OpensWindow))
@@ -215,8 +231,14 @@ internal static partial class Program
             Console.WriteLine("Teste gráfico não executado. A opção --include-ui é necessária e pode abrir janelas.");
             return 1;
         }
+        if (skipMedia && names.Any(MediaDependentTests.Contains))
+        {
+            Console.WriteLine("Teste de mídia solicitado explicitamente, mas --skip-media foi informado.");
+            return 1;
+        }
         var selected = Tests.Where(test => (names.Length == 0 || names.Contains(test.Name, StringComparer.OrdinalIgnoreCase)) &&
-            (allowUi || !OpensWindow(test.Name))).ToList();
+            (allowUi || !OpensWindow(test.Name)) &&
+            (!skipMedia || !MediaDependentTests.Contains(test.Name))).ToList();
         foreach (var (name, run) in selected)
         {
             try

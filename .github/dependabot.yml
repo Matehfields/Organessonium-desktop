@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: "nuget"
+    directories:
+      - "/Organessonium/Organessonium"
+      - "/tests/Organessonium.NetworkTests"
+      - "/tools/NamesScanner"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      nuget-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

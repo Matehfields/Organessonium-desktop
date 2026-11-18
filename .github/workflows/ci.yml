@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Verificações e testes rápidos
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache de pacotes NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json', 'NuGet.config', 'Directory.Build.props', 'Version.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Validar estrutura, versão e segredos
+        shell: pwsh
+        run: ./tools/check-repository.ps1
+
+      - name: Restaurar dependências
+        shell: pwsh
+        run: |
+          dotnet restore Organessonium/Organessonium.slnx
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet restore tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compilar em Release
+        shell: pwsh
+        run: |
+          dotnet build Organessonium/Organessonium.slnx -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Testes rápidos (sem mídia e sem interface)
+        shell: pwsh
+        run: ./tools/run-tests.ps1 -Configuration Release -SkipMedia -NoRestore -NoBuild

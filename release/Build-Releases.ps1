@@ -8,6 +8,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+Import-Module (Join-Path $repoRoot 'tools\Versioning.psm1') -Force
+$versionInfo = Get-OrganessoniumVersionInfo -RepositoryRoot $repoRoot
+$publicVersion = $versionInfo.Version
+$buildNumber = $versionInfo.Build
+$packageVersion = $versionInfo.PackageVersion
 $projectPath = Join-Path $repoRoot 'Organessonium\Organessonium\Organessonium.csproj'
 $solutionPath = Join-Path $repoRoot 'Organessonium\Organessonium.slnx'
 $iconPath = Join-Path $repoRoot 'Organessonium\Organessonium\Assets\app.ico'
@@ -397,6 +402,7 @@ function Test-SourceZip {
     try {
         $entries = @($archive.Entries | ForEach-Object { $_.FullName })
         foreach ($required in @('Organessonium.slnx', 'Organessonium/Organessonium.csproj', 'README.md',
+            'Version.props', 'Directory.Build.props', 'global.json', 'NuGet.config',
             'Organessonium/media/GPL-3.0.txt', 'Organessonium/media/BtbN-LICENSE.txt', 'Organessonium/media/NOTICE.md', 'Organessonium/media/source-manifest.json')) {
             if ($required -notin $entries) {
                 throw "O ZIP de código-fonte não contém $required."
@@ -593,28 +599,31 @@ if (Test-Path -LiteralPath $localSettingsPath) {
         $settings[$property.Name] = [string]$property.Value
     }
 }
-foreach ($requiredSetting in @('version', 'storeIdentityName', 'storePublisher', 'storePublisherDisplayName', 'storeDisplayName', 'storeDescription')) {
+foreach ($requiredSetting in @('storeIdentityName', 'storePublisher', 'storePublisherDisplayName', 'storeDisplayName', 'storeDescription')) {
     if ([string]::IsNullOrWhiteSpace($settings[$requiredSetting])) {
         throw "A configuração de release '$requiredSetting' está ausente ou vazia."
     }
 }
-if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = $settings.version
+if (-not [string]::IsNullOrWhiteSpace($Version)) {
+    $requestedVersion = $Version.Trim()
+    if ($requestedVersion -match '^\d+\.\d+\.\d+\.0$') {
+        $requestedVersion = $requestedVersion.Substring(0, $requestedVersion.Length - 2)
+    }
+    if ($requestedVersion -ne $publicVersion) {
+        throw "A versão informada ($Version) diverge de Version.props ($publicVersion). Altere a versão pública apenas com autorização e use tools/version.ps1 set-version."
+    }
 }
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
-    throw 'Informe a versão no formato A.B.C.D, por exemplo: build-releases.bat 1.2.0.0'
-}
-$versionNumbers = $Version.Split('.') | ForEach-Object { [int]$_ }
+$versionNumbers = @($publicVersion.Split('.') | ForEach-Object { [int]$_ })
 if ($versionNumbers.Where({ $_ -lt 0 -or $_ -gt 65535 }).Count -gt 0) {
     throw 'Cada parte da versão deve estar entre 0 e 65535.'
 }
-if ($versionNumbers[0] -gt 255 -or $versionNumbers[1] -gt 255 -or $versionNumbers[3] -ne 0) {
-    throw 'Para manter upgrades MSI válidos, use A e B entre 0 e 255 e a versão no formato A.B.C.0.'
+if ($versionNumbers[0] -gt 255 -or $versionNumbers[1] -gt 255) {
+    throw 'Para manter upgrades MSI válidos, MAJOR e MINOR devem ficar entre 0 e 255.'
 }
 
 $artifactsRoot = Join-Path $repoRoot 'artifacts\releases'
-$outputDirectory = Join-Path $artifactsRoot $Version
-$workRoot = Join-Path $repoRoot ('artifacts\release-work\' + $Version)
+$outputDirectory = Join-Path $artifactsRoot ("{0}-build.{1}" -f $publicVersion, $buildNumber)
+$workRoot = Join-Path $repoRoot ('artifacts\release-work\' + ("{0}-build.{1}" -f $publicVersion, $buildNumber))
 $resolvedArtifactsRoot = [System.IO.Path]::GetFullPath($artifactsRoot) + [System.IO.Path]::DirectorySeparatorChar
 foreach ($path in @($outputDirectory, $workRoot)) {
     $fullPath = [System.IO.Path]::GetFullPath($path)
@@ -656,7 +665,7 @@ if ($hostArchitecture -notin $architectures.Name) {
 $publishedExecutables = @{}
 foreach ($architecture in $architectures) {
     $publishDirectory = Join-Path $publishRoot $architecture.Name
-    Write-Step "Compilando o aplicativo $Version para $($architecture.Rid)"
+    Write-Step "Compilando o aplicativo $publicVersion (build $buildNumber) para $($architecture.Rid)"
     Invoke-Native -FilePath 'dotnet.exe' -Arguments @(
         'publish', $projectPath,
         '-c', 'Release',
@@ -666,9 +675,10 @@ foreach ($architecture in $architectures) {
         '-p:PublishSingleFile=true',
         '-p:IncludeNativeLibrariesForSelfExtract=true',
         '-p:EnableCompressionInSingleFile=true',
-        "-p:Version=$($versionNumbers[0]).$($versionNumbers[1]).$($versionNumbers[2])",
-        "-p:FileVersion=$Version",
-        "-p:AssemblyVersion=$Version"
+        "-p:Version=$publicVersion",
+        "-p:FileVersion=$($versionInfo.FileVersion)",
+        "-p:AssemblyVersion=$($versionInfo.AssemblyVersion)",
+        "-p:InformationalVersion=$($versionInfo.InformationalVersion)"
     )
     $publishedExe = Join-Path $publishDirectory 'Organessonium.exe'
     if (-not (Test-Path -LiteralPath $publishedExe -PathType Leaf) -or (Get-Item -LiteralPath $publishedExe).Length -le 0) {
@@ -697,9 +707,10 @@ foreach ($architecture in $architectures) {
         '-p:EnableCompressionInSingleFile=false',
         '-p:WindowsAppSDKSelfContained=false',
         '-p:WebView2EnableCsWinRTProjection=false',
-        "-p:Version=$($versionNumbers[0]).$($versionNumbers[1]).$($versionNumbers[2])",
-        "-p:FileVersion=$Version",
-        "-p:AssemblyVersion=$Version"
+        "-p:Version=$publicVersion",
+        "-p:FileVersion=$($versionInfo.FileVersion)",
+        "-p:AssemblyVersion=$($versionInfo.AssemblyVersion)",
+        "-p:InformationalVersion=$($versionInfo.InformationalVersion)"
     )
     $publishedExe = Join-Path $publishDirectory 'Organessonium.exe'
     foreach ($requiredFile in @($publishedExe, (Join-Path $publishDirectory 'Organessonium.dll'), (Join-Path $publishDirectory 'Organessonium.runtimeconfig.json'))) {
@@ -720,7 +731,7 @@ foreach ($architecture in $architectures) {
 }
 
 Write-Step 'Verificando e gerando o código-fonte público'
-$trackedFiles = @(& git -C $repoRoot ls-files -- 'Organessonium/Organessonium.slnx' 'Organessonium/Organessonium/**' 'README.md')
+$trackedFiles = @(& git -C $repoRoot ls-files -- 'Organessonium/Organessonium.slnx' 'Organessonium/Organessonium/**' 'README.md' 'CHANGELOG.md' 'Version.props' 'Directory.Build.props' 'global.json' 'NuGet.config' 'git.md' 'AGENTS.md' 'CONTRIBUTING.md' 'SECURITY.md' 'docs/**')
 if ($LASTEXITCODE -ne 0 -or $trackedFiles.Count -eq 0) {
     throw 'Git não conseguiu enumerar os arquivos necessários do código-fonte.'
 }
@@ -746,6 +757,35 @@ foreach ($architecture in $architectures) {
     $portablePaths += $portableExe
 }
 
+Write-Step 'Gerando metadados rastreaveis da build'
+$commit = (& git -C $repoRoot rev-parse HEAD 2>$null)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+    throw 'Não foi possível identificar o commit da build.'
+}
+$commit = $commit.Trim()
+$dirty = @(& git -C $repoRoot status --porcelain 2>$null).Count -gt 0
+$buildInfoPath = Join-Path $outputDirectory 'build-info.json'
+$buildInfo = [ordered]@{
+    version        = $publicVersion
+    build          = $buildNumber
+    packageVersion = $packageVersion
+    fileVersion    = $versionInfo.FileVersion
+    informational  = $versionInfo.InformationalVersion
+    tag            = $versionInfo.Tag
+    commit         = $commit
+    dirty          = $dirty
+    builtAtUtc     = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    workflowRun    = $env:GITHUB_RUN_ID
+    repository     = $env:GITHUB_REPOSITORY
+}
+[System.IO.File]::WriteAllText(
+    $buildInfoPath,
+    ($buildInfo | ConvertTo-Json -Depth 4),
+    [System.Text.UTF8Encoding]::new($false))
+if ($dirty) {
+    Write-Warning 'A árvore de trabalho tem alterações não commitadas; build-info.json registra dirty=true.'
+}
+
 $sourceVerifyDirectory = Join-Path $verifyDirectory 'source'
 $null = New-Item -ItemType Directory -Force -Path $sourceVerifyDirectory
 [System.IO.Compression.ZipFile]::ExtractToDirectory($sourceZip, $sourceVerifyDirectory)
@@ -764,7 +804,7 @@ foreach ($architecture in $architectures) {
         -ApplicationExe $msiPublishedExecutables[$architecture.Name] `
         -ApplicationIcon $iconPath `
         -OutputPath $msiPath `
-        -Version $Version `
+        -Version $packageVersion `
         -WorkingDirectory $architectureWorkDirectory `
         -Architecture $architecture.Name
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $msiPath)) {
@@ -772,7 +812,7 @@ foreach ($architecture in $architectures) {
     }
     Test-MsiArtifact `
         -Path $msiPath `
-        -ExpectedVersion $Version `
+        -ExpectedVersion $packageVersion `
         -ExpectedUpgradeCode $architecture.UpgradeCode `
         -Architecture $architecture.Name
 
@@ -841,10 +881,10 @@ foreach ($architecture in $architectures) {
     Write-MsixManifest `
         -Path (Join-Path $msixStageDirectory 'AppxManifest.xml') `
         -Architecture $architecture.ProcessorArchitecture `
-        -PackageVersion $Version `
+        -PackageVersion $packageVersion `
         -ManifestSettings $settings
 
-    $msixPath = Join-Path $msixOutputDirectory ("Organessonium_{0}_{1}.msix" -f $Version, $architecture.Name)
+    $msixPath = Join-Path $msixOutputDirectory ("Organessonium_{0}_{1}.msix" -f $packageVersion, $architecture.Name)
     Invoke-Native -FilePath $makeAppx -Arguments @('pack', '/d', $msixStageDirectory, '/p', $msixPath, '/o')
     if ($null -ne $signTool) {
         Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msixPath))
@@ -853,19 +893,22 @@ foreach ($architecture in $architectures) {
         -Path $msixPath `
         -UnpackDirectory (Join-Path $verifyDirectory ('msix-' + $architecture.Name)) `
         -Architecture $architecture.ProcessorArchitecture `
-        -ExpectedVersion $Version `
+        -ExpectedVersion $packageVersion `
         -ExpectedSettings $settings `
         -MakeAppx $makeAppx
     $msixPaths[$architecture.Name] = $msixPath
 }
 
 Write-Step 'Gerando o MSIXBundle único da Microsoft Store'
-$bundlePath = Join-Path $outputDirectory ("Organessonium_{0}.msixbundle" -f $Version)
+$bundlePath = Join-Path $outputDirectory ("Organessonium_{0}.msixbundle" -f $packageVersion)
 Invoke-Native -FilePath $makeAppx -Arguments @(
-    'bundle', '/d', $msixOutputDirectory, '/p', $bundlePath, '/bv', $Version, '/o'
+    'bundle', '/d', $msixOutputDirectory, '/p', $bundlePath, '/bv', $packageVersion, '/o'
 )
 if ($null -ne $signTool) {
-    Write-Step 'Assinando MSIs e MSIXBundle com SignTool'
+    Write-Step 'Assinando executáveis portáteis, MSIs e MSIXBundle com SignTool'
+    foreach ($portableExe in $portablePaths) {
+        Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($portableExe))
+    }
     foreach ($msiPath in $msiPaths.Values) {
         Invoke-Native -FilePath $signTool -Arguments ($signArguments + @($msiPath))
     }
@@ -874,7 +917,7 @@ if ($null -ne $signTool) {
 Test-MsixBundleArtifact `
     -Path $bundlePath `
     -UnbundleDirectory (Join-Path $verifyDirectory 'bundle') `
-    -ExpectedVersion $Version `
+    -ExpectedVersion $packageVersion `
     -ExpectedSettings $settings `
     -MakeAppx $makeAppx
 
@@ -907,7 +950,7 @@ if ($RunWack) {
 }
 
 Write-Step 'Gerando hashes SHA-256'
-$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath) + @($msixPaths.Values) + $portablePaths
+$releaseFiles = @($msiPaths.Values) + @($sourceZip, $ffmpegSourceZip, $bundlePath, $buildInfoPath) + @($msixPaths.Values) + $portablePaths
 $hashLines = foreach ($file in $releaseFiles) {
     $relativeOutputPath = [System.IO.Path]::GetFullPath($file).Substring([System.IO.Path]::GetFullPath($outputDirectory).Length).TrimStart('\').Replace('\', '/')
     '{0}  {1}' -f (Get-Sha256Hex -Path $file), $relativeOutputPath
@@ -931,10 +974,10 @@ $storeIdentityStatus = if ($settings.storeIdentityName -eq 'Organessonium.Deskto
     'configurada'
 }
 
-Write-Host "`nRelease Organessonium $Version concluída." -ForegroundColor Green
+Write-Host "`nRelease Organessonium $publicVersion (build $buildNumber) concluída." -ForegroundColor Green
 Write-Host "`nMSI framework-dependent e sem compressão:`n- x86: OK`n- x64: OK`n- ARM64: OK"
 Write-Host "`nMSIX:`n- x86: OK`n- x64: OK`n- ARM64: OK"
-Write-Host "`nMSIXBundle:`n- x86 + x64 + ARM64: OK`n- versão: $Version"
+Write-Host "`nMSIXBundle:`n- x86 + x64 + ARM64: OK`n- versão: $packageVersion"
 Write-Host "`nSource ZIP:`n- OK"
 Write-Host "`nMicrosoft Store identity:`n- $storeIdentityStatus"
 Write-Host "`nWACK:`n- $wackStatus"

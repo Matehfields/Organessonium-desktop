@@ -1,0 +1,228 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag anotada existente, por exemplo v1.0.0
+        required: true
+        type: string
+      include_ui_tests:
+        description: Incluir testes que abrem janelas WebView2
+        required: false
+        default: false
+        type: boolean
+      include_store_packages:
+        description: Anexar também MSIX e MSIXBundle (arquivos grandes)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validar tag, versão e changelog
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+      package_version: ${{ steps.version.outputs.package_version }}
+    steps:
+      - name: Exigir dispatch a partir da main
+        shell: pwsh
+        run: |
+          if ('${{ github.ref }}' -ne 'refs/heads/main') {
+            throw 'Execute este workflow a partir da branch main. A tag é validada e extraída pelo checkout.'
+          }
+
+      - name: Checkout da tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Validar versão central
+        id: version
+        shell: pwsh
+        run: ./tools/version.ps1 validate -GitHubOutput
+
+      - name: Validar tag anotada na main
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          $tag = $env:TAG
+          $type = (& git cat-file -t "refs/tags/$tag" 2>$null)
+          if ($LASTEXITCODE -ne 0 -or $type.Trim() -ne 'tag') {
+            throw "A tag $tag não existe ou não é anotada. Crie com: git tag -a $tag -m \"Organessônium $tag\"."
+          }
+          $version = '${{ steps.version.outputs.version }}'
+          if ($tag -ne "v$version") {
+            throw "A tag $tag não corresponde à versão $version de Version.props."
+          }
+          $tagCommit = (& git rev-parse "$tag^{commit}").Trim()
+          & git rev-parse --verify origin/main 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            & git fetch origin main:refs/remotes/origin/main
+            if ($LASTEXITCODE -ne 0) { throw 'Não foi possível obter origin/main.' }
+          }
+          & git merge-base --is-ancestor $tagCommit origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "A tag $tag aponta para um commit que não está contido na main."
+          }
+
+      - name: Validar seção revisada do CHANGELOG
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes-validate.md'
+          ./release/Get-ReleaseNotes.ps1 -Version $env:VERSION -OutputPath $notes
+
+  publish:
+    name: Compilar e publicar release
+    needs: validate
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    timeout-minutes: 360
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUILD: ${{ needs.validate.outputs.build }}
+      PACKAGE_VERSION: ${{ needs.validate.outputs.package_version }}
+    steps:
+      - name: Checkout da tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configurar .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache de pacotes NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'global.json', 'NuGet.config', 'Directory.Build.props', 'Version.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Confirmar versão do checkout
+        shell: pwsh
+        run: |
+          Import-Module ./tools/Versioning.psm1 -Force
+          $info = Get-OrganessoniumVersionInfo -RepositoryRoot .
+          if ($info.Version -ne $env:VERSION -or $info.Build -ne [int]$env:BUILD) {
+            throw "Version.props do checkout ($($info.Version) build $($info.Build)) não corresponde à versão validada."
+          }
+          Write-Host "Versão confirmada: $($info.Version) build $($info.Build)"
+
+      - name: Validar repositório e histórico
+        shell: pwsh
+        run: |
+          ./tools/check-repository.ps1 -SkipSecrets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tools/check-secrets.ps1 -IncludeHistory
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Baixar ativos de mídia verificados
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./release/Get-MediaAssets.ps1 -Repository ${{ github.repository }}
+
+      - name: Restaurar e compilar testes
+        shell: pwsh
+        run: |
+          dotnet restore tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build tests/Organessonium.NetworkTests/Organessonium.NetworkTests.csproj -c Release --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Testes obrigatórios (sem mídia)
+        shell: pwsh
+        run: |
+          $arguments = @('-Configuration', 'Release', '-SkipMedia', '-NoRestore', '-NoBuild')
+          if ('${{ inputs.include_ui_tests }}' -eq 'true') { $arguments += '-IncludeUi' }
+          ./tools/run-tests.ps1 @arguments
+
+      - name: Preparar certificado de assinatura (opcional)
+        id: signing
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64)) {
+            Write-Host 'Assinatura digital não configurada; a release será gerada sem assinatura.'
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'pfx_path='
+            exit 0
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'organessonium-signing.pfx'
+          [System.IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:PFX_BASE64))
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "pfx_path=$path"
+
+      - name: Compilar distribuição completa
+        shell: pwsh
+        env:
+          ORGANESSONIUM_PFX_PATH: ${{ steps.signing.outputs.pfx_path }}
+          ORGANESSONIUM_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+          ORGANESSONIUM_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: ./release/Build-Releases.ps1
+
+      - name: Validar metadados de versão dos executáveis
+        shell: pwsh
+        run: |
+          $directory = "artifacts/releases/$env:VERSION-build.$env:BUILD"
+          Get-ChildItem -LiteralPath $directory -Filter 'Organessonium-*.exe' -File | ForEach-Object {
+            ./tools/check-version-metadata.ps1 -Path $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Validar artefatos e checksums
+        shell: pwsh
+        run: ./release/Test-ReleaseArtifacts.ps1 -ArtifactDirectory "artifacts/releases/$env:VERSION-build.$env:BUILD"
+
+      - name: Gerar notas revisadas da versão
+        shell: pwsh
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          ./release/Get-ReleaseNotes.ps1 -Version $env:VERSION -OutputPath $notes
+
+      - name: Publicar release com recuperação por rascunho
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          $arguments = @(
+            '-Tag', $env:TAG,
+            '-NotesFile', (Join-Path $env:RUNNER_TEMP 'release-notes.md'),
+            '-ArtifactDirectory', "artifacts/releases/$env:VERSION-build.$env:BUILD",
+            '-Repository', '${{ github.repository }}'
+          )
+          if ('${{ inputs.include_store_packages }}' -eq 'true') { $arguments += '-IncludeStorePackages' }
+          ./release/Publish-Release.ps1 @arguments
+
+      - name: Remover certificado temporário
+        if: always()
+        shell: pwsh
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'organessonium-signing.pfx'
+          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }

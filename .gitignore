@@ -2,11 +2,20 @@
 **/bin/
 **/obj/
 artifacts/
+/releases/
 release/release-settings.local.json
 Organessonium/Organessonium/media/ffmpeg.exe
 Organessonium/Organessonium/media/*.dll
 Organessonium/Organessonium/media/runtime-package.zip
 Organessonium/Organessonium/media/sources/
+
+# Test output
+**/TestResults/
+**/*.trx
+**/*.coverage
+**/coverage/
+**/*.received.*
+**/*.verified.*
 
 # IDE and local tooling state
 .vs/
@@ -15,6 +24,11 @@ Organessonium/Organessonium/media/sources/
 .agents/
 .codex/
 **/*.csproj.user
+**/*.suo
+**/*.user
+**/*.userosscache
+**/*.sln.docstates
+**/*.DotSettings.user
 
 # Local application data and SQLite sidecars
 **/OrganessoniumData/
@@ -27,3 +41,36 @@ Organessonium/Organessonium/media/sources/
 **/Logs/
 *.log
 *.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+
+# Distribution outputs and signing material
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.appxupload
+*.nupkg
+*.snupkg
+*.pfx
+*.p12
+*.pem
+*.cer
+*.crt
+*.key
+*.snk
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+secrets.json
+*.secret
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+desktop.ini

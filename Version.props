@@ -1,0 +1,17 @@
+<Project>
+  <!--
+    Fonte única da versão pública e do número da build.
+
+    OrganessoniumVersion: versão pública SemVer (MAJOR.MINOR.PATCH).
+      Só pode ser alterada com autorização explícita do mantenedor.
+    OrganessoniumBuild: rodada de desenvolvimento/correções.
+      Incrementada exatamente uma vez por rodada concluída, antes do commit.
+      Nunca é incrementada por um workflow do GitHub Actions.
+
+    Use tools/version.ps1 para alterar estes valores com validação.
+  -->
+  <PropertyGroup>
+    <OrganessoniumVersion>1.0.0</OrganessoniumVersion>
+    <OrganessoniumBuild>3</OrganessoniumBuild>
+  </PropertyGroup>
+</Project>
