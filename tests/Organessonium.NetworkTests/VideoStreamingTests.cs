@@ -316,7 +316,16 @@ internal static partial class Program
                 var messages = payloads.Select((data, i) => new { id = (100 + i).ToString(), content = "", attachments = new[] { new { filename = "chunk-" + i, size = data.Length, url = "https://cdn.invalid/" + i } } }).ToArray();
                 using var handler = new VideoHttpHandler(async (request, token) =>
                 {
-                    if (request.RequestUri!.Host == "discord.com") return VideoJsonResponse(JsonSerializer.Serialize(messages));
+                    if (request.RequestUri!.Host == "discord.com")
+                    {
+                        var segments = request.RequestUri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        if (segments.Length >= 2 && segments[^2] == "messages")
+                        {
+                            var requested = messages.FirstOrDefault(message => message.id == segments[^1]);
+                            if (requested != null) return VideoJsonResponse(JsonSerializer.Serialize(requested));
+                        }
+                        return VideoJsonResponse(JsonSerializer.Serialize(messages));
+                    }
                     await Task.Delay(75, token);
                     return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payloads[int.Parse(request.RequestUri.Segments.Last())]) };
                 });

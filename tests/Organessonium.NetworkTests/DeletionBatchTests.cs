@@ -223,7 +223,9 @@ internal static partial class Program
         }
         catch (Exception error)
         {
-            var panel = browser != null ? await browser.CoreWebView2.ExecuteScriptAsync("document.getElementById('ops-list')?.textContent") : "no browser";
+            string panel;
+            try { panel = browser != null ? await browser.CoreWebView2.ExecuteScriptAsync("document.getElementById('ops-list')?.textContent") : "no browser"; }
+            catch (Exception diagnostic) { panel = "diagnostic unavailable: " + diagnostic.Message; }
             throw new InvalidOperationException($"{phase}: {error.Message}; concurrency={transport.MaximumDeletes}; proofReads={transport.RootProofReads}; panel={panel}; observed={string.Join(" | ", errors.TakeLast(6))}", error);
         }
         finally

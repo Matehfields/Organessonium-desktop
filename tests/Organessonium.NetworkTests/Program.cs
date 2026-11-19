@@ -37,7 +37,6 @@ internal static partial class Program
         ("thumbnailViewportAndCrashRecoveryHidden", ThumbnailViewportAndCrashRecoveryHiddenAsync),
         ("thumbnailLargeFolderScrollHidden", ThumbnailLargeFolderScrollHiddenAsync),
         ("folderInformationTotals", FolderInformationTotalsAsync),
-        ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),
         ("serialFreshnessAndMetadataCache", SerialFreshnessAndMetadataCacheAsync),
         ("videoBulkLookupAndImmediatePlayer", VideoBulkLookupAndImmediatePlayerAsync),
         ("resumedTransfersAndNetworkHidden", ResumedTransfersAndNetworkHiddenAsync),
@@ -190,6 +189,8 @@ internal static partial class Program
         ("autoDetectChoosesSocks5", AutoDetectChoosesSocks5Async),
         ("discordCheckThroughProxySucceeds", DiscordCheckThroughProxySucceedsAsync),
         ("failedProbeReportedAsUnreachable", FailedProbeReportedAsUnreachableAsync),
+        // Constrói e encerra um Application WPF; os testes de WebView ocultos precisam vir antes.
+        ("trayKeepsActiveTransfersHidden", TrayKeepsActiveTransfersHiddenAsync),
         ("syncHeadlessTrayWindowLifecycle", SyncHeadlessTrayWindowLifecycleAsync)
     };
 
@@ -241,9 +242,10 @@ internal static partial class Program
             (!skipMedia || !MediaDependentTests.Contains(test.Name))).ToList();
         foreach (var (name, run) in selected)
         {
+            Console.WriteLine("RUN   " + name);
             try
             {
-                var outcome = await run();
+                var outcome = await RunWithTimeoutAsync(run, name);
                 if (outcome.Ok)
                 {
                     Console.WriteLine("PASS  " + name);
@@ -255,9 +257,14 @@ internal static partial class Program
                     failed++;
                 }
             }
+            catch (HarnessTimeoutException ex)
+            {
+                Console.WriteLine("TIMEOUT " + name + " :: " + ex.Message);
+                failed++;
+            }
             catch (Exception ex)
             {
-                Console.WriteLine("ERROR " + name + " :: " + ex.Message);
+                Console.WriteLine("ERROR " + name + " :: " + ex);
                 failed++;
             }
             finally
@@ -270,6 +277,17 @@ internal static partial class Program
         Console.WriteLine();
         Console.WriteLine($"Total: {selected.Count}  Passou: {passed}  Falhou: {failed}");
         return failed == 0 ? 0 : 1;
+    }
+
+    private sealed class HarnessTimeoutException(string name)
+        : Exception("o teste não terminou em 10 minutos: " + name);
+
+    private static async Task<TestOutcome> RunWithTimeoutAsync(Func<Task<TestOutcome>> run, string name)
+    {
+        var task = run();
+        var completed = await Task.WhenAny(task, Task.Delay(TimeSpan.FromMinutes(10)));
+        if (!ReferenceEquals(completed, task)) throw new HarnessTimeoutException(name);
+        return await task;
     }
 
     private sealed record TestOutcome(bool Ok, string Message)

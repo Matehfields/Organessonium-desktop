@@ -58,6 +58,7 @@ public sealed partial class ForumDownloader
                 _batches.Writer.TryComplete();
             }
             catch (OperationCanceledException error) { _batches.Writer.TryComplete(error); }
+            catch (InvalidDataException error) { _batches.Writer.TryComplete(error); }
             catch (Exception error) { _batches.Writer.TryComplete(new PartDiscoveryException(error)); }
         }
 

@@ -12,6 +12,6 @@
   -->
   <PropertyGroup>
     <OrganessoniumVersion>1.0.0</OrganessoniumVersion>
-    <OrganessoniumBuild>5</OrganessoniumBuild>
+    <OrganessoniumBuild>6</OrganessoniumBuild>
   </PropertyGroup>
 </Project>

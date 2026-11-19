@@ -99,6 +99,7 @@ internal static partial class Program
             await loaded.Task.WaitAsync(TimeSpan.FromSeconds(15));
             await view.ExecuteScriptAsync("window.__organessoniumSettings={language:'pt-BR',theme:'dark',animationsEnabled:false};window.onBridgeReady();window._onDiagnosticStatus(" +
                 JsonSerializer.Serialize(DevelopmentDiagnostics.Status()) + ");document.getElementById('sidebar-settings').click()");
+            await view.ExecuteScriptAsync("document.querySelector('[data-settings-category=\"application\"]').click()");
             RequireSync(await view.ExecuteScriptAsync("document.getElementById('diagnostic-status').textContent.includes('Ativo')&&document.getElementById('diagnostic-directory').textContent.length>0&&document.getElementById('development-diagnostics').getBoundingClientRect().width>0") == "true",
                 "Configurações não mostrou o estado e a pasta do coletor");
             await view.ExecuteScriptAsync("setTimeout(()=>{throw new TypeError('PRIVATE-JAVASCRIPT-TOKEN')},10);setTimeout(()=>Promise.reject(new Error('PRIVATE-PROMISE-TOKEN')),20)");

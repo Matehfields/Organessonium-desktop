@@ -94,6 +94,8 @@ internal static partial class Program
                 "uma alteração em outra pasta recriou a imagem da pasta aberta");
             await view.ExecuteScriptAsync("window._onAppsBatch([{...window.__entries[0],sizeBytes:4096}]);window.__firstCard=document.querySelector('.cards-grid .file-card')");
             await Check("window.__firstCard.querySelector('img')===window.__firstImage", "a atualização do metadata substituiu a miniatura já exibida");
+            await Task.Delay(150);
+            await view.ExecuteScriptAsync("window.__firstCard=document.querySelector('.cards-grid .file-card')");
             await view.ExecuteScriptAsync("window.__firstImageSource=window.__firstImage.getAttribute('src');window.__firstCard.click()");
             for (var shown = 100; shown < fileCount; shown += 100)
             {

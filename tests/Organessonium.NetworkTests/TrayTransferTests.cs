@@ -41,6 +41,14 @@ internal static partial class Program
             var download = downloader.DownloadAndAssembleAsync(existing, h.Directory.CreateSubdirectory("destination"), _ => { });
             await Task.WhenAll(handler.UploadStarted.Task, handler.DownloadStarted.Task).WaitAsync(TimeSpan.FromSeconds(20));
             window.Close();
+            TaskCompletionSource<bool>? closeConfirmation = null;
+            for (var attempt = 0; attempt < 100 && closeConfirmation == null; attempt++)
+            {
+                closeConfirmation = typeof(AppController).GetField("_closeConfirmationResponse", flags)!.GetValue(controller) as TaskCompletionSource<bool>;
+                if (closeConfirmation == null) await Task.Delay(20);
+            }
+            RequireSync(closeConfirmation?.TrySetResult(true) == true,
+                "fechar para a bandeja não pediu confirmação para manter as transferências");
             RequireSync(!window.IsVisible && !closed.Task.IsCompleted &&
                 !(bool)typeof(MainWindow).GetField("_shutdownInProgress", flags)!.GetValue(window)! &&
                 ReferenceEquals(typeof(MainWindow).GetField("_controller", flags)!.GetValue(window), controller),
@@ -61,6 +69,7 @@ internal static partial class Program
         {
             handler.Continue.TrySetResult();
             typeof(App).GetField("_exiting", flags)!.SetValue(app, true);
+            typeof(MainWindow).GetField("_transferCloseApproved", flags)!.SetValue(window, true);
             window.Close();
             await closed.Task.WaitAsync(TimeSpan.FromSeconds(15));
             app.Shutdown();

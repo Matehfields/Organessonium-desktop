@@ -61,7 +61,7 @@ internal static partial class Program
             RequireSync((await registry.LoadCachedFolderAsync("photos", "/Fotos")).Any(entry => entry.Name == "file-2.bin"), "o arquivo concluído não ficou no cache");
             return TestOutcome.Pass();
         }
-        finally { SqliteConnection.ClearAllPools(); root.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { root.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     });
 
     private sealed class BlockFirstPayload(SyncDiscordFixture inner) : HttpMessageHandler

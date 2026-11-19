@@ -150,6 +150,8 @@ internal static partial class Program
                 foreach (var attachment in row.Attachments) planPaths.Add(new Uri(attachment.Url).AbsolutePath);
         }
         RequireSync(planPaths.Count >= 4, "o histórico de teste não contém os anexos técnicos necessários");
+        var snapshotCache = new DirectoryInfo(Path.Combine(h.Store.DataDirectory.FullName, "StorageJournalCache"));
+        if (snapshotCache.Exists) snapshotCache.Delete(true);
         using var gate = new JournalAttachmentGate(h.Server, planPaths);
         using var api = new DiscordApiClient(h.Settings.BotToken, new HttpClient(gate, false));
         var registry = new AppRegistry(api, h.Store, h.Settings);

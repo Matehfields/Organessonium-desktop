@@ -37,10 +37,10 @@ internal static partial class Program
         typeof(AppController).GetField("_registry", flags)!.SetValue(controller, registry);
         typeof(AppController).GetField("_loadedApps", flags)!.SetValue(controller, entries.Append(folder).ToList());
         IReadOnlyList<AppEntry> Visible() => (IReadOnlyList<AppEntry>)typeof(AppController).GetField("_loadedApps", flags)!.GetValue(controller)!;
-        Task Invoke(string method, params object[] args) => (Task)typeof(AppController).GetMethod(method, flags)!.Invoke(controller, args)!;
+        Task Invoke(string method, params object?[] args) => (Task)typeof(AppController).GetMethod(method, flags)!.Invoke(controller, args)!;
         string Ids() => System.Text.Json.JsonSerializer.Serialize(Visible().Where(entry => entry.Type == "file").Select(entry => entry.MetadataMessageId));
         transport.Reset(mappings["destination"].ThreadId);
-        await Invoke("MoveItemsAsync", Ids(), "/Destino");
+        await Invoke("QueueLibraryMutationAsync", LibraryMutationKind.Move, Ids(), "/Destino");
         RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
             Visible().Count(entry => entry.Type == "file" && entry.Path == "/Destino") == 12,
             "mover publicou seriais por item ou perdeu os cards");
@@ -49,7 +49,7 @@ internal static partial class Program
         RequireSync(transport.FilesAtFirstSerial == 1 && transport.SerialWrites <= 2 && Visible().Any(entry => entry.Name == "renamed.bin"),
             "renomear não atualizou o card/serial ao concluir");
         transport.Reset(mappings["trash"].ThreadId);
-        await Invoke("RelocateTrashItemsAsync", Ids(), false);
+        await Invoke("DeleteItemsAsync", Ids(), false);
         RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
             (await registry.LoadFavoritesAsync()).Count == 0 && Visible().Count(entry => entry.ParentFolderId == "trash") == 12,
             "a lixeira publicou índices intermediários ou manteve favorito excluído");
@@ -58,7 +58,7 @@ internal static partial class Program
         RequireSync(withTrash?.FileCount == 12 && cachedWithTrash?.FileCount == 12 && withTrash.TotalBytes == 36,
             "o total do servidor ignorou arquivos ou bytes na lixeira");
         transport.Reset(mappings["destination"].ThreadId);
-        await Invoke("RelocateTrashItemsAsync", Ids(), true);
+        await Invoke("QueueLibraryMutationAsync", LibraryMutationKind.Restore, (object?)null, (object?)null);
         RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
             (await registry.LoadFavoritesAsync()).Count == 1 && Visible().Count(entry => entry.Type == "file" && entry.Path == "/Destino") == 12,
             "restaurar perdeu favoritos ou publicou índices intermediários");
