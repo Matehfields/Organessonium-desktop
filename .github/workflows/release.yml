@@ -67,7 +67,7 @@ jobs:
           $tag = $env:TAG
           $type = (& git cat-file -t "refs/tags/$tag" 2>$null)
           if ($LASTEXITCODE -ne 0 -or $type.Trim() -ne 'tag') {
-            throw "A tag $tag não existe ou não é anotada. Crie com: git tag -a $tag -m \"Organessônium $tag\"."
+            throw "A tag $tag não existe ou não é anotada. Crie com: git tag -a $tag -m 'Organessônium $tag'."
           }
           $version = '${{ steps.version.outputs.version }}'
           if ($tag -ne "v$version") {
