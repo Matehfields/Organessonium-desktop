@@ -171,7 +171,7 @@ internal static partial class Program
             MetadataCheck(custom.Decode(encrypted).Contains("custom"), "integração com chave personalizada falhou");
             return TestOutcome.Pass();
         }
-        finally { SqliteConnection.ClearAllPools(); temporary.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { temporary.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
 
     private static async Task<TestOutcome> MetadataAtomicLegacyUpdateAsync()

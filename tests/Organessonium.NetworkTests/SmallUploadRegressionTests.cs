@@ -118,7 +118,7 @@ internal static partial class Program
                 "o índice não foi fechado ao sair do último escopo");
             return TestOutcome.Pass();
         }
-        finally { SqliteConnection.ClearAllPools(); directory.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { directory.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     });
 
     private sealed class ObservedSmallUploadHandler(HttpMessageHandler inner) : HttpMessageHandler

@@ -152,7 +152,7 @@ internal static partial class Program
             catch (InvalidDataException) { }
             return TestOutcome.Pass();
         }
-        finally { SqliteConnection.ClearAllPools(); directory.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { directory.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
 
     private static async Task<PreparedUploadPart> PrepareGroupedTestPartAsync(DirectoryInfo directory,

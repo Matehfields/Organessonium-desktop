@@ -108,7 +108,7 @@ internal static partial class Program
                 "título do post revelou organização ou nome");
             return TestOutcome.Pass();
         }
-        finally { SqliteConnection.ClearAllPools(); temporary.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { temporary.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
 
     private sealed class SyncDiscordFixture : HttpMessageHandler

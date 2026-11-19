@@ -234,7 +234,7 @@ internal static partial class Program
                 done?.Completed == true && done.ResumeAt(1000) == 0 && store.Load("file-a") == null && store.Load("file-c")?.ResumeAt() == 120
                 ? TestOutcome.Pass() : TestOutcome.Fail("retomada, conclusão, mudança de duração ou exclusão incorreta"));
         }
-        finally { SqliteConnection.ClearAllPools(); root.Delete(true); }
+        finally { SqliteConnection.ClearAllPools(); try { root.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
 
     private static async Task<TestOutcome> VideoEncryptedChunksAndRenewalAsync()
