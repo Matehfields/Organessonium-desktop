@@ -111,7 +111,10 @@ internal static partial class Program
         using var provider = new DiscordVideoChunkProvider(discord, "fixture-thread",
             [new VideoAttachment(0, "fixture-message", "chunk.bin", "https://cdn.invalid/chunk", payload.Length)],
             crypto, context, source.Length, new HttpClient(handler, false));
-        GC.Collect();
+        // A blocking collection keeps the measured baseline stable while the budget is filled.
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         var pressureBytes = AppMemoryBudget.AdmissionBytes - AppMemoryBudget.CommittedBytes() -
             2L * DiscordLimits.AttachmentBytes - 8L * 1024 * 1024;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));

@@ -1263,6 +1263,23 @@ public sealed partial class AppRegistry
         CancellationToken cancellationToken)
     {
         if (DeferFavoritesSerial(additionalEntries)) return;
+        // Serial publications replace the cache and the remote message before the mapping.
+        // Rebuilds must not observe that transient state, so share the publication gate.
+        await _serialSynchronizationGate.WaitAsync(cancellationToken);
+        try
+        {
+            await RebuildFavoritesSerialCoreAsync(additionalEntries, cancellationToken);
+        }
+        finally
+        {
+            _serialSynchronizationGate.Release();
+        }
+    }
+
+    private async Task RebuildFavoritesSerialCoreAsync(
+        IEnumerable<AppEntry> additionalEntries,
+        CancellationToken cancellationToken)
+    {
         var favorites = new Dictionary<string, AppEntry>(StringComparer.OrdinalIgnoreCase);
         var mappings = MappingSnapshot();
         var trashedFolders = await LoadTrashFolderIdsAsync(cancellationToken);
