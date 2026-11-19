@@ -6,10 +6,15 @@ O formato segue os princípios de [Keep a Changelog](https://keepachangelog.com/
 A versão pública segue [Semantic Versioning](https://semver.org/lang/pt-BR/), com um
 número de build independente. A fonte única dos dois valores é `Version.props`.
 
-## [Não lançado]
+## [1.0.0] - 2026-11-19
+
+Primeira versão estável do Organessônium Desktop, com biblioteca armazenada no Discord,
+índice serial por pasta, uploads e downloads retomáveis, prévias de mídia, armazenamento
+compartilhado V2 e sincronização entre dispositivos.
 
 ### Adicionado
 
+- Distribuição em executáveis portáteis e instaladores MSI para x86, x64 e arm64.
 - Infraestrutura de versionamento centralizada em `Version.props` e `Directory.Build.props`,
   com versão pública SemVer e número de build independente.
 - Validação automatizada da estrutura do repositório, da versão e de possíveis segredos.
@@ -51,6 +56,10 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 ### Corrigido
 
+- A reconstrução do serial de favoritos aguarda a publicação de seriais, evitando falhas
+  de autenticação durante atualizações concorrentes de miniaturas.
+- O download de anexos múltiplos preserva o erro original ao encontrar uma parte inválida,
+  em vez de encapsulá-lo.
 - A compilação do projeto de testes não exige mais os ativos de mídia; a verificação do
   runtime FFmpeg ocorre apenas na publicação.
 - Os workflows montam parâmetros nomeados com hashtable; switches como
@@ -70,15 +79,6 @@ número de build independente. A fonte única dos dois valores é `Version.props
   arquivos de mídia não versionados.
 - A compilação de distribuição depende dos ativos `runtime-package.zip` e
   `ffmpeg-corresponding-source.zip`, publicados separadamente em uma release de mídia.
-- A publicação no GitHub depende de configuração manual do ambiente protegido `release`
-  e de autorização explícita do mantenedor.
+- A publicação no GitHub usa o ambiente protegido `release` e exige autorização
+  explícita do mantenedor.
 - O projeto ainda não possui licença de uso e redistribuição definida.
-
-<!--
-Ao publicar a primeira versão estável, renomeie a seção acima para:
-
-## [1.0.0] - AAAA-MM-DD
-
-O workflow de release exige uma seção com a versão exata e rejeita marcadores como
-"Não publicado" ou "A definir". Revise o conteúdo antes de criar a tag.
--->
