@@ -28,11 +28,13 @@ $forbiddenExtensions = @('.pfx', '.p12', '.pem', '.key', '.snk', '.db', '.sqlite
 $patterns = @(
     [pscustomobject]@{ Name = 'chave privada PEM'; Regex = '-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----' },
     [pscustomobject]@{ Name = 'token do GitHub'; Regex = '\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b' },
+    [pscustomobject]@{ Name = 'token do GitLab'; Regex = '\bglpat-[A-Za-z0-9_-]{20,}\b' },
     [pscustomobject]@{ Name = 'webhook do Discord'; Regex = 'https://discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9._-]{30,}' },
-    [pscustomobject]@{ Name = 'possível token do Discord'; Regex = '\b[MN][A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b' },
+    [pscustomobject]@{ Name = 'possível token do Discord'; Regex = '\b[MNO][A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b' },
+    [pscustomobject]@{ Name = 'possível token MFA do Discord'; Regex = '\bmfa\.[A-Za-z0-9_-]{60,}\b' },
     [pscustomobject]@{ Name = 'token do Slack'; Regex = '\bxox[baprs]-[A-Za-z0-9-]{10,}\b' },
     [pscustomobject]@{ Name = 'chave de API do Google'; Regex = '\bAIza[0-9A-Za-z_-]{35}\b' },
-    [pscustomobject]@{ Name = 'chave de acesso da AWS'; Regex = '\bAKIA[0-9A-Z]{16}\b' },
+    [pscustomobject]@{ Name = 'chave de acesso da AWS'; Regex = '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b' },
     [pscustomobject]@{ Name = 'caminho absoluto de usuário'; Regex = '[A-Za-z]:\\Users\\[^\\\s"'']+' }
 )
 

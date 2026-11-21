@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.IO;
@@ -17,12 +18,37 @@ internal static class EncryptionSettingKeys
     public const string KdfIterations = "customEncryptionKdfIterationsV1";
 }
 
+public enum CustomKeyImportKind
+{
+    PasswordProtected,
+    Legacy
+}
+
+public sealed class RecoveryPasswordRequiredException : InvalidOperationException
+{
+    public RecoveryPasswordRequiredException()
+        : base("Informe a senha do arquivo de recuperação.")
+    {
+    }
+}
+
 public sealed class CustomEncryptionKeyProvider
 {
     private const int PasswordIterations = 600_000;
     private const int MasterKeyBytes = 32;
+    private const int RecoverySaltBytes = 16;
+    private const int RecoveryNonceBytes = 12;
+    private const int RecoveryTagBytes = 16;
+    private const int MaximumRecoveryPasswordCharacters = 1024;
+    private const uint MinimumRecoveryIterations = 100_000;
+    private const uint MaximumRecoveryIterations = 2_000_000;
+    private const int MaximumRecoveryFileBytes = 4096;
+    private const int ProtectedHeaderBytes = 25;
+    private const int ProtectedFileBytes = ProtectedHeaderBytes + RecoveryNonceBytes + MasterKeyBytes + RecoveryTagBytes;
+    private const int LegacyFileBytes = 6 + MasterKeyBytes + 32;
     private static readonly byte[] ProtectionEntropy = Encoding.UTF8.GetBytes("Organessonium/custom-master/v1");
-    private static readonly byte[] RecoveryMagic = "OEK1"u8.ToArray();
+    private static readonly byte[] LegacyRecoveryMagic = "OEK1"u8.ToArray();
+    private static readonly byte[] ProtectedRecoveryMagic = "OEK2"u8.ToArray();
     private byte[]? _masterKey;
     private readonly IEncryptionSecretStore _store;
 
@@ -50,13 +76,31 @@ public sealed class CustomEncryptionKeyProvider
         }
 
         var salt = RandomNumberGenerator.GetBytes(16);
-        var masterKey = Rfc2898DeriveBytes.Pbkdf2(
-            Encoding.UTF8.GetBytes(passphrase),
-            salt,
-            PasswordIterations,
-            HashAlgorithmName.SHA256,
-            MasterKeyBytes);
-        StoreMasterKey(masterKey, salt, PasswordIterations);
+        var passphraseBytes = Encoding.UTF8.GetBytes(passphrase);
+        byte[] masterKey;
+        try
+        {
+            masterKey = Rfc2898DeriveBytes.Pbkdf2(
+                passphraseBytes,
+                salt,
+                PasswordIterations,
+                HashAlgorithmName.SHA256,
+                MasterKeyBytes);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(passphraseBytes);
+        }
+
+        try
+        {
+            StoreMasterKey(masterKey, salt, PasswordIterations);
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(masterKey);
+            throw;
+        }
     }
 
     public byte[] GetMasterKey()
@@ -95,39 +139,207 @@ public sealed class CustomEncryptionKeyProvider
         }
     }
 
-    public async Task ExportAsync(string path, CancellationToken cancellationToken = default)
+    public static void ValidateRecoveryPassword(string? password)
     {
-        var masterKey = GetMasterKey();
-        var body = new byte[RecoveryMagic.Length + 2 + MasterKeyBytes];
-        RecoveryMagic.CopyTo(body, 0);
-        body[4] = 1;
-        body[5] = MasterKeyBytes;
-        masterKey.CopyTo(body, 6);
-        var tag = HMACSHA256.HashData(masterKey, body);
-        var payload = new byte[body.Length + tag.Length];
-        body.CopyTo(payload, 0);
-        tag.CopyTo(payload, body.Length);
-        await File.WriteAllBytesAsync(path, payload, cancellationToken);
-        CryptographicOperations.ZeroMemory(tag);
-        CryptographicOperations.ZeroMemory(body);
+        if (string.IsNullOrWhiteSpace(password) || password.Length < 8)
+        {
+            throw new InvalidOperationException("A senha de recuperação deve ter pelo menos 8 caracteres.");
+        }
+
+        if (password.Length > MaximumRecoveryPasswordCharacters)
+        {
+            throw new InvalidOperationException("A senha de recuperação é longa demais.");
+        }
     }
 
-    public async Task ImportAsync(string path, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Grava a chave mestra em um envelope autenticado protegido por senha. O
+    /// arquivo antigo sem senha não é mais produzido.
+    /// </summary>
+    public async Task ExportAsync(string path, string password, CancellationToken cancellationToken = default)
     {
-        var payload = await File.ReadAllBytesAsync(path, cancellationToken);
-        var expectedLength = RecoveryMagic.Length + 2 + MasterKeyBytes + 32;
-        if (payload.Length != expectedLength ||
-            !payload.AsSpan(0, RecoveryMagic.Length).SequenceEqual(RecoveryMagic) ||
-            payload[4] != 1 ||
-            payload[5] != MasterKeyBytes)
+        ValidateRecoveryPassword(password);
+
+        var masterKey = GetMasterKey();
+        var header = new byte[ProtectedHeaderBytes];
+        ProtectedRecoveryMagic.CopyTo(header, 0);
+        header[4] = 1;
+        BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(5, 4), PasswordIterations);
+        var salt = RandomNumberGenerator.GetBytes(RecoverySaltBytes);
+        salt.CopyTo(header, 9);
+
+        var nonce = RandomNumberGenerator.GetBytes(RecoveryNonceBytes);
+        var ciphertext = new byte[MasterKeyBytes];
+        var tag = new byte[RecoveryTagBytes];
+        var passwordBytes = Encoding.UTF8.GetBytes(password);
+        var derivedKey = Array.Empty<byte>();
+        var payload = new byte[ProtectedFileBytes];
+        string? temporaryPath = null;
+        try
+        {
+            derivedKey = Rfc2898DeriveBytes.Pbkdf2(
+                passwordBytes,
+                salt,
+                PasswordIterations,
+                HashAlgorithmName.SHA256,
+                MasterKeyBytes);
+            using (var aes = new AesGcm(derivedKey, RecoveryTagBytes))
+            {
+                aes.Encrypt(nonce, masterKey, ciphertext, tag, header);
+            }
+
+            header.CopyTo(payload, 0);
+            nonce.CopyTo(payload, ProtectedHeaderBytes);
+            ciphertext.CopyTo(payload, ProtectedHeaderBytes + RecoveryNonceBytes);
+            tag.CopyTo(payload, ProtectedHeaderBytes + RecoveryNonceBytes + MasterKeyBytes);
+
+            var directory = Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".";
+            temporaryPath = Path.Combine(directory, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            await File.WriteAllBytesAsync(temporaryPath, payload, cancellationToken);
+            File.Move(temporaryPath, path, overwrite: true);
+            temporaryPath = null;
+        }
+        finally
+        {
+            if (temporaryPath != null)
+            {
+                try { File.Delete(temporaryPath); } catch { }
+            }
+
+            CryptographicOperations.ZeroMemory(passwordBytes);
+            CryptographicOperations.ZeroMemory(derivedKey);
+            CryptographicOperations.ZeroMemory(ciphertext);
+            CryptographicOperations.ZeroMemory(tag);
+            CryptographicOperations.ZeroMemory(salt);
+            CryptographicOperations.ZeroMemory(nonce);
+            CryptographicOperations.ZeroMemory(payload);
+        }
+    }
+
+    /// <summary>
+    /// Importa o formato autenticado com senha ou, somente para compatibilidade,
+    /// o formato legado OEK1 que não possui proteção por senha.
+    /// </summary>
+    public async Task<CustomKeyImportKind> ImportAsync(string path, string? password, CancellationToken cancellationToken = default)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var length = stream.Length;
+        if (length > MaximumRecoveryFileBytes)
         {
             throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
         }
 
-        var masterKey = payload.AsSpan(6, MasterKeyBytes).ToArray();
-        var body = payload.AsSpan(0, RecoveryMagic.Length + 2 + MasterKeyBytes);
+        var payload = new byte[(int)length];
+        await stream.ReadExactlyAsync(payload, cancellationToken);
+        try
+        {
+            if (payload.Length > MaximumRecoveryFileBytes)
+            {
+                throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
+            }
+
+            if (payload.AsSpan().StartsWith(ProtectedRecoveryMagic))
+            {
+                ImportProtected(payload, password);
+                return CustomKeyImportKind.PasswordProtected;
+            }
+
+            if (payload.AsSpan().StartsWith(LegacyRecoveryMagic))
+            {
+                ImportLegacy(payload);
+                return CustomKeyImportKind.Legacy;
+            }
+
+            throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(payload);
+        }
+    }
+
+    private void ImportProtected(ReadOnlySpan<byte> payload, string? password)
+    {
+        if (payload.Length != ProtectedFileBytes || payload[4] != 1)
+        {
+            throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
+        }
+
+        var iterations = BinaryPrimitives.ReadUInt32BigEndian(payload.Slice(5, 4));
+        if (iterations < MinimumRecoveryIterations || iterations > MaximumRecoveryIterations)
+        {
+            throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
+        }
+
+        if (string.IsNullOrEmpty(password))
+        {
+            throw new RecoveryPasswordRequiredException();
+        }
+
+        if (password.Length > MaximumRecoveryPasswordCharacters)
+        {
+            throw new InvalidOperationException("A senha de recuperação é longa demais.");
+        }
+
+        var header = payload.Slice(0, ProtectedHeaderBytes);
+        var nonce = payload.Slice(ProtectedHeaderBytes, RecoveryNonceBytes);
+        var ciphertext = payload.Slice(ProtectedHeaderBytes + RecoveryNonceBytes, MasterKeyBytes);
+        var tag = payload.Slice(ProtectedHeaderBytes + RecoveryNonceBytes + MasterKeyBytes, RecoveryTagBytes);
+        var passwordBytes = Encoding.UTF8.GetBytes(password);
+        var derivedKey = Array.Empty<byte>();
+        var masterKey = new byte[MasterKeyBytes];
+        try
+        {
+            try
+            {
+                derivedKey = Rfc2898DeriveBytes.Pbkdf2(
+                    passwordBytes,
+                    header.Slice(9, RecoverySaltBytes),
+                    (int)iterations,
+                    HashAlgorithmName.SHA256,
+                    MasterKeyBytes);
+
+                using (var aes = new AesGcm(derivedKey, RecoveryTagBytes))
+                {
+                    aes.Decrypt(nonce, ciphertext, tag, masterKey, header);
+                }
+            }
+            catch (CryptographicException)
+            {
+                throw new InvalidOperationException("Senha incorreta ou arquivo de recuperação adulterado.");
+            }
+
+            StoreMasterKey(masterKey, RandomNumberGenerator.GetBytes(16), 0);
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(masterKey);
+            throw;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(passwordBytes);
+            CryptographicOperations.ZeroMemory(derivedKey);
+        }
+    }
+
+    private void ImportLegacy(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length != LegacyFileBytes || payload[4] != 1 || payload[5] != MasterKeyBytes)
+        {
+            throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
+        }
+
+        var masterKey = payload.Slice(6, MasterKeyBytes).ToArray();
+        var body = payload.Slice(0, 6 + MasterKeyBytes);
         var expectedTag = HMACSHA256.HashData(masterKey, body);
-        var suppliedTag = payload.AsSpan(body.Length, expectedTag.Length);
+        var suppliedTag = payload.Slice(6 + MasterKeyBytes, expectedTag.Length);
         if (!CryptographicOperations.FixedTimeEquals(expectedTag, suppliedTag))
         {
             CryptographicOperations.ZeroMemory(masterKey);
@@ -136,7 +348,15 @@ public sealed class CustomEncryptionKeyProvider
         }
 
         CryptographicOperations.ZeroMemory(expectedTag);
-        StoreMasterKey(masterKey, RandomNumberGenerator.GetBytes(16), 0);
+        try
+        {
+            StoreMasterKey(masterKey, RandomNumberGenerator.GetBytes(16), 0);
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(masterKey);
+            throw;
+        }
     }
 
     private void StoreMasterKey(byte[] masterKey, byte[] kdfSalt, int iterations)
@@ -148,17 +368,22 @@ public sealed class CustomEncryptionKeyProvider
         }
 
         var protectedBytes = ProtectedData.Protect(masterKey, ProtectionEntropy, DataProtectionScope.CurrentUser);
-        _store.WriteEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey, Convert.ToBase64String(protectedBytes));
-        _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfSalt, Convert.ToBase64String(kdfSalt));
-        _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfIterations, iterations.ToString(System.Globalization.CultureInfo.InvariantCulture));
-
-        if (_masterKey != null)
+        try
         {
-            CryptographicOperations.ZeroMemory(_masterKey);
-        }
+            _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfSalt, Convert.ToBase64String(kdfSalt));
+            _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfIterations, iterations.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            _store.WriteEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey, Convert.ToBase64String(protectedBytes));
 
-        _masterKey = masterKey;
-        CryptographicOperations.ZeroMemory(protectedBytes);
+            if (_masterKey != null)
+            {
+                CryptographicOperations.ZeroMemory(_masterKey);
+            }
+            _masterKey = masterKey;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(protectedBytes);
+        }
     }
 }
 

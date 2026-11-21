@@ -211,16 +211,25 @@ internal static partial class Program
             await Check("!document.getElementById('setup-encryption-custom-fields').classList.contains('hidden')&&window.__connectRequests.length===0&&document.getElementById('setup-security-error').textContent.includes('chave')", "a configuração deixou conectar sem a chave personalizada");
             await view.ExecuteScriptAsync("document.getElementById('setup-encryption-import').click();window._onSetupEncryptionIdle()");
             await Check("window.__keyRequests[0]==='import'&&!document.getElementById('setup-encryption-import').disabled", "a importação não está acessível antes de conectar");
+            await view.ExecuteScriptAsync("""
+                window.__recoveryReplies=[];window.bridge.provideRecoveryPassword=(...args)=>window.__recoveryReplies.push(args);
+                window._onRecoveryPasswordRequired('setup-recovery-request');document.getElementById('setup-recovery-confirm').click();
+                """);
+            await Check("!document.getElementById('setup-recovery-overlay').classList.contains('hidden')&&document.getElementById('setup-recovery-error').textContent.length>0&&window.__recoveryReplies.length===0", "a tela inicial aceitou a senha de recuperação vazia");
+            await view.ExecuteScriptAsync("document.getElementById('setup-recovery-password').value='setup-recovery-fixture';document.getElementById('setup-recovery-confirm').click()");
+            await Check("document.getElementById('setup-recovery-overlay').classList.contains('hidden')&&document.getElementById('setup-recovery-password').value===''&&window.__recoveryReplies[0][0]==='setup-recovery-request'&&window.__recoveryReplies[0][1]==='setup-recovery-fixture'", "a tela inicial não entregou a senha de recuperação e limpou o campo");
+            await view.ExecuteScriptAsync("window._onRecoveryPasswordRequired('setup-cancel-request');document.getElementById('setup-recovery-cancel').click()");
+            await Check("window.__recoveryReplies[1][0]==='setup-cancel-request'&&window.__recoveryReplies[1][1]===null", "o cancelamento da recuperação na tela inicial não foi informado");
             await view.ExecuteScriptAsync("document.getElementById('setup-key-password').value='setup-fixture-passphrase';document.getElementById('setup-key-confirm').value='setup-fixture-passphrase';document.getElementById('setup-key-acknowledge').checked=true;document.getElementById('setup-key-create').click()");
             for (var attempt = 0; attempt < 100 && await view.ExecuteScriptAsync("setupCustomKeyAvailable&&!setupEncryptionBusy") != "true"; attempt++) await Task.Delay(50);
             await Check("setupCustomKeyAvailable&&!setupEncryptionBusy&&document.getElementById('setup-encryption-status').textContent.includes('disponível')&&document.getElementById('setup-key-password').value==='';", "a chave criada antes da conexão não ficou disponível na tela inicial");
             RequireSync(!setupController.HasSession && keyStore.Load().EncryptionMode == "custom", "a criação da chave dependeu de uma sessão conectada");
             var sourceCrypto = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(keyStore));
             var recovery = Path.Combine(root.FullName, "fixture.organessonium-key");
-            await sourceCrypto.ExportCustomKeyAsync(recovery);
+            await sourceCrypto.ExportCustomKeyAsync(recovery, "setup-recovery-password");
             var restoredStore = new SettingsStore(root.CreateSubdirectory("restored-key-data"));
             var restoredCrypto = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(restoredStore));
-            await restoredCrypto.ImportCustomKeyAsync(recovery);
+            await restoredCrypto.ImportCustomKeyAsync(recovery, "setup-recovery-password");
             var context = new EncryptedPayloadContext("setup-recovery", sourceCrypto.CreateFileEncryption("custom"), EncryptedPayloadRoles.Original, 0, 1);
             RequireSync(restoredCrypto.DecryptBytes(sourceCrypto.EncryptBytes([1, 2, 3], context), context).SequenceEqual(new byte[] { 1, 2, 3 }), "a chave importada antes da conexão não abriu os arquivos existentes");
             await view.ExecuteScriptAsync("btnConnect.click()");
@@ -231,6 +240,21 @@ internal static partial class Program
             await using (var capture = File.Create(Path.Combine(setupCaptures.FullName, "setup-encryption.png")))
                 await view.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
             await Navigate("index.html");
+            await view.ExecuteScriptAsync("""
+                window.__organessoniumSettings={previewEnabled:true};window.onBridgeReady();
+                window.__recoveryExports=[];window.__recoveryReplies=[];
+                window.bridge.exportCustomEncryptionKey=password=>window.__recoveryExports.push(password);
+                window.bridge.provideRecoveryPassword=(...args)=>window.__recoveryReplies.push(args);
+                openRecoveryPasswordDialog('export');
+                document.getElementById('recovery-password-input').value='recovery-fixture';
+                document.getElementById('recovery-password-confirm').value='different-fixture';
+                document.getElementById('recovery-password-confirm-btn').click();
+                """);
+            await Check("!document.getElementById('recovery-password-overlay').classList.contains('hidden')&&document.getElementById('recovery-password-message').textContent.includes('Android')&&document.getElementById('recovery-password-error').textContent.length>0&&window.__recoveryExports.length===0", "a exportação não avisou sobre Android ou aceitou confirmação de senha diferente");
+            await view.ExecuteScriptAsync("document.getElementById('recovery-password-confirm').value='recovery-fixture';document.getElementById('recovery-password-confirm-btn').click()");
+            await Check("document.getElementById('recovery-password-overlay').classList.contains('hidden')&&document.getElementById('recovery-password-input').value===''&&document.getElementById('recovery-password-confirm').value===''&&window.__recoveryExports[0]==='recovery-fixture'", "a exportação não entregou a senha ou não limpou os campos");
+            await view.ExecuteScriptAsync("window._onRecoveryPasswordRequired('app-cancel-request');document.getElementById('recovery-password-cancel').click()");
+            await Check("window.__recoveryReplies[0][0]==='app-cancel-request'&&window.__recoveryReplies[0][1]===null", "o cancelamento da recuperação no aplicativo não foi informado");
             var store = new SettingsStore(root.CreateSubdirectory("data"));
             var file = store.GetPreviewCacheFile("photo", "full", "photo.png");
             var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jBzEAAAAASUVORK5CYII=");

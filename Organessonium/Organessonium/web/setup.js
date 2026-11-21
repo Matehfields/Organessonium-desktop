@@ -36,6 +36,8 @@ const SETUP_I18N = {
         token:'Token do Bot',
         toggle:'Mostrar/ocultar',
         tokenHint:'Developer Portal → Seu App → Bot → Reset Token',
+        tokenSavedPlaceholder:'Token salvo. Deixe em branco para manter.',
+        tokenSavedHint:'Um token já está salvo neste dispositivo. Deixe o campo vazio para continuar usando-o.',
         customNames:'Usar nomes diferentes para os canais',
         useIds:'Configurar pelos IDs dos canais',
         names:'Canal de índice names',
@@ -85,6 +87,7 @@ const SETUP_I18N = {
         ,proxyAuth:'Requer autenticação (usuário e senha)'
         ,proxyUser:'Usuário'
         ,proxyPass:'Senha'
+        ,proxyPasswordSaved:'Senha salva. Deixe em branco para manter.'
         ,proxyTest:'Testar conexão com o proxy'
         ,proxyTesting:'Testando conexão com o proxy...'
         ,proxyTestSuccess:'Conectado com sucesso.'
@@ -97,6 +100,8 @@ const SETUP_I18N = {
         token:'Bot Token',
         toggle:'Show/hide',
         tokenHint:'Developer Portal → Your App → Bot → Reset Token',
+        tokenSavedPlaceholder:'Token saved. Leave blank to keep it.',
+        tokenSavedHint:'A token is already saved on this device. Leave the field empty to keep using it.',
         customNames:'Use different channel names',
         useIds:'Configure using channel IDs',
         names:'Index channel names',
@@ -146,6 +151,7 @@ const SETUP_I18N = {
         ,proxyAuth:'Requires authentication (username and password)'
         ,proxyUser:'Username'
         ,proxyPass:'Password'
+        ,proxyPasswordSaved:'Password saved. Leave blank to keep it.'
         ,proxyTest:'Test proxy connection'
         ,proxyTesting:'Testing proxy connection...'
         ,proxyTestSuccess:'Connected successfully.'
@@ -164,7 +170,10 @@ Object.assign(SETUP_I18N['pt-BR'], {
     encryptionReady:'Chave disponível neste dispositivo. A biblioteca pode ser aberta.',
     encryptionRequired:'Importe ou crie uma chave personalizada antes de conectar.',
     encryptionPasswordRequired:'Informe e confirme a senha da nova chave.', encryptionPasswordMismatch:'As senhas não coincidem.',
-    encryptionAckRequired:'Confirme que vai guardar a chave de recuperação.', encryptionBusy:'Preparando a chave...'
+    encryptionAckRequired:'Confirme que vai guardar a chave de recuperação.', encryptionBusy:'Preparando a chave...',
+    recoveryPasswordTitle:'Senha do arquivo de recuperação', recoveryPasswordMessage:'Digite a senha usada quando este arquivo foi exportado.',
+    recoveryPasswordLabel:'Senha', recoveryPasswordRequired:'Informe a senha.', recoveryPasswordAction:'Continuar', recoveryPasswordCancel:'Cancelar',
+    recoveryLegacyImported:'Chave de recuperação antiga importada. Exporte um novo arquivo protegido por senha assim que possível.'
 });
 Object.assign(SETUP_I18N.en, {
     encryptionTitle:'Library protection', encryptionDescription:'Set up your key before opening your files.',
@@ -176,7 +185,10 @@ Object.assign(SETUP_I18N.en, {
     encryptionReady:'Key available on this device. You can open the library.',
     encryptionRequired:'Import or create a custom key before connecting.',
     encryptionPasswordRequired:'Enter and confirm the new key password.', encryptionPasswordMismatch:'Passwords do not match.',
-    encryptionAckRequired:'Confirm that you will keep the recovery key.', encryptionBusy:'Preparing key...'
+    encryptionAckRequired:'Confirm that you will keep the recovery key.', encryptionBusy:'Preparing key...',
+    recoveryPasswordTitle:'Recovery file password', recoveryPasswordMessage:'Enter the password used when this file was exported.',
+    recoveryPasswordLabel:'Password', recoveryPasswordRequired:'Enter the password.', recoveryPasswordAction:'Continue', recoveryPasswordCancel:'Cancel',
+    recoveryLegacyImported:'Legacy recovery key imported. Export a new password-protected file as soon as possible.'
 });
 
 Object.assign(SETUP_I18N['pt-BR'], {
@@ -191,7 +203,9 @@ Object.assign(SETUP_I18N.en, {
     securitySubtitle:'Choose how your library data is protected.',
     connectionSubtitle:'Check the connection and continue to your library.',connectionError:'Could not complete the connection.'
 });
-let setupEncryptionMode = 'standard', setupCustomKeyAvailable = false, setupEncryptionBusy = false, setupEncryptionError = '';
+let setupEncryptionMode = 'standard', setupCustomKeyAvailable = false, setupEncryptionBusy = false, setupEncryptionError = '', setupEncryptionNotice = '';
+let setupRecoveryRequestId = '';
+let setupTokenConfigured = false, setupProxyPasswordDirty = false;
 let setupStep = 'token', setupConnectionBusy = false;
 let setupLanguage = systemLanguage();
 let channelInputMode = 'auto';
@@ -238,7 +252,7 @@ function showSetupStep(step) {
 
 function advanceSetup() {
     if (setupConnectionBusy || setupEncryptionBusy) return;
-    if (!inpToken.value.trim()) { showErr(setupText('tokenRequired')); inpToken.focus(); return; }
+    if (!inpToken.value.trim() && !setupTokenConfigured) { showErr(setupText('tokenRequired')); inpToken.focus(); return; }
     document.getElementById('setup-token-error').classList.add('hidden');
     showSetupStep('security');
 }
@@ -274,7 +288,7 @@ function applySetupPreferences() {
     labels[2].innerHTML = setupText('folders').replace('folders', '<code>folders</code>');
     labels[3].innerHTML = setupText('forum').replace('files', '<code>files</code>');
     labels[4].innerHTML = setupText('serial').replace('serial', '<code>serial</code>');
-    hints[0].textContent = setupText('tokenHint');
+    hints[0].textContent = setupText(setupTokenConfigured ? 'tokenSavedHint' : 'tokenHint');
     hints[1].textContent = setupText('namesHint');
     hints[2].textContent = setupText('foldersHint');
     hints[3].textContent = setupText('forumHint');
@@ -394,12 +408,16 @@ function renderSetupIcons() {
 
 function prefillSetupFields(saved) {
     if (setupPrefilled || !saved) return;
-    const token = typeof saved.botToken === 'string' ? saved.botToken : '';
+    setupTokenConfigured = saved.botTokenConfigured === true;
     const namesId = typeof saved.namesChannelId === 'string' ? saved.namesChannelId : '';
     const foldersId = typeof saved.foldersForumId === 'string' ? saved.foldersForumId : '';
     const forumId = typeof saved.appsForumId === 'string' ? saved.appsForumId : '';
     const serialId = typeof saved.serialChannelId === 'string' ? saved.serialChannelId : '';
-    if (token && !inpToken.value) inpToken.value = token;
+    if (setupTokenConfigured) {
+        inpToken.placeholder = setupText('tokenSavedPlaceholder');
+        const hint = document.querySelector('#setup-token-step > .field > .hint');
+        if (hint) hint.textContent = setupText('tokenSavedHint');
+    }
     if (namesId || foldersId || forumId || serialId) {
         channelInputMode = 'ids';
         inpNames.value = namesId;
@@ -411,7 +429,7 @@ function prefillSetupFields(saved) {
         setupPrefilled = true;
         return;
     }
-    if (token) setupPrefilled = true;
+    if (setupTokenConfigured) setupPrefilled = true;
 }
 
 function prefillProxyFields(proxy) {
@@ -425,8 +443,10 @@ function prefillProxyFields(proxy) {
     if (proxy.proxyAuthenticationEnabled === true) {
         chkProxyAuth.checked = true;
         if (typeof proxy.proxyUsername === 'string' && proxy.proxyUsername) inpProxyUser.value = proxy.proxyUsername;
-        if (typeof proxy.proxyPassword === 'string' && proxy.proxyPassword) inpProxyPass.value = proxy.proxyPassword;
     }
+    inpProxyPass.value = '';
+    setupProxyPasswordDirty = false;
+    inpProxyPass.placeholder = proxy.proxyPasswordConfigured === true ? setupText('proxyPasswordSaved') : '';
     applyProxyFieldsVisibility();
 }
 
@@ -444,7 +464,7 @@ function collectProxySettings() {
         proxyProtocol: selProxyProtocol.value,
         proxyAuthenticationEnabled: chkProxyAuth.checked,
         proxyUsername: chkProxyAuth.checked ? inpProxyUser.value : '',
-        proxyPassword: chkProxyAuth.checked ? inpProxyPass.value : ''
+        proxyPassword: !chkProxyAuth.checked ? '' : setupProxyPasswordDirty ? inpProxyPass.value : null
     };
     return proxy;
 }
@@ -528,6 +548,7 @@ document.addEventListener('keydown', e => {
 
 selProxyMode.addEventListener('change', applyProxyFieldsVisibility);
 chkProxyAuth.addEventListener('change', applyProxyFieldsVisibility);
+inpProxyPass.addEventListener('change', () => { setupProxyPasswordDirty = true; });
 
 btnTestProxy.addEventListener('click', () => {
     const proxy = collectProxySettings();
@@ -568,7 +589,7 @@ function tryConnect(allowCreate) {
     const folders = channelInputMode === 'auto' ? 'folders' : inpFolders.value.trim();
     const forum  = channelInputMode === 'auto' ? 'files' : inpForum.value.trim();
     const serial = channelInputMode === 'auto' ? 'serial' : inpSerial.value.trim();
-if (!token)  { showErr(setupText('tokenRequired')); return; }
+if (!token && !setupTokenConfigured) { showErr(setupText('tokenRequired')); return; }
     if (channelInputMode === 'ids') {
         if (!names || !folders || !forum || !serial) { showErr(setupText('idsRequired')); return; }
         if (!/^\d{16,22}$/.test(names) || !/^\d{16,22}$/.test(folders) || !/^\d{16,22}$/.test(forum) || !/^\d{16,22}$/.test(serial)) { showErr(setupText('invalidIds')); return; }
@@ -632,7 +653,7 @@ function renderSetupEncryption() {
     btnConnect.disabled=setupEncryptionBusy || setupConnectionBusy;
     const status=document.getElementById('setup-encryption-status');
     status.classList.toggle('error',!!setupEncryptionError);
-    status.textContent=setupEncryptionError || (setupEncryptionBusy ? setupText('encryptionBusy') : setupText(setupCustomKeyAvailable?'encryptionReady':'encryptionRequired'));
+    status.textContent=setupEncryptionError || setupEncryptionNotice || (setupEncryptionBusy ? setupText('encryptionBusy') : setupText(setupCustomKeyAvailable?'encryptionReady':'encryptionRequired'));
 }
 
 window._onEncryptionSettingsChanged=(mode,available)=>{
@@ -642,13 +663,56 @@ window._onEncryptionSettingsChanged=(mode,available)=>{
     document.getElementById('setup-encryption-create').open=false;
     renderSetupEncryption();
 };
-window._onSetupEncryptionError=message=>{setupEncryptionError=message;renderSetupEncryption();};
+window._onSetupEncryptionError=message=>{setupEncryptionError=message;setupEncryptionNotice='';renderSetupEncryption();};
 window._onSetupEncryptionIdle=()=>{setupEncryptionBusy=false;renderSetupEncryption();};
+window._onEncryptionKeyImported=legacy=>{
+    if(legacy===true){setupEncryptionNotice=setupText('recoveryLegacyImported');setupEncryptionError='';renderSetupEncryption();}
+};
+window._onRecoveryPasswordRequired=requestId=>{
+    if(typeof requestId==='string' && requestId) openSetupRecoveryDialog(requestId);
+};
+function openSetupRecoveryDialog(requestId){
+    setupRecoveryRequestId=requestId;
+    document.getElementById('setup-recovery-title').textContent=setupText('recoveryPasswordTitle');
+    document.getElementById('setup-recovery-message').textContent=setupText('recoveryPasswordMessage');
+    document.getElementById('setup-recovery-label').textContent=setupText('recoveryPasswordLabel');
+    document.getElementById('setup-recovery-confirm').textContent=setupText('recoveryPasswordAction');
+    document.getElementById('setup-recovery-cancel').textContent=setupText('recoveryPasswordCancel');
+    document.getElementById('setup-recovery-error').textContent='';
+    document.getElementById('setup-recovery-password').value='';
+    document.getElementById('setup-recovery-overlay').classList.remove('hidden');
+    setTimeout(()=>document.getElementById('setup-recovery-password').focus(),30);
+}
+function closeSetupRecoveryDialog(cancelled){
+    const requestId=setupRecoveryRequestId;
+    setupRecoveryRequestId='';
+    document.getElementById('setup-recovery-overlay').classList.add('hidden');
+    document.getElementById('setup-recovery-password').value='';
+    document.getElementById('setup-recovery-error').textContent='';
+    if(cancelled && requestId && window.bridge && window.bridge.provideRecoveryPassword)
+        window.bridge.provideRecoveryPassword(requestId,null);
+}
+function confirmSetupRecoveryDialog(){
+    const password=document.getElementById('setup-recovery-password').value;
+    if(!password){document.getElementById('setup-recovery-error').textContent=setupText('recoveryPasswordRequired');document.getElementById('setup-recovery-password').focus();return;}
+    const requestId=setupRecoveryRequestId;
+    closeSetupRecoveryDialog(false);
+    if(requestId) window.bridge.provideRecoveryPassword(requestId,password);
+}
+document.getElementById('setup-recovery-confirm').addEventListener('click',confirmSetupRecoveryDialog);
+document.getElementById('setup-recovery-cancel').addEventListener('click',()=>closeSetupRecoveryDialog(true));
+document.getElementById('setup-recovery-overlay').addEventListener('click',e=>{
+    if(e.target.id==='setup-recovery-overlay') closeSetupRecoveryDialog(true);
+});
+document.getElementById('setup-recovery-password').addEventListener('keydown',e=>{
+    if(e.key==='Enter') confirmSetupRecoveryDialog();
+    if(e.key==='Escape') closeSetupRecoveryDialog(true);
+});
 ['standard','custom'].forEach(mode=>document.getElementById('setup-encryption-'+mode).addEventListener('click',()=>{
-    setupEncryptionMode=mode;setupEncryptionError='';renderSetupEncryption();
+    setupEncryptionMode=mode;setupEncryptionError='';setupEncryptionNotice='';renderSetupEncryption();
 }));
 document.getElementById('setup-encryption-import').addEventListener('click',()=>{
-    setupEncryptionBusy=true;setupEncryptionError='';renderSetupEncryption();window.bridge.setupEncryption('import');
+    setupEncryptionBusy=true;setupEncryptionError='';setupEncryptionNotice='';renderSetupEncryption();window.bridge.setupEncryption('import');
 });
 document.getElementById('setup-key-create').addEventListener('click',()=>{
     const password=document.getElementById('setup-key-password').value;

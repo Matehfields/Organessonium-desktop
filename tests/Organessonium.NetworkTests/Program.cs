@@ -129,6 +129,16 @@ internal static partial class Program
         ("encryptedPreviewAndVideoPayloads", EncryptedPreviewAndVideoPayloadsAsync),
         ("urlSafeEncryptionSaltCompatibility", UrlSafeEncryptionSaltCompatibilityAsync),
         ("customKeyExportImportAndMismatch", CustomKeyExportImportAndMismatchAsync),
+        ("webAppSettingsNeverExposeSecrets", WebAppSettingsNeverExposeSecretsAsync),
+        ("discordErrorDoesNotExposeResponse", DiscordErrorDoesNotExposeResponseAsync),
+        ("discordAuthorizationStaysOnApi", DiscordAuthorizationStaysOnApiAsync),
+        ("securePdfPreviewHidden", SecurePdfPreviewHiddenAsync),
+        ("settingsStoreProtectsCredentials", SettingsStoreProtectsCredentialsAsync),
+        ("iniMigrationPreservesUnavailableCredential", IniMigrationPreservesUnavailableCredentialAsync),
+        ("webMessagePolicyRejectsUntrustedMessages", WebMessagePolicyRejectsUntrustedMessagesAsync),
+        ("externalLinkPolicyRestrictsSchemes", ExternalLinkPolicyRestrictsSchemesAsync),
+        ("proxyPasswordPreservation", ProxyPasswordPreservationAsync),
+        ("customKeyRecoveryPasswordProtection", CustomKeyRecoveryPasswordProtectionAsync),
         ("legacyEntryHasNoEncryptionMetadata", LegacyEntryHasNoEncryptionMetadataAsync),
         ("urlSafeEncryptedMetadataIsLoaded", UrlSafeEncryptedMetadataIsLoadedAsync),
         ("folderSerialRoundTrip", FolderSerialRoundTripAsync),
@@ -240,6 +250,12 @@ internal static partial class Program
         var selected = Tests.Where(test => (names.Length == 0 || names.Contains(test.Name, StringComparer.OrdinalIgnoreCase)) &&
             (allowUi || !OpensWindow(test.Name)) &&
             (!skipMedia || !MediaDependentTests.Contains(test.Name))).ToList();
+        var unknown = names.Where(name => !Tests.Any(test => test.Name.Equals(name, StringComparison.OrdinalIgnoreCase))).ToArray();
+        if (unknown.Length > 0 || selected.Count == 0)
+        {
+            Console.WriteLine("Nenhum resultado válido para os testes solicitados: " + string.Join(", ", unknown));
+            return 1;
+        }
         foreach (var (name, run) in selected)
         {
             Console.WriteLine("RUN   " + name);
@@ -719,17 +735,18 @@ internal static partial class Program
         serviceB.ConfigureCustomKey("senha de teste B");
         var rejected = Throws<EncryptedPayloadAuthenticationException>(() => serviceB.DecryptBytes(payload, context));
 
+        const string recoveryPassword = "recuperacao de teste 123";
         var path = Path.Combine(Path.GetTempPath(), "organessonium-test-" + Guid.NewGuid().ToString("N") + ".organessonium-key");
         try
         {
-            await serviceA.ExportCustomKeyAsync(path);
+            await serviceA.ExportCustomKeyAsync(path, recoveryPassword);
             var serviceImported = CreateEncryptionService(out _);
-            await serviceImported.ImportCustomKeyAsync(path);
+            var imported = await serviceImported.ImportCustomKeyAsync(path, recoveryPassword);
             var restored = serviceImported.DecryptBytes(payload, context);
             var matches = CryptographicOperations.FixedTimeEquals(original, restored);
             var replacementBlocked = Throws<InvalidOperationException>(() => serviceA.ConfigureCustomKey("senha diferente"));
             CryptographicOperations.ZeroMemory(restored);
-            return rejected && matches && replacementBlocked
+            return rejected && imported == CustomKeyImportKind.PasswordProtected && matches && replacementBlocked
                 ? TestOutcome.Pass()
                 : TestOutcome.Fail("a chave personalizada não rejeitou a chave errada, falhou após a importação ou foi substituída sem aviso");
         }

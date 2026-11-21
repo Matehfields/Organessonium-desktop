@@ -2,6 +2,7 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8"/>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'"/>
     <title>Organessônium - Configuração</title>
     <link rel="stylesheet" href="setup.css"/>
     <link rel="stylesheet" href="icons.css"/>
@@ -159,6 +160,19 @@
         <div id="loading-area" class="loading hidden">
             <div class="spinner"></div>
             <p id="loading-msg">Conectando...</p>
+        </div>
+    </div>
+</div>
+<div id="setup-recovery-overlay" class="setup-modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="setup-recovery-title">
+    <div class="setup-modal">
+        <h2 id="setup-recovery-title">Senha do arquivo de recuperação</h2>
+        <p id="setup-recovery-message"></p>
+        <label id="setup-recovery-label" for="setup-recovery-password">Senha</label>
+        <input id="setup-recovery-password" type="password" maxlength="1024" autocomplete="off"/>
+        <small id="setup-recovery-error" class="encryption-status error" role="alert"></small>
+        <div class="setup-modal-actions">
+            <button id="setup-recovery-cancel" class="btn-secondary" type="button">Cancelar</button>
+            <button id="setup-recovery-confirm" class="btn-connect" type="button">Continuar</button>
         </div>
     </div>
 </div>

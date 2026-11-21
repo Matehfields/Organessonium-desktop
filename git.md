@@ -329,6 +329,9 @@ Não remova `artifacts/releases`, `runtime-package.zip` nem `media/sources`. Em
 
 ## 7. Workflows do GitHub Actions
 
+As ações externas são fixadas por SHA de commit e mantêm a versão legível em comentário.
+O Dependabot acompanha atualizações dessas referências para revisão antes da adoção.
+
 ### 7.1 `ci.yml`
 
 - Executa em push e pull request para `main`.

@@ -116,12 +116,13 @@ internal static partial class Program
             RequireSync(store.Load().EncryptionMode == "custom" && store.Load().CustomKeyAvailable && store.Load().Theme == "light", "a ativação da chave alterou o tema ou não persistiu");
             await Check("$('setting-custom-passphrase').offsetWidth===0&&!$('setting-custom-key-confirmed')", "a chave salva ainda exige senha ou checkbox na página");
             await Check("$('encryption-current-badge').textContent==='Ativa'&&!$('encryption-custom-state').classList.contains('hidden')&&$('btn-configure-custom-key').disabled&&!$('btn-export-custom-key').disabled&&$('setting-custom-passphrase').value==='';", "o estado ativo da proteção não ficou explícito");
-            foreach (var action in new[] { "export", "import" })
-            {
-                await view.ExecuteScriptAsync("$('btn-" + action + "-custom-key').click()");
-                await Check("!$('confirm-overlay').classList.contains('hidden')", "a confirmação de recuperação de chave desapareceu: " + action);
-                await view.ExecuteScriptAsync("$('confirm-cancel').click()");
-            }
+            await view.ExecuteScriptAsync("$('btn-export-custom-key').click()");
+            await Check("!$('recovery-password-overlay').classList.contains('hidden')&&$('recovery-password-input').offsetWidth>0&&$('recovery-password-confirm').offsetWidth>0&&$('recovery-password-confirm-row').offsetHeight>0", "a definição de senha da exportação não apareceu");
+            await view.ExecuteScriptAsync("$('recovery-password-cancel').click()");
+            await Check("$('recovery-password-overlay').classList.contains('hidden')", "cancelar a exportação manteve o diálogo de senha");
+            await view.ExecuteScriptAsync("$('btn-import-custom-key').click()");
+            await Check("!$('confirm-overlay').classList.contains('hidden')", "a confirmação de importação de chave desapareceu");
+            await view.ExecuteScriptAsync("$('confirm-cancel').click()");
             await view.ExecuteScriptAsync("$('settings-tab-appearance').click();document.querySelector('[data-theme-value=dark]').click();$('settings-tab-protection').click()");
             await Capture("protection-dark-active");
             await view.ExecuteScriptAsync("$('btn-encryption-standard').click()");

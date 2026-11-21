@@ -166,10 +166,10 @@ O script retoma o rascunho. Não mova a tag nem sobrescreva uma release já publ
 
 ## 8. Privacidade e histórico
 
-O histórico atual contém commits com os e-mails `mateusmaty776@gmail.com` e
-`matehfields@gmail.com`. Um repositório público expõe esses endereços nos commits. Se
-isso for um problema, a decisão de reescrever o histórico precisa ser tomada antes do
-primeiro push e com autorização explícita. Não reescreva o histórico por conta própria.
+O histórico atual contém endereços de e-mail pessoais do mantenedor em commits antigos.
+Um repositório público expõe esses endereços nos commits. Se isso for um problema, a
+decisão de reescrever o histórico precisa ser tomada com autorização expressa. Não
+reescreva o histórico por conta própria.
 
 ## 9. Licença
 

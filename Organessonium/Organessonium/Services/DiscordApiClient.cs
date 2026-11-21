@@ -15,6 +15,7 @@ public sealed partial class DiscordApiClient : IDisposable
     public const int MaxActiveThreadsCode = 160006;
 
     private readonly HttpClient _http;
+    private readonly AuthenticationHeaderValue _authorization;
     private readonly string _storageAccountKey;
     private readonly DiscordRequestLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _routeLocks = new(StringComparer.Ordinal);
@@ -31,7 +32,8 @@ public DiscordApiClient(string botToken)
         _rateLimiter = DiscordRequestLimiter.ForToken(botToken);
         _http.Timeout = Timeout.InfiniteTimeSpan;
         _http.BaseAddress = new Uri("https://discord.com/api/v10/");
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bot", botToken);
+        _authorization = new AuthenticationHeaderValue("Bot", botToken);
+        _http.DefaultRequestHeaders.Authorization = null;
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Organessonium-CSharp/1.0");
     }
 
@@ -1006,6 +1008,12 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
         for (var attempt = 0; attempt < 12 || shouldWaitForTransientNetwork; attempt++)
         {
             using var request = await Task.Run(requestFactory, cancellationToken).ConfigureAwait(false);
+            var apiUri = request.RequestUri == null ? null : new Uri(_http.BaseAddress!, request.RequestUri);
+            if (apiUri == null || apiUri.Scheme != Uri.UriSchemeHttps ||
+                !apiUri.Host.Equals("discord.com", StringComparison.OrdinalIgnoreCase) || !apiUri.IsDefaultPort ||
+                !string.IsNullOrEmpty(apiUri.UserInfo) || !apiUri.AbsolutePath.StartsWith("/api/v10/", StringComparison.Ordinal))
+                throw new InvalidOperationException("Endereço da API do Discord inválido.");
+            request.Headers.Authorization = _authorization;
             using var diagnosticRequest = Diagnostics.DevelopmentDiagnostics.Http(request);
             using var bodySlot = request.Options.TryGetValue(UploadBodySlot.RequestKey, out var slot) ? slot : null;
             if (bodySlot != null) await bodySlot.EnterAsync(cancellationToken).ConfigureAwait(false);
@@ -1221,7 +1229,10 @@ public sealed class DiscordApiException : Exception
             return "O fórum do Discord atingiu o limite de threads ativas.";
         }
 
-        return $"Discord HTTP {(int)statusCode}: {body}";
+        var discordCode = ParseDiscordCode(body);
+        return discordCode.HasValue
+            ? $"Discord HTTP {(int)statusCode} (código {discordCode.Value})."
+            : $"Discord HTTP {(int)statusCode}.";
     }
 
     private static int? ParseDiscordCode(string body)

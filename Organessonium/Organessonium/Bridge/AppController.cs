@@ -112,6 +112,7 @@ public sealed partial class AppController : IAsyncDisposable
     private CancellationTokenSource? _thumbnailRequestCts;
     private string _thumbnailRequestKey = "";
     private readonly ConcurrentDictionary<string, TaskCompletionSource<UploadConflictResponse>> _uploadConflictResponses = new();
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _recoveryPasswordRequests = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _transferOperations = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _uploadFileOperations = new();
     private int _interruptedTransfersChecked;
@@ -213,6 +214,8 @@ public sealed partial class AppController : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _closeConfirmationResponse?.TrySetResult(false);
+        foreach (var request in _recoveryPasswordRequests.Values) request.TrySetResult(null);
+        _recoveryPasswordRequests.Clear();
         _videoMemoryGuard.Dispose();
         DetachSyncHost();
         _loggingOut = true;
@@ -320,8 +323,9 @@ public sealed partial class AppController : IAsyncDisposable
             case "resolveEncryptedDriveMarkdownImage": _ = RunAsync(() => ResolveEncryptedDriveMarkdownImageAsync(ArgString(args, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "configureCustomEncryption": return ConfigureCustomEncryptionAsync(ArgString(args, 0), ArgBool(args, 1, false));
             case "setEncryptionMode": return SetEncryptionModeAsync(ArgString(args, 0));
-            case "exportCustomEncryptionKey": return ExportCustomEncryptionKeyAsync();
+            case "exportCustomEncryptionKey": return ExportCustomEncryptionKeyAsync(ArgString(args, 0));
             case "importCustomEncryptionKey": return ImportCustomEncryptionKeyAsync();
+            case "provideRecoveryPassword": CompleteRecoveryPassword(args); return Task.CompletedTask;
             case "setupEncryption": return SetupEncryptionAsync(ArgString(args, 0), ArgString(args, 1), ArgBool(args, 2, false));
             case "saveSettings": SaveSettings(args); return Task.CompletedTask;
             case "testProxy": return TestProxyAsync(args);
@@ -351,13 +355,14 @@ public sealed partial class AppController : IAsyncDisposable
         var allowCreate = ArgBool(args, 5, false);
         var proxyJson = ArgString(args, 6);
 
+        var settings = _store.Load();
+        if (string.IsNullOrWhiteSpace(token)) { token = settings.BotToken; }
         if (string.IsNullOrWhiteSpace(token)) { await _bridge.CallAsync("_onSetupError", "Insira o token do bot."); return; }
         if (string.IsNullOrWhiteSpace(names)) { names = "names"; }
         if (string.IsNullOrWhiteSpace(folders)) { folders = "folders"; }
         if (string.IsNullOrWhiteSpace(forum)) { forum = "files"; }
         if (string.IsNullOrWhiteSpace(serial)) { serial = "serial"; }
 
-        var settings = _store.Load();
         settings.BotToken = token;
         settings.EncryptionMode = EncryptionModes.Normalize(ArgString(args, 7, settings.EncryptionMode));
         if (settings.EncryptionMode == EncryptionModes.Custom && !_encryption.HasCustomKey)
@@ -370,6 +375,7 @@ public sealed partial class AppController : IAsyncDisposable
             try
             {
                 var proxy = JsonSerializer.Deserialize<ProxySettings>(proxyJson, ProxyJsonOptions) ?? new ProxySettings();
+                PreserveStoredProxyPassword(proxy, settings.Proxy);
                 settings.Proxy = proxy;
             }
             catch
@@ -4219,12 +4225,14 @@ public sealed partial class AppController : IAsyncDisposable
         await _bridge.CallAsync("_onEncryptionSettingsChanged", settings.EncryptionMode, settings.CustomKeyAvailable);
     }
 
-    private async Task ExportCustomEncryptionKeyAsync()
+    private async Task ExportCustomEncryptionKeyAsync(string password)
     {
         if (!_encryption.HasCustomKey)
         {
             throw new InvalidOperationException("Nenhuma chave personalizada está configurada.");
         }
+
+        CustomEncryptionKeyProvider.ValidateRecoveryPassword(password);
 
         string? selected = null;
         await _owner.Dispatcher.InvokeAsync(() =>
@@ -4248,7 +4256,7 @@ public sealed partial class AppController : IAsyncDisposable
             return;
         }
 
-        await _encryption.ExportCustomKeyAsync(selected);
+        await _encryption.ExportCustomKeyAsync(selected, password);
         await _bridge.CallAsync("_onEncryptionKeyExported");
     }
 
@@ -4273,13 +4281,68 @@ public sealed partial class AppController : IAsyncDisposable
             return;
         }
 
-        await _encryption.ImportCustomKeyAsync(selected);
+        CustomKeyImportKind kind;
+        try
+        {
+            kind = await _encryption.ImportCustomKeyAsync(selected, null);
+        }
+        catch (RecoveryPasswordRequiredException)
+        {
+            var password = await RequestRecoveryPasswordAsync();
+            if (string.IsNullOrEmpty(password))
+            {
+                return;
+            }
+
+            kind = await _encryption.ImportCustomKeyAsync(selected, password);
+        }
+
         var settings = _store.Load();
         settings.EncryptionMode = EncryptionModes.Custom;
         settings.CustomKeyAvailable = _encryption.HasCustomKey;
         _store.Save(settings);
         await _bridge.SetSettingsAsync(settings);
         await _bridge.CallAsync("_onEncryptionSettingsChanged", settings.EncryptionMode, settings.CustomKeyAvailable);
+        await _bridge.CallAsync("_onEncryptionKeyImported", kind == CustomKeyImportKind.Legacy);
+    }
+
+    private void CompleteRecoveryPassword(JsonElement[] args)
+    {
+        var requestId = ArgString(args, 0);
+        if (string.IsNullOrWhiteSpace(requestId) || !_recoveryPasswordRequests.TryRemove(requestId, out var completion))
+        {
+            return;
+        }
+
+        var password = args.Length > 1 && args[1].ValueKind == JsonValueKind.String
+            ? args[1].GetString()
+            : null;
+        completion.TrySetResult(password);
+    }
+
+    private async Task<string?> RequestRecoveryPasswordAsync()
+    {
+        var requestId = NewId();
+        var completion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _recoveryPasswordRequests[requestId] = completion;
+        try
+        {
+            await _bridge.CallAsync("_onRecoveryPasswordRequired", requestId);
+            return await completion.Task.WaitAsync(TimeSpan.FromMinutes(5));
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("RecoveryPassword.Request", ex);
+            return null;
+        }
+        finally
+        {
+            _recoveryPasswordRequests.TryRemove(requestId, out _);
+        }
     }
 
     private void SaveSettings(JsonElement[] args)
@@ -4303,7 +4366,10 @@ public sealed partial class AppController : IAsyncDisposable
         settings.Proxy.Protocol = SettingsStore.NormalizeProxyProtocol(ArgString(args, 16, "auto"));
         settings.Proxy.AuthenticationEnabled = ArgBool(args, 17, settings.Proxy.AuthenticationEnabled);
         settings.Proxy.Username = ArgString(args, 18, settings.Proxy.Username);
-        settings.Proxy.Password = ArgString(args, 19, settings.Proxy.Password);
+        if (args.Length > 19 && args[19].ValueKind != JsonValueKind.Null)
+        {
+            settings.Proxy.Password = ArgString(args, 19, settings.Proxy.Password);
+        }
         settings.PreviewThreads = Math.Clamp(ArgInt(args, 20, settings.PreviewThreads), 1, 8);
         settings.VideoPrefetchChunks = Math.Clamp(ArgInt(args, 21, settings.VideoPrefetchChunks), 0, VideoStreamSession.MaximumPrefetchChunks);
         settings.ForceUploadParallelism = ArgBool(args, 22, settings.ForceUploadParallelism);
@@ -4326,6 +4392,7 @@ public sealed partial class AppController : IAsyncDisposable
 
     private async Task TestProxyAsync(JsonElement[] args)
     {
+        var passwordOmitted = args.Length <= 5 || args[5].ValueKind == JsonValueKind.Null;
         var settings = new ProxySettings
         {
             Mode = ProxyMode.Manual,
@@ -4334,8 +4401,12 @@ public sealed partial class AppController : IAsyncDisposable
             Protocol = SettingsStore.NormalizeProxyProtocol(ArgString(args, 2, "auto")),
             AuthenticationEnabled = ArgBool(args, 3, false),
             Username = ArgString(args, 4),
-            Password = ArgString(args, 5)
+            Password = passwordOmitted ? "" : ArgString(args, 5)
         };
+        if (passwordOmitted)
+        {
+            PreserveStoredProxyPassword(settings, _store.Load().Proxy, passwordOmitted: true);
+        }
 
         if (settings.Port == 0)
         {
@@ -4345,6 +4416,15 @@ public sealed partial class AppController : IAsyncDisposable
 
         var result = await ProxyTester.TestAsync(settings, includeDiscordCheck: ArgBool(args, 6, true));
         await _bridge.CallAsync("_onProxyTestResult", result.Success, result.Message, ProxyProtocolLabel(result.DetectedProtocol));
+    }
+
+    internal static void PreserveStoredProxyPassword(ProxySettings requested, ProxySettings stored, bool passwordOmitted = false)
+    {
+        if (!requested.AuthenticationEnabled || !stored.AuthenticationEnabled) return;
+        if (!passwordOmitted && requested.Password != null) return;
+        if (string.IsNullOrEmpty(stored.Password)) return;
+        if (!string.Equals(requested.Username, stored.Username, StringComparison.Ordinal)) return;
+        requested.Password = stored.Password;
     }
 
     private static string ProxyProtocolLabel(ProxyProtocol? protocol)

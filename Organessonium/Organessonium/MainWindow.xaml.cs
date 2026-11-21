@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -342,9 +343,18 @@ public partial class MainWindow : Window
             ResolveWebRootDirectory().FullName,
             CoreWebView2HostResourceAccessKind.Allow);
         WebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+#if DEBUG
         WebView.CoreWebView2.Settings.AreDevToolsEnabled = true;
+#else
+        WebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+#endif
         WebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
         WebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+        WebView.CoreWebView2.NavigationStarting += OnNavigationStarting;
+        WebView.CoreWebView2.FrameNavigationStarting += OnFrameNavigationStarting;
+        WebView.CoreWebView2.NewWindowRequested += OnNewWindowRequested;
+        WebView.CoreWebView2.DownloadStarting += OnDownloadStarting;
+        WebView.CoreWebView2.PermissionRequested += OnPermissionRequested;
         WebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
         WebView.CoreWebView2.ProcessFailed += OnWebViewProcessFailed;
         WebView.CoreWebView2.ContainsFullScreenElementChanged += OnContainsFullScreenElementChanged;
@@ -429,6 +439,11 @@ public partial class MainWindow : Window
         if (_bridge == null)
         {
             SetStartupSplashVisible(false);
+            return;
+        }
+
+        if (!e.IsSuccess || !WebMessagePolicy.IsLocalDocument(WebView.CoreWebView2?.Source))
+        {
             return;
         }
 
@@ -596,6 +611,11 @@ public partial class MainWindow : Window
             }
 
             webView.CoreWebView2.WebMessageReceived -= OnWebMessageReceived;
+            webView.CoreWebView2.NavigationStarting -= OnNavigationStarting;
+            webView.CoreWebView2.FrameNavigationStarting -= OnFrameNavigationStarting;
+            webView.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
+            webView.CoreWebView2.DownloadStarting -= OnDownloadStarting;
+            webView.CoreWebView2.PermissionRequested -= OnPermissionRequested;
             webView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
             webView.CoreWebView2.ProcessFailed -= OnWebViewProcessFailed;
             webView.CoreWebView2.ContainsFullScreenElementChanged -= OnContainsFullScreenElementChanged;
@@ -662,25 +682,33 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (TryHandleHostMessage(e.WebMessageAsJson))
+        var json = e.WebMessageAsJson;
+        if (!WebMessagePolicy.TryValidate(json, out var method, out var error))
+        {
+            AppLogger.Info("WebMessage.Rejected", error);
+            return;
+        }
+
+        if (!WebMessagePolicy.IsTrustedSource(e.Source, WebView.CoreWebView2?.Source))
+        {
+            AppLogger.Info("WebMessage.OriginRejected", method);
+            return;
+        }
+
+        if (TryHandleHostMessage(json, method))
         {
             return;
         }
 
-        await _controller.HandleJsonMessageAsync(e.WebMessageAsJson);
+        await _controller.HandleJsonMessageAsync(json);
     }
 
-    private bool TryHandleHostMessage(string json)
+    private bool TryHandleHostMessage(string json, string method)
     {
         try
         {
             using var document = JsonDocument.Parse(json);
-            if (!document.RootElement.TryGetProperty("method", out var methodElement))
-            {
-                return false;
-            }
-
-            switch (methodElement.GetString())
+            switch (method)
             {
                 case "developmentDiagnostic":
                     return true;
@@ -694,8 +722,21 @@ public partial class MainWindow : Window
                     SetNativeTitleBarDragRegion(document.RootElement);
                     return true;
                 case "setPreviewVisible":
-                    if (document.RootElement.TryGetProperty("args", out var previewArgs) && previewArgs.GetArrayLength() > 0)
+                    if (document.RootElement.TryGetProperty("args", out var previewArgs) &&
+                        previewArgs.ValueKind == JsonValueKind.Array &&
+                        previewArgs.GetArrayLength() > 0)
+                    {
                         _isPreviewVisible = previewArgs[0].ValueKind == JsonValueKind.True;
+                    }
+                    return true;
+                case "openExternalLink":
+                    if (document.RootElement.TryGetProperty("args", out var linkArgs) &&
+                        linkArgs.ValueKind == JsonValueKind.Array &&
+                        linkArgs.GetArrayLength() > 0 &&
+                        linkArgs[0].ValueKind == JsonValueKind.String)
+                    {
+                        OpenExternalLink(linkArgs[0].GetString());
+                    }
                     return true;
                 default:
                     return false;
@@ -704,6 +745,62 @@ public partial class MainWindow : Window
         catch
         {
             return false;
+        }
+    }
+
+    private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        if (WebMessagePolicy.IsLocalDocument(e.Uri))
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (e.IsUserInitiated)
+        {
+            OpenExternalLink(e.Uri);
+        }
+    }
+
+    private void OnFrameNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        e.Cancel = true;
+    }
+
+    private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        e.Handled = true;
+        if (e.IsUserInitiated)
+        {
+            OpenExternalLink(e.Uri);
+        }
+    }
+
+    private void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs e)
+    {
+        e.Cancel = true;
+    }
+
+    private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
+    {
+        e.State = CoreWebView2PermissionState.Deny;
+        e.Handled = true;
+    }
+
+    private void OpenExternalLink(string? url)
+    {
+        if (!ExternalLinkPolicy.TryNormalize(url, out var normalized))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(normalized) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ExternalLink.Open", ex);
         }
     }
 

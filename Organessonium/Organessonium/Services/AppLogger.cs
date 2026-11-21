@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 
@@ -66,15 +67,20 @@ public static class AppLogger
             builder.AppendLine("Time: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"));
             builder.AppendLine("Level: " + level);
             builder.AppendLine("Area: " + area);
-            if (!string.IsNullOrWhiteSpace(details))
-            {
-                builder.AppendLine("Details: " + details);
-            }
-
             if (exception != null)
             {
                 builder.AppendLine("Exception:");
-                builder.AppendLine(exception.ToString());
+                var depth = 0;
+                for (Exception? current = exception; current != null && depth++ < 4; current = current.InnerException)
+                {
+                    builder.AppendLine(current.GetType().FullName + $" (HResult=0x{current.HResult:X8})");
+                    foreach (var frame in new StackTrace(current, false).GetFrames().Take(16))
+                    {
+                        var method = frame.GetMethod();
+                        builder.AppendLine("  at " + method?.DeclaringType?.FullName + "." + method?.Name +
+                            " (IL " + frame.GetILOffset() + ")");
+                    }
+                }
             }
 
             lock (Lock)

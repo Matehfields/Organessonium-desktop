@@ -60,14 +60,14 @@ public sealed class EncryptionService
         _customKeyProvider.ConfigureFromPassphrase(passphrase);
     }
 
-    public Task ExportCustomKeyAsync(string path, CancellationToken cancellationToken = default)
+    public Task ExportCustomKeyAsync(string path, string password, CancellationToken cancellationToken = default)
     {
-        return _customKeyProvider.ExportAsync(path, cancellationToken);
+        return _customKeyProvider.ExportAsync(path, password, cancellationToken);
     }
 
-    public Task ImportCustomKeyAsync(string path, CancellationToken cancellationToken = default)
+    public Task<CustomKeyImportKind> ImportCustomKeyAsync(string path, string? password, CancellationToken cancellationToken = default)
     {
-        return _customKeyProvider.ImportAsync(path, cancellationToken);
+        return _customKeyProvider.ImportAsync(path, password, cancellationToken);
     }
 
     public async Task<EncryptedPayloadStaging> StageFilesAsync(

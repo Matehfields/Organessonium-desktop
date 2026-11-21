@@ -17,10 +17,13 @@ internal static partial class Program
             var logs = Path.Combine(temporary.FullName, "Logs");
             if (Directory.GetFiles(logs, "*.log", SearchOption.AllDirectories).Length != 0)
                 return Task.FromResult(TestOutcome.Fail("INFO/DEBUG/WARN criou arquivo de log"));
-            AppLogger.Error("App.DispatcherUnhandledException", new InvalidOperationException("isolated test error"));
+            const string privateValue = "private-log-fixture-21428";
+            AppLogger.Error("App.DispatcherUnhandledException", new InvalidOperationException(privateValue, new IOException(privateValue)), privateValue);
             var files = Directory.GetFiles(logs, "*.log", SearchOption.AllDirectories);
-            var valid = files.Length == 1 && File.ReadAllText(files[0]).Contains("Level: ERROR") &&
-                File.ReadAllText(files[0]).Contains("isolated test error");
+            var content = files.Length == 1 ? File.ReadAllText(files[0]) : "";
+            var valid = files.Length == 1 && content.Contains("Level: ERROR") &&
+                content.Contains("System.InvalidOperationException") && content.Contains("System.IO.IOException") &&
+                !content.Contains(privateValue, StringComparison.Ordinal);
             AppLogger.Error("VideoPreviewUpload", new IOException("sensitive-filename-and-metadata"));
             var mediaLogs = Directory.GetFiles(logs, "*.log", SearchOption.AllDirectories).Select(File.ReadAllText).ToArray();
             valid &= mediaLogs.Any(text => text.Contains("Area: VideoPreviewUpload") && text.Contains("IOException")) &&

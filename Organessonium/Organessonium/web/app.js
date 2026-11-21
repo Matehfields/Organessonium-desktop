@@ -16,6 +16,7 @@ let customFolderColorTarget = null;
 let ctxMode = 'item', ctxTabTarget = null;
 let historyBack = [], historyForward = [];
 let confirmCb = null, confirmCancelCb = null;
+let recoveryPasswordMode = '', recoveryPasswordRequestId = '';
 const nonfatalMessages = [];
 let uploadConflictState = null;
 let settings = {
@@ -41,6 +42,7 @@ let renameTarget = null;
 let filesNeedRefresh = false;
 let marqueeState = null, marqueeEl = null;
 let settingsSaveTimer = 0;
+let settingsProxyPasswordDirty = false;
 let smoothScrollFrame = 0, smoothScrollVelocity = 0;
 let cardPreviewFrame = 0;
 let thumbnailRequestTimer = 0;
@@ -163,6 +165,13 @@ const I18N = {
         encryptionExportWarning:'Qualquer pessoa que possuir este arquivo poderá acessar os arquivos protegidos por esta chave.',
         encryptionImportTitle:'Importar chave de recuperação?', encryptionImportWarning:'Importe somente um arquivo de recuperação confiável.',
         encryptionUpdated:'Proteção dos novos arquivos atualizada.', encryptionProceed:'Continuar',
+        encryptionExported:'Chave de recuperação exportada.', encryptionImported:'Chave de recuperação importada.',
+        encryptionImportedLegacy:'Chave de recuperação antiga importada. Exporte um novo arquivo protegido por senha.',
+        recoveryPasswordExportTitle:'Proteger a chave de recuperação', recoveryPasswordExportMessage:'Defina uma senha com pelo menos 8 caracteres e guarde-a separadamente do arquivo. Este formato ainda não é compatível com o Organessônium Android.',
+        recoveryPasswordImportTitle:'Senha do arquivo de recuperação', recoveryPasswordImportMessage:'Digite a senha usada quando este arquivo foi exportado.',
+        recoveryPasswordLabel:'Senha', recoveryPasswordConfirmLabel:'Confirmar senha',
+        recoveryPasswordRequired:'Informe a senha.', recoveryPasswordTooShort:'Use pelo menos 8 caracteres.',
+        recoveryPasswordMismatch:'As senhas não coincidem.', recoveryPasswordAction:'Continuar',
         enablePreviews:'Ativar miniaturas', simultaneousPreviews:'Miniaturas simultâneas', uploads:'Uploads', simultaneousUploadFiles:'Arquivos simultâneos', simultaneousUploadParts:'Partes simultâneas',
         forceUploadParallelism:'Forçar 16 workers (RAM até 1 GB)', forceUploadParallelismHelp:'Aplica imediatamente aos uploads em andamento. Ignora somente o ajuste dinâmico de workers; mantém o teto global de RAM e os limites do Discord. Chunks são cifrados em RAM, sem fallback de ciphertext no disco.',
         uploadingItems:v => v.count === 1 ? 'Enviando 1 item' : 'Enviando ' + v.count + ' itens', startingUploads:'Iniciando uploads...', queuedUpload:'Aguardando upload', cancelUpload:'Cancelar',
@@ -181,6 +190,7 @@ const I18N = {
         proxyProtocolAuto:'Detectar automaticamente', proxyProtocolHttp:'HTTP', proxyProtocolHttps:'HTTPS (CONNECT)',
         proxyProtocolSocks5:'SOCKS5', proxyProtocolSocks4a:'SOCKS4a', proxyProtocolSocks4:'SOCKS4',
         proxyAuth:'Requer autenticação', proxyUser:'Usuário', proxyPass:'Senha',
+        proxyPasswordSaved:'Senha salva. Deixe em branco para manter.',
         proxyTest:'Testar conexão com o proxy', proxyTesting:'Testando conexão com o proxy...',
         proxyTestSuccess:'Conectado com sucesso.',
         proxyTestDetected:'Conectado com sucesso (protocolo detectado: {protocol}).',
@@ -226,6 +236,7 @@ const I18N = {
         editorAutosave:'Salvamento automático', editorSaving:'Salvando...', editorSaved:'Salvo agora',
         editorUnsaved:'Alterações pendentes', editorSaveError:'Falha ao salvar',
         editorInsertLink:'Inserir link', editorLinkText:'Texto', editorLinkUrl:'URL', editorInsert:'Inserir',
+        editorLinkInvalid:'Use apenas links http, https ou mailto.', editorImageInvalid:'Use apenas imagens http ou https.',
         editorInsertImage:'Inserir imagem', editorImageLocal:'PC', editorImageDrive:'Drive', editorImageUrl:'URL',
         editorImageLocalHelp:'Escolha uma imagem local para anexar ao mesmo post do Markdown.',
         editorImageDriveHelp:'Escolha uma imagem já salva no app.', editorImageUrlLabel:'URL da imagem',
@@ -318,6 +329,13 @@ const I18N = {
         encryptionExportWarning:'Anyone with this file can access files protected by this key.',
         encryptionImportTitle:'Import recovery key?', encryptionImportWarning:'Import only a trusted recovery file.',
         encryptionUpdated:'New file protection updated.', encryptionProceed:'Continue',
+        encryptionExported:'Recovery key exported.', encryptionImported:'Recovery key imported.',
+        encryptionImportedLegacy:'Legacy recovery key imported. Export a new password-protected file.',
+        recoveryPasswordExportTitle:'Protect the recovery key', recoveryPasswordExportMessage:'Choose a password with at least 8 characters and keep it separate from the file. This format is not yet compatible with Organessônium for Android.',
+        recoveryPasswordImportTitle:'Recovery file password', recoveryPasswordImportMessage:'Enter the password used when this file was exported.',
+        recoveryPasswordLabel:'Password', recoveryPasswordConfirmLabel:'Confirm password',
+        recoveryPasswordRequired:'Enter the password.', recoveryPasswordTooShort:'Use at least 8 characters.',
+        recoveryPasswordMismatch:'Passwords do not match.', recoveryPasswordAction:'Continue',
         enablePreviews:'Enable thumbnails', simultaneousPreviews:'Simultaneous thumbnails', uploads:'Uploads', simultaneousUploadFiles:'Simultaneous files', simultaneousUploadParts:'Simultaneous parts',
         forceUploadParallelism:'Force 16 workers (RAM up to 1 GB)', forceUploadParallelismHelp:'Applies immediately to running uploads. Bypasses only dynamic worker adjustment; keeps the global RAM ceiling and Discord limits. Chunks are encrypted in RAM without ciphertext disk fallback.',
         uploadingItems:v => v.count === 1 ? 'Uploading 1 item' : 'Uploading ' + v.count + ' items', startingUploads:'Starting uploads...', queuedUpload:'Waiting to upload', cancelUpload:'Cancel',
@@ -336,6 +354,7 @@ const I18N = {
         proxyProtocolAuto:'Detect automatically', proxyProtocolHttp:'HTTP', proxyProtocolHttps:'HTTPS (CONNECT)',
         proxyProtocolSocks5:'SOCKS5', proxyProtocolSocks4a:'SOCKS4a', proxyProtocolSocks4:'SOCKS4',
         proxyAuth:'Requires authentication', proxyUser:'Username', proxyPass:'Password',
+        proxyPasswordSaved:'Password saved. Leave blank to keep it.',
         proxyTest:'Test proxy connection', proxyTesting:'Testing proxy connection...',
         proxyTestSuccess:'Connected successfully.',
         proxyTestDetected:'Connected successfully (detected protocol: {protocol}).',
@@ -381,6 +400,7 @@ const I18N = {
         editorAutosave:'Autosave', editorSaving:'Saving...', editorSaved:'Saved now',
         editorUnsaved:'Unsaved changes', editorSaveError:'Save failed',
         editorInsertLink:'Insert link', editorLinkText:'Text', editorLinkUrl:'URL', editorInsert:'Insert',
+        editorLinkInvalid:'Use only http, https or mailto links.', editorImageInvalid:'Use only http or https images.',
         editorInsertImage:'Insert image', editorImageLocal:'PC', editorImageDrive:'Drive', editorImageUrl:'URL',
         editorImageLocalHelp:'Choose a local image to attach to the same Markdown post.',
         editorImageDriveHelp:'Choose an image already saved in the app.', editorImageUrlLabel:'Image URL',
@@ -2597,7 +2617,11 @@ window._onEncryptionSettingsChanged = (mode, customKeyAvailable) => {
     syncEncryptionSettings();
     setStatus(t('encryptionUpdated'), false);
 };
-window._onEncryptionKeyExported = () => setStatus(t('encryptionExport'), false);
+window._onEncryptionKeyExported = () => setStatus(t('encryptionExported'), false);
+window._onEncryptionKeyImported = legacy => setStatus(t(legacy === true ? 'encryptionImportedLegacy' : 'encryptionImported'), false);
+window._onRecoveryPasswordRequired = requestId => {
+    if (typeof requestId === 'string' && requestId) openRecoveryPasswordDialog('import', requestId);
+};
 window._onDragOver  = () => { dragOverlay.classList.add('drag-active'); dragOverlay.setAttribute('aria-hidden', 'false'); };
 window._onDragLeave = () => { dragOverlay.classList.remove('drag-active'); dragOverlay.setAttribute('aria-hidden', 'true'); };
 window._onPathChosen = (type, path) => {
@@ -3135,6 +3159,17 @@ document.addEventListener('DOMContentLoaded', () => {
     $('rename-overlay').addEventListener('click', e => { if (e.target.id === 'rename-overlay') closeRenameModal(); });
 
     // Confirmação
+    $('recovery-password-cancel').addEventListener('click', () => closeRecoveryPasswordDialog(true));
+    $('recovery-password-confirm-btn').addEventListener('click', confirmRecoveryPasswordDialog);
+    $('recovery-password-overlay').addEventListener('click', e => {
+        if (e.target.id === 'recovery-password-overlay') closeRecoveryPasswordDialog(true);
+    });
+    ['recovery-password-input', 'recovery-password-confirm'].forEach(id => {
+        $(id).addEventListener('keydown', e => {
+            if (e.key === 'Enter') confirmRecoveryPasswordDialog();
+            if (e.key === 'Escape') closeRecoveryPasswordDialog(true);
+        });
+    });
     $('confirm-ok').addEventListener('click',     () => { if (confirmCb) confirmCb(); hideConfirm(); });
     $('confirm-cancel').addEventListener('click', hideConfirm);
     confirmOverlay.addEventListener('click', e => { if (e.target===confirmOverlay) hideConfirm(); });
@@ -3332,9 +3367,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }, 'encryptionActivate');
     });
-    $('btn-export-custom-key')?.addEventListener('click', () => {
-        askConfirm(t('encryptionExportTitle'), t('encryptionExportWarning'), () => window.bridge.exportCustomEncryptionKey(), 'encryptionProceed');
-    });
+    $('btn-export-custom-key')?.addEventListener('click', () => openRecoveryPasswordDialog('export'));
     $('btn-import-custom-key')?.addEventListener('click', () => {
         askConfirm(t('encryptionImportTitle'), t('encryptionImportWarning'), () => window.bridge.importCustomEncryptionKey(), 'encryptionProceed');
     });
@@ -3354,13 +3387,17 @@ document.addEventListener('DOMContentLoaded', () => {
     $('setting-proxy-port').addEventListener('change', e => { settings.proxy.proxyPort = Number(e.target.value) || 0; queueSettingsSave(); });
     $('setting-proxy-protocol').addEventListener('change', e => { settings.proxy.proxyProtocol = e.target.value; queueSettingsSave(); });
     $('setting-proxy-user').addEventListener('change', e => { settings.proxy.proxyUsername = e.target.value; queueSettingsSave(); });
-    $('setting-proxy-pass').addEventListener('change', e => { settings.proxy.proxyPassword = e.target.value; queueSettingsSave(); });
+    $('setting-proxy-pass').addEventListener('change', e => {
+        settingsProxyPasswordDirty = true;
+        settings.proxy.proxyPassword = e.target.value;
+        queueSettingsSave();
+    });
     $('btn-test-proxy').addEventListener('click', () => {
         const proxy = settings.proxy;
         $('proxy-test-result').textContent = t('proxyTesting');
         $('proxy-test-result').className = 'proxy-test-result testing';
         $('proxy-test-result').classList.remove('hidden');
-        window.bridge.testProxy(proxy.proxyHost || '', proxy.proxyPort || 0, proxy.proxyProtocol || 'auto', !!proxy.proxyAuthenticationEnabled, proxy.proxyUsername || '', proxy.proxyPassword || '', true);
+        window.bridge.testProxy(proxy.proxyHost || '', proxy.proxyPort || 0, proxy.proxyProtocol || 'auto', !!proxy.proxyAuthenticationEnabled, proxy.proxyUsername || '', settingsProxyPasswordDirty ? (proxy.proxyPassword || '') : null, true);
     });
     $('btn-choose-dl').addEventListener('click',  () => window.bridge.chooseDownloadPath());
     if ($('btn-choose-data')) $('btn-choose-data').addEventListener('click', () => window.bridge.chooseDataPath());
@@ -3423,6 +3460,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.addEventListener('click', e => {
+        const markdownLink = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (markdownLink) {
+            e.preventDefault();
+            const external = safeExternalUrl(markdownLink.getAttribute('href'));
+            if (external && window.bridge && window.bridge.openExternalLink) window.bridge.openExternalLink(external);
+        }
         if (!$('btn-sidebar-new').contains(e.target) && !$('sidebar-new-menu').contains(e.target)) closeSidebarNewMenu();
         if (!$('btn-sort').contains(e.target)) sortMenu.classList.add('hidden');
         if (!$('btn-type-filter').contains(e.target) && !typeFilterMenu.contains(e.target)) typeFilterMenu.classList.add('hidden');
@@ -4771,6 +4814,33 @@ function placeCaretAtEnd(el) {
 }
 
 function normalizeEditorDom(editor) {
+    editor.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form,input,button,textarea,select,template,svg,math').forEach(el => el.remove());
+    editor.querySelectorAll('*').forEach(el => {
+        Array.from(el.attributes).forEach(attribute => {
+            const name = attribute.name.toLowerCase();
+            if (name === 'style') {
+                const alignment = /^(td|th)$/i.test(el.tagName) ? safeCellAlignment(attribute.value) : '';
+                if (alignment) el.setAttribute('style', 'text-align:' + alignment);
+                else el.removeAttribute('style');
+                return;
+            }
+            if (name.startsWith('on') || name === 'srcdoc' || name === 'formaction' ||
+                name === 'xlink:href' || name === 'srcset' ||
+                name === 'poster' || name === 'action' || name === 'data') {
+                el.removeAttribute(attribute.name);
+                return;
+            }
+            if (name === 'href') {
+                const safe = safeLinkUrl(attribute.value);
+                if (safe) el.setAttribute('href', safe);
+                else el.removeAttribute('href');
+            } else if (name === 'src') {
+                const safe = safeImageUrl(attribute.value);
+                if (safe) el.setAttribute('src', safe);
+                else el.removeAttribute('src');
+            }
+        });
+    });
     editor.querySelectorAll('pre pre').forEach(pre => {
         pre.replaceWith(document.createTextNode(pre.innerText));
     });
@@ -5147,6 +5217,55 @@ function splitMarkdownTableRow(line) {
     return hasSeparator ? cells : [];
 }
 
+function normalizeMarkdownUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw || raw.length > 4096) return '';
+    for (const ch of raw) {
+        const code = ch.charCodeAt(0);
+        if (code < 0x20 || code === 0x7f) return '';
+    }
+    return raw;
+}
+
+function safeCellAlignment(value) {
+    const match = String(value || '').match(/(?:^|;)\s*text-align\s*:\s*(left|right|center)\b/i);
+    return match ? match[1].toLowerCase() : '';
+}
+
+function safeLinkUrl(value) {
+    const raw = normalizeMarkdownUrl(value);
+    if (!raw) return '';
+    const match = raw.match(/^([a-z][a-z0-9+.-]*):/i);
+    if (!match) return '';
+    const protocol = match[1].toLowerCase();
+    return protocol === 'http' || protocol === 'https' || protocol === 'mailto' ? raw : '';
+}
+
+function safeImageUrl(value) {
+    const raw = normalizeMarkdownUrl(value);
+    if (!raw) return '';
+    if (raw.startsWith('organessonium-image://v1/') || raw.startsWith('organessonium-drive-image://')) return raw;
+    const match = raw.match(/^([a-z][a-z0-9+.-]*):/i);
+    if (!match) return '';
+    const protocol = match[1].toLowerCase();
+    return protocol === 'http' || protocol === 'https' ? raw : '';
+}
+
+function safeExternalUrl(value) {
+    const raw = safeLinkUrl(value);
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) {
+        try {
+            const parsed = new URL(raw);
+            if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname) return parsed.href;
+        } catch (_) {
+            return '';
+        }
+        return '';
+    }
+    return /^mailto:/i.test(raw) ? raw : '';
+}
+
 function markdownInline(text) {
     // Keep inline markup from interpreting punctuation inside URLs and attributes.
     const fragments = [];
@@ -5158,8 +5277,12 @@ function markdownInline(text) {
     const unescapeLabel = value => value.replace(/\\([\\\]])/g, '$1');
     const plain = text.replace(/\0/g, '\uFFFD').replace(/`([^`]+)`|!\[((?:\\.|[^\\\]])*)\]\(([^)\s]+)\)/g,
         (_, code, alt, url) => protect(code !== undefined ? '<code>' + esc(code) + '</code>' : markdownImageHtml(url, unescapeLabel(alt))));
-    return renderText(plain.replace(/\[((?:\\.|[^\\\]])+)\]\(([^)\s]+)\)/g, (_, label, url) =>
-        protect('<a href="' + esc(url) + '">' + renderText(unescapeLabel(label)) + '</a>')));
+    return renderText(plain.replace(/\[((?:\\.|[^\\\]])+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const safe = safeLinkUrl(url);
+        return safe
+            ? protect('<a href="' + esc(safe) + '" rel="noopener noreferrer">' + renderText(unescapeLabel(label)) + '</a>')
+            : renderText(unescapeLabel(label));
+    }));
 }
 
 function markdownEmphasis(text) {
@@ -5168,9 +5291,12 @@ function markdownEmphasis(text) {
 }
 
 function markdownImageHtml(url, alt) {
-    const internal = url.startsWith('organessonium-image://v1/') || url.startsWith('organessonium-drive-image://');
+    const safe = safeImageUrl(url);
+    if (!safe) return esc(alt);
+    const internal = safe.startsWith('organessonium-image://v1/') || safe.startsWith('organessonium-drive-image://');
     const source = internal ? 'data-organessonium-image' : 'src';
-    return '<img ' + source + '="' + esc(url) + '" alt="' + esc(alt) + '">';
+    return '<img ' + source + '="' + esc(safe) + '" alt="' + esc(alt) + '"' +
+        (internal ? '' : ' referrerpolicy="no-referrer" loading="lazy"') + '>';
 }
 
 function setupMomentumScroll(el, options = {}) {
@@ -5873,6 +5999,68 @@ function hideConfirm() {
     confirmOverlay.classList.add('hidden'); confirmCb=null; cancel?.();
     setTimeout(showNextNonfatalError, 0);
 }
+
+function openRecoveryPasswordDialog(mode, requestId = '') {
+    recoveryPasswordMode = mode;
+    recoveryPasswordRequestId = requestId;
+    const overlay = $('recovery-password-overlay');
+    if (!overlay) return;
+    $('recovery-password-title').textContent = t(mode === 'export' ? 'recoveryPasswordExportTitle' : 'recoveryPasswordImportTitle');
+    $('recovery-password-message').textContent = t(mode === 'export' ? 'recoveryPasswordExportMessage' : 'recoveryPasswordImportMessage');
+    $('recovery-password-label').textContent = t('recoveryPasswordLabel');
+    $('recovery-password-confirm-label').textContent = t('recoveryPasswordConfirmLabel');
+    $('recovery-password-error').textContent = '';
+    $('recovery-password-input').value = '';
+    $('recovery-password-confirm').value = '';
+    $('recovery-password-confirm-row').classList.toggle('hidden', mode !== 'export');
+    overlay.classList.remove('hidden');
+    setTimeout(() => $('recovery-password-input').focus(), 50);
+}
+
+function closeRecoveryPasswordDialog(cancelled = true) {
+    const requestId = recoveryPasswordRequestId;
+    const mode = recoveryPasswordMode;
+    recoveryPasswordMode = '';
+    recoveryPasswordRequestId = '';
+    const overlay = $('recovery-password-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    $('recovery-password-input').value = '';
+    $('recovery-password-confirm').value = '';
+    $('recovery-password-error').textContent = '';
+    if (cancelled && mode === 'import' && requestId && window.bridge && window.bridge.provideRecoveryPassword) {
+        window.bridge.provideRecoveryPassword(requestId, null);
+    }
+}
+
+function confirmRecoveryPasswordDialog() {
+    const password = $('recovery-password-input').value;
+    const error = $('recovery-password-error');
+    if (!password) {
+        error.textContent = t('recoveryPasswordRequired');
+        $('recovery-password-input').focus();
+        return;
+    }
+    if (recoveryPasswordMode === 'export') {
+        if (password.length < 8) {
+            error.textContent = t('recoveryPasswordTooShort');
+            $('recovery-password-input').focus();
+            return;
+        }
+        if (password !== $('recovery-password-confirm').value) {
+            error.textContent = t('recoveryPasswordMismatch');
+            $('recovery-password-confirm').focus();
+            return;
+        }
+        closeRecoveryPasswordDialog(false);
+        window.bridge.exportCustomEncryptionKey(password);
+        return;
+    }
+    if (recoveryPasswordMode === 'import') {
+        const requestId = recoveryPasswordRequestId;
+        closeRecoveryPasswordDialog(false);
+        if (requestId) window.bridge.provideRecoveryPassword(requestId, password);
+    }
+}
 function showNextNonfatalError() {
     if (!nonfatalMessages.length || !confirmOverlay.classList.contains('hidden')) return;
     askConfirm(t('errorPrefix').replace(/[:\s]+$/, ''), nonfatalMessages.shift(), () => {}, 'close', true);
@@ -5935,7 +6123,13 @@ function confirmEditorLinkDialog() {
     const url = $('editor-link-url').value.trim();
     const label = $('editor-link-text').value.trim() || editorLinkState.selection.text || url;
     if (!url || !label) return;
-    insertEditorLink(editorLinkState.entry, editorLinkState.selection, label, url);
+    const safe = safeLinkUrl(url);
+    if (!safe) {
+        setStatus(t('editorLinkInvalid'), false);
+        $('editor-link-url').focus();
+        return;
+    }
+    insertEditorLink(editorLinkState.entry, editorLinkState.selection, label, safe);
     closeEditorLinkDialog();
 }
 
@@ -6007,7 +6201,13 @@ function confirmEditorImageDialog() {
     } else {
         const url = $('editor-image-url').value.trim();
         if (!url) return;
-        insertEditorImage(editorImageState.entry, editorImageState.selection, url, $('editor-image-alt').value.trim());
+        const safe = safeImageUrl(url);
+        if (!safe) {
+            $('editor-image-status').textContent = t('editorImageInvalid');
+            $('editor-image-url').focus();
+            return;
+        }
+        insertEditorImage(editorImageState.entry, editorImageState.selection, safe, $('editor-image-alt').value.trim());
         closeEditorImageDialog();
     }
 }
@@ -6074,6 +6274,9 @@ function restoreEditorInsertionState(entry, state) {
 
 function insertEditorLink(entry, state, label, url) {
     if (!entry) return;
+    const safe = safeLinkUrl(url);
+    if (!safe) return;
+    url = safe;
     if (state.raw && entry.rawEditor) {
         const textarea = entry.rawEditor;
         const text = '[' + escapeMarkdownLabel(label) + '](' + escapeMarkdownUrl(url) + ')';
@@ -6090,6 +6293,9 @@ function insertEditorLink(entry, state, label, url) {
 
 function insertEditorImage(entry, state, url, alt) {
     if (!entry) return;
+    const safe = safeImageUrl(url);
+    if (!safe) return;
+    url = safe;
     const safeAlt = alt || '';
     if (state.raw && entry.rawEditor) {
         const text = '![' + escapeMarkdownLabel(safeAlt) + '](' + escapeMarkdownUrl(url) + ')';
@@ -6254,7 +6460,10 @@ function loadProxySettings() {
     $('setting-proxy-protocol').value = ['auto', 'http', 'https', 'socks5', 'socks4a', 'socks4'].includes(proxy.proxyProtocol) ? proxy.proxyProtocol : 'auto';
     $('setting-proxy-auth').checked = proxy.proxyAuthenticationEnabled === true;
     $('setting-proxy-user').value = typeof proxy.proxyUsername === 'string' ? proxy.proxyUsername : '';
-    $('setting-proxy-pass').value = typeof proxy.proxyPassword === 'string' ? proxy.proxyPassword : '';
+    $('setting-proxy-pass').value = '';
+    settings.proxy.proxyPassword = '';
+    settingsProxyPasswordDirty = false;
+    $('setting-proxy-pass').placeholder = proxy.proxyPasswordConfigured === true ? t('proxyPasswordSaved') : '';
     applyProxySettingsVisibility();
 }
 
@@ -6312,7 +6521,7 @@ function saveSettings(showStatus = true) {
         settings.proxy.proxyProtocol || 'auto',
         settings.proxy.proxyAuthenticationEnabled === true,
         settings.proxy.proxyUsername || '',
-        settings.proxy.proxyPassword || '',
+        settingsProxyPasswordDirty ? (settings.proxy.proxyPassword || '') : null,
         settings.previewThreads,
         settings.videoPrefetchChunks,
         settings.forceUploadParallelism === true,
@@ -6320,6 +6529,7 @@ function saveSettings(showStatus = true) {
         settings.accentColor,
         settings.generateVideoPreviews !== false
     );
+    settingsProxyPasswordDirty = false;
     try { localStorage.setItem('organessonium.lang', settings.language||'system'); } catch (_) {}
     if (showStatus) setStatus(t('settingsSaved'), false);
 }

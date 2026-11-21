@@ -2703,6 +2703,8 @@ html[data-motion="reduced"] .ctx-menu-enter{animation:none;}
     font-size:12px;
     font-weight:600;
 }
+.recovery-password-modal{max-width:440px;}
+#recovery-password-error{display:block;min-height:16px;margin-top:10px;color:var(--danger);}
 .editor-link-modal{max-width:460px;}
 .editor-table-dimensions{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:end;}
 .editor-table-dimensions input{margin-top:6px;}

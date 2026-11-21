@@ -85,7 +85,13 @@ internal static partial class Program
             if (markdownEditor) ConfigureMarkdownFixtureImages(h, view.CoreWebView2);
             typeof(Organessonium.MainWindow).GetMethod("LoadLocalPage", flags)!.Invoke(window, ["index.html"]);
             while (await view.ExecuteScriptAsync("location.pathname==='/index.html'&&typeof allApps!=='undefined'") != "true") await Task.Delay(50, timeout.Token);
-            if (markdownEditor) return await CheckMarkdownEditorAsync(h, controller, view.CoreWebView2, capture: true);
+            if (markdownEditor)
+            {
+                await view.ExecuteScriptAsync("openRecoveryPasswordDialog('export')");
+                RequireSync(await view.ExecuteScriptAsync("(()=>{const dialog=document.getElementById('recovery-password-overlay'),message=document.getElementById('recovery-password-message');return !dialog.classList.contains('hidden')&&dialog.offsetWidth>0&&message.offsetWidth>0&&message.textContent.includes('Android')})()") == "true", "o aviso de compatibilidade da chave não apareceu na janela do aplicativo");
+                await view.ExecuteScriptAsync("document.getElementById('recovery-password-cancel').click()");
+                return await CheckMarkdownEditorAsync(h, controller, view.CoreWebView2, capture: true);
+            }
             if (videoIsolation) return await CheckVideoUploadIsolationAsync(h, controller, view, window);
             if (closeOnly) return await CheckTransferCloseConfirmationAsync(h, controller, view, window, closed.Task);
             var targets = (System.Collections.IDictionary)typeof(Organessonium.MainWindow).GetField("_oleDropTargets", flags)!.GetValue(window)!;

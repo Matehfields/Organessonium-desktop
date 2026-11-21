@@ -6,6 +6,11 @@
 
     const updateSettingsCache = args => {
         const current = window.__organessoniumSettings || {};
+        const currentProxy = current.proxy || {};
+        const sentPassword = args[19];
+        const passwordConfigured = sentPassword === null || sentPassword === undefined
+            ? currentProxy.proxyPasswordConfigured === true
+            : String(sentPassword).length > 0;
         window.__organessoniumSettings = {
             ...current,
             cardSize: args[0],
@@ -33,7 +38,7 @@ dataPath: args[10],
                 proxyProtocol: args[16],
                 proxyAuthenticationEnabled: args[17],
                 proxyUsername: args[18],
-                proxyPassword: args[19]
+                proxyPasswordConfigured: passwordConfigured
             }
         };
     };
@@ -97,9 +102,11 @@ dataPath: args[10],
         resolveEncryptedMarkdownImage: function () { send('resolveEncryptedMarkdownImage', arguments); },
         resolveEncryptedDriveMarkdownImage: function () { send('resolveEncryptedDriveMarkdownImage', arguments); },
         configureCustomEncryption: function () { send('configureCustomEncryption', arguments); },
+        openExternalLink: function () { send('openExternalLink', arguments); },
         setEncryptionMode: function () { send('setEncryptionMode', arguments); },
         exportCustomEncryptionKey: function () { send('exportCustomEncryptionKey', arguments); },
         importCustomEncryptionKey: function () { send('importCustomEncryptionKey', arguments); },
+        provideRecoveryPassword: function () { send('provideRecoveryPassword', arguments); },
         setupEncryption: function () { send('setupEncryption', arguments); },
         chooseDownloadPath: function () { send('chooseDownloadPath', arguments); },
         chooseDataPath: function () { send('chooseDataPath', arguments); },

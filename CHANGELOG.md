@@ -6,6 +6,30 @@ O formato segue os princípios de [Keep a Changelog](https://keepachangelog.com/
 A versão pública segue [Semantic Versioning](https://semver.org/lang/pt-BR/), com um
 número de build independente. A fonte única dos dois valores é `Version.props`.
 
+## [Não lançado]
+
+### Segurança
+
+- O token do bot e a senha do proxy passam a ser protegidos com DPAPI no escopo do usuário
+  atual. Valores em texto simples são migrados automaticamente e as chaves legadas são
+  removidas; a interface recebe apenas indicadores de configuração.
+- O arquivo de recuperação passou ao formato `OEK2`, protegido por senha do usuário com
+  PBKDF2-SHA256 e AES-GCM. Arquivos `OEK1` continuam importáveis como formato legado.
+- Mensagens do WebView2 são validadas por origem, allowlist de comandos, limite de tamanho
+  e estrutura antes de chegar ao código C#. Navegação externa é bloqueada e links
+  legítimos são abertos no navegador do sistema.
+- As páginas receberam CSP restritiva. Markdown, imagens e o editor removem scripts,
+  eventos, estilos não permitidos e esquemas de URL inseguros.
+- A senha de proxy salva é preservada quando o campo não é alterado e continua disponível
+  para o teste de conexão autenticado.
+- A migração de credenciais usa exclusão segura no SQLite e mantém valores protegidos
+  indisponíveis ao salvar outras preferências. Respostas de erro do servidor não são
+  reproduzidas integralmente na interface.
+- A autenticação do bot fica restrita às requisições da API do Discord e não é enviada
+  junto aos downloads de anexos.
+- A política do WebView2 valida os tipos dos argumentos e preserva a leitura de PDFs.
+  Os workflows fixam ações externas por commit.
+
 ## [1.0.0] - 2026-11-19
 
 Primeira versão estável do Organessônium Desktop, com biblioteca armazenada no Discord,

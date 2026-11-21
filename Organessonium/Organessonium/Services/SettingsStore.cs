@@ -11,6 +11,10 @@ public sealed class SettingsStore : IEncryptionSecretStore
     private const string WebViewDataFolderName = "WebView";
     private const string LogsFolderName = "Logs";
     private const string PreferenceDefaultsVersion = "2";
+    internal const string BotTokenSetting = "botToken";
+    internal const string ProtectedBotTokenSetting = "botTokenProtectedV1";
+    internal const string ProxyPasswordSetting = "proxyPassword";
+    internal const string ProtectedProxyPasswordSetting = "proxyPasswordProtectedV1";
     private readonly object _lock = new();
     private readonly bool _cleanupDefaultData;
 
@@ -216,8 +220,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
             }
 
             reader.Dispose();
+            var secrets = LoadSecrets(connection, values);
             settings.SyncPaused = GetBool(values, "syncPaused", false);
-            settings.BotToken = Get(values, "botToken", settings.BotToken);
+            settings.BotToken = secrets.BotToken;
             settings.StartWithWindows = GetBool(values, "startWithWindows", false);
             settings.CloseToTray = GetBool(values, "closeToTray", false);
             settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
@@ -255,10 +260,95 @@ public sealed class SettingsStore : IEncryptionSecretStore
             settings.Proxy.Protocol = NormalizeProxyProtocol(Get(values, "proxyProtocol", ProxyProtocolLabel(settings.Proxy.Protocol)));
             settings.Proxy.AuthenticationEnabled = GetBool(values, "proxyAuthEnabled", settings.Proxy.AuthenticationEnabled);
             settings.Proxy.Username = Get(values, "proxyUsername", settings.Proxy.Username);
-            settings.Proxy.Password = Get(values, "proxyPassword", settings.Proxy.Password);
+            settings.Proxy.Password = secrets.ProxyPassword;
             NormalizePreferenceDefaults(values, connection, settings);
             return settings;
         }
+    }
+
+    private static (string BotToken, string ProxyPassword) LoadSecrets(
+        SqliteConnection connection,
+        IReadOnlyDictionary<string, string> values)
+    {
+        return (
+            ReadSecret(connection, values, ProtectedBotTokenSetting, BotTokenSetting),
+            ReadSecret(connection, values, ProtectedProxyPasswordSetting, ProxyPasswordSetting));
+    }
+
+    private static string ReadSecret(
+        SqliteConnection connection,
+        IReadOnlyDictionary<string, string> values,
+        string protectedKey,
+        string legacyKey)
+    {
+        values.TryGetValue(protectedKey, out var protectedValue);
+        var hasProtectedValue = !string.IsNullOrWhiteSpace(protectedValue);
+        if (hasProtectedValue && LocalSecretProtector.TryUnprotect(protectedValue, out var protectedSecret))
+        {
+            if (values.ContainsKey(legacyKey))
+            {
+                DeleteSetting(connection, legacyKey);
+            }
+
+            return protectedSecret;
+        }
+
+        if (hasProtectedValue)
+        {
+            AppLogger.Error("Settings.SecretProtection", new System.Security.Cryptography.CryptographicException(
+                "O material protegido da configuração não pôde ser aberto neste usuário."));
+            // An unreadable protected value may be newer than a leftover plaintext entry.
+            // Preserve both until the user explicitly supplies a replacement.
+            return "";
+        }
+
+        if (values.TryGetValue(legacyKey, out var legacyValue) && !string.IsNullOrWhiteSpace(legacyValue))
+        {
+            try
+            {
+                // The protected value is written first. If the process stops before the delete,
+                // the next load sees the protected value and removes the plaintext leftover.
+                Upsert(connection, protectedKey, LocalSecretProtector.Protect(legacyValue));
+                DeleteSetting(connection, legacyKey);
+            }
+            catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or InvalidOperationException)
+            {
+                AppLogger.Error("Settings.SecretMigration", ex);
+            }
+
+            return legacyValue;
+        }
+
+        return "";
+    }
+
+    private static void SaveSecret(SqliteConnection connection, string protectedKey, string legacyKey, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            using var read = connection.CreateCommand();
+            read.CommandText = "SELECT value FROM settings WHERE key = $key";
+            read.Parameters.AddWithValue("$key", protectedKey);
+            if (read.ExecuteScalar() is string stored && !string.IsNullOrWhiteSpace(stored) &&
+                !LocalSecretProtector.TryUnprotect(stored, out _))
+            {
+                return;
+            }
+            DeleteSetting(connection, protectedKey);
+            DeleteSetting(connection, legacyKey);
+            return;
+        }
+
+        Upsert(connection, protectedKey, LocalSecretProtector.Protect(value));
+        DeleteSetting(connection, legacyKey);
+    }
+
+    private static void DeleteSetting(SqliteConnection connection, string key)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA secure_delete = ON; DELETE FROM settings WHERE key = $key";
+        command.Parameters.AddWithValue("$key", key);
+        command.ExecuteNonQuery();
     }
 
     public void Save(AppSettings settings)
@@ -268,7 +358,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             using var connection = Open();
             using var tx = connection.BeginTransaction();
             Upsert(connection, "syncPaused", settings.SyncPaused ? "true" : "false");
-            Upsert(connection, "botToken", settings.BotToken);
+            SaveSecret(connection, ProtectedBotTokenSetting, BotTokenSetting, settings.BotToken);
             Upsert(connection, "startWithWindows", settings.StartWithWindows ? "true" : "false");
             Upsert(connection, "closeToTray", settings.CloseToTray ? "true" : "false");
             Upsert(connection, "namesChannelId", settings.NamesChannelId);
@@ -311,7 +401,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
             Upsert(connection, "proxyProtocol", ProxyProtocolLabel(settings.Proxy.Protocol));
             Upsert(connection, "proxyAuthEnabled", settings.Proxy.AuthenticationEnabled ? "true" : "false");
             Upsert(connection, "proxyUsername", settings.Proxy.Username);
-            Upsert(connection, "proxyPassword", settings.Proxy.Password);
+            SaveSecret(connection, ProtectedProxyPasswordSetting, ProxyPasswordSetting, settings.Proxy.Password);
             tx.Commit();
         }
     }
@@ -704,7 +794,9 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
     private void MigrateIniIfNeeded()
     {
-        if (Load().IsConfigured)
+        var settings = Load();
+        if (settings.IsConfigured ||
+            (string.IsNullOrEmpty(settings.BotToken) && !string.IsNullOrEmpty(ReadSettingValue(ProtectedBotTokenSetting))))
         {
             return;
         }
@@ -726,7 +818,6 @@ public sealed class SettingsStore : IEncryptionSecretStore
         }
 
         var values = ReadIni(ini);
-        var settings = Load();
         settings.BotToken = Get(values, "botToken", settings.BotToken);
         settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
         settings.FoldersForumId = Get(values, "foldersForumId", settings.FoldersForumId);

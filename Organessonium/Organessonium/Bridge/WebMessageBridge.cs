@@ -20,9 +20,7 @@ public sealed class WebMessageBridge
 
     public Task SetSettingsAsync(AppSettings settings)
     {
-        var jsonOptions = new JsonSerializerOptions(JsonOptions.Web);
-        jsonOptions.Converters.Add(new JsonStringEnumConverter());
-        var json = JsonSerializer.Serialize(settings, jsonOptions);
+        var json = JsonSerializer.Serialize(WebAppSettings.FromSettings(settings), JsonOptions.Web);
         return ExecuteAsync($"window.__organessoniumSettings={json};");
     }
 
