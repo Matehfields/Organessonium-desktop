@@ -29,6 +29,11 @@ número de build independente. A fonte única dos dois valores é `Version.props
   junto aos downloads de anexos.
 - A política do WebView2 valida os tipos dos argumentos e preserva a leitura de PDFs.
   Os workflows fixam ações externas por commit.
+- Tokens em INIs legados são retirados após migração ou protegidos com DPAPI. O logout
+  elimina os tokens desses arquivos para impedir a reimportação.
+- Downloads de anexos conferem o destino HTTPS do CDN a cada redirecionamento.
+- A importação aceita `ORGKEY` legado e conserva as chaves anteriores no Desktop.
+  Novos arquivos personalizados gravam o mesmo `keyId` reconhecido no Android.
 
 ## [1.0.0] - 2026-11-19
 

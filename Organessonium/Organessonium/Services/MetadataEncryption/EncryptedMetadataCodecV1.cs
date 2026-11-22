@@ -5,7 +5,8 @@ using Organessonium.Models;
 
 namespace Organessonium.Services.MetadataEncryption;
 
-internal sealed class EncryptedMetadataCodecV1(Func<string, byte[]> resolveMasterKey)
+internal sealed class EncryptedMetadataCodecV1(Func<string, byte[]> resolveMasterKey,
+    Func<IEnumerable<byte[]>>? historicalKeys = null)
 {
     internal string Encode(string json, string mode)
     {
@@ -71,12 +72,10 @@ internal sealed class EncryptedMetadataCodecV1(Func<string, byte[]> resolveMaste
         var ciphertext = Base64(envelope.Ciphertext);
         var tag = Base64(envelope.Tag, MetadataCryptoParameters.TagBytes);
         if (ciphertext.Length > MetadataCryptoParameters.MaxPlaintextBytes) throw new MetadataCodecException(MetadataError.TooLarge);
-        var key = Derive(envelope.KeyMode, salt);
+        var key = ResolveReadKey(envelope.KeyMode, salt, keyCheck);
         var plaintext = new byte[ciphertext.Length];
         try
         {
-            if (!CryptographicOperations.FixedTimeEquals(keyCheck, KeyCheck(key)))
-                throw new MetadataCodecException(MetadataError.KeyMismatch);
             using var aes = new AesGcm(key, MetadataCryptoParameters.TagBytes);
             try { aes.Decrypt(nonce, ciphertext, tag, plaintext, MetadataCryptoParameters.Aad(envelope)); }
             catch (AuthenticationTagMismatchException) { throw new MetadataCodecException(MetadataError.AuthenticationFailed); }
@@ -94,6 +93,39 @@ internal sealed class EncryptedMetadataCodecV1(Func<string, byte[]> resolveMaste
         byte[] master;
         try { master = resolveMasterKey(mode); }
         catch (CustomEncryptionKeyUnavailableException) { throw new MetadataCodecException(MetadataError.KeyUnavailable); }
+        return DeriveAndClear(master, salt);
+    }
+
+    private byte[] ResolveReadKey(string mode, byte[] salt, byte[] expectedCheck)
+    {
+        var unavailable = false;
+        byte[]? key = null;
+        try { key = Derive(mode, salt); }
+        catch (MetadataCodecException error) when (error.Error == MetadataError.KeyUnavailable &&
+            mode == EncryptionModes.Custom && historicalKeys != null) { unavailable = true; }
+        if (key != null && MatchesKey(key, expectedCheck)) return key;
+
+        if (mode == EncryptionModes.Custom && historicalKeys != null)
+        {
+            foreach (var master in historicalKeys())
+            {
+                var candidate = DeriveAndClear(master, salt);
+                if (MatchesKey(candidate, expectedCheck)) return candidate;
+                unavailable = false;
+            }
+        }
+        throw new MetadataCodecException(unavailable ? MetadataError.KeyUnavailable : MetadataError.KeyMismatch);
+    }
+
+    private static bool MatchesKey(byte[] key, byte[] expectedCheck)
+    {
+        if (CryptographicOperations.FixedTimeEquals(expectedCheck, KeyCheck(key))) return true;
+        CryptographicOperations.ZeroMemory(key);
+        return false;
+    }
+
+    private static byte[] DeriveAndClear(byte[] master, ReadOnlySpan<byte> salt)
+    {
         if (master.Length != MetadataCryptoParameters.KeyBytes)
         { CryptographicOperations.ZeroMemory(master); throw new MetadataCodecException(MetadataError.KeyUnavailable); }
         try

@@ -362,7 +362,7 @@ public sealed class MetadataService
 
     private static async Task<byte[]> DownloadAttachmentAsync(DiscordAttachmentDto attachment, CancellationToken token)
     {
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = NetworkConfig.Current.CreateAttachmentClient();
         using var response = await http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, token);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(token);

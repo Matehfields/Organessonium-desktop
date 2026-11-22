@@ -48,21 +48,21 @@ tratado com autorização e coordenação.
   removidas com a limpeza segura do SQLite. Se o material protegido estiver indisponível,
   salvar outras preferências mantém esse material para recuperação. A interface recebe
   apenas indicadores de configuração, nunca os valores.
-- Um `config.ini` legado usado para importar configurações não é removido nem alterado;
-  ele ainda pode conter um token em texto simples. Uma cópia fora da pasta de dados atual
-  também pode ser importada novamente após o logout. Verifique e trate esses arquivos
-  legados antes de compartilhar o computador, preservando os dados necessários a instalações antigas.
-  A limpeza segura do SQLite não elimina cópias anteriores, backups ou dados remanescentes
-  em armazenamento fora do banco ativo.
+- Na migração do `config.ini`, a credencial importada é removida após confirmar a leitura
+  do valor protegido no banco. Credenciais alternativas são protegidas com DPAPI. Sair
+  da conta limpa também os tokens dos INIs reconhecidos. Em caso de bloqueio do arquivo
+  a limpeza pode ser retomada. Backups e cópias anteriores continuam sensíveis.
 - O token é enviado apenas às requisições destinadas à API do Discord. Downloads de
-  anexos não recebem esse cabeçalho de autenticação.
+  anexos usam um cliente separado. O transporte de anexos autoriza somente HTTPS e
+  os domínios CDN previstos, inclusive nos redirecionamentos.
 - Quando o coletor de diagnóstico está indisponível, o log alternativo registra tipos,
   códigos e pontos da pilha de exceções, sem mensagens ou detalhes que possam conter segredos.
 - A chave de criptografia personalizada é exportada no formato `OEK2`, protegido por senha
-  do usuário com PBKDF2-SHA256 e AES-GCM. Arquivos `OEK1` de versões anteriores continuam
-  importáveis como formato legado. A senha não é armazenada. O Android verificado ainda
+  do usuário com PBKDF2-SHA256 e AES-GCM. Arquivos `OEK1` e `ORGKEY` continuam
+  importáveis como legado. A senha não é armazenada. O Android verificado ainda
   aceita `OEK1`, mas não importa `OEK2`; a compatibilidade do novo formato depende de uma
-  atualização no Android. O formato antigo não oferece confidencialidade por senha.
+  atualização no Android. Os formatos antigos não oferecem confidencialidade por senha.
+  Chaves anteriores são preservadas localmente em material protegido pelo DPAPI.
 - Mensagens enviadas pelo WebView2 são aceitas apenas de `https://organessonium.local/index.html`
   e `setup.html`, com allowlist de comandos, limite de tamanho e validação dos argumentos.
   Navegação para outros endereços é bloqueada; links externos legítimos são abertos fora do
@@ -71,8 +71,7 @@ tratado com autorização e coordenação.
   e `mailto`, imagens `http`, `https` e os esquemas internos de prévia, e removem scripts,
   eventos e estilos não permitidos. A leitura de PDFs usa o host virtual de mídia e o
   worker local do PDF.js.
-- Sair da conta remove as credenciais do banco e os dados locais associados ao login,
-  sujeito à ressalva sobre arquivos legados externos acima.
+- Sair da conta remove as credenciais do banco, dos INIs reconhecidos e os dados locais associados ao login.
 
 ## Assinatura digital
 

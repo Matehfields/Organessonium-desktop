@@ -14,22 +14,34 @@ public sealed class MetadataCodec : IMetadataCodec
 {
     private readonly EncryptedMetadataCodecV1 _v1;
     private readonly Func<string> _writeMode;
-    public MetadataCodec(Func<string, byte[]> resolveMasterKey, Func<string>? writeMode = null)
+    public MetadataCodec(Func<string, byte[]> resolveMasterKey, Func<string>? writeMode = null,
+        Func<IEnumerable<byte[]>>? historicalKeys = null)
     {
-        _v1 = new(resolveMasterKey);
+        _v1 = new(resolveMasterKey, historicalKeys);
         _writeMode = writeMode ?? (() => EncryptionModes.Standard);
     }
     public static MetadataCodec Standard() => new(_ => new DefaultEncryptionKeyProvider().GetMasterKey().ToArray());
     public static MetadataCodec ForEncryption(EncryptionService encryption, Func<string>? writeMode = null) =>
-        new(encryption.CopyMasterKeyForMetadata, writeMode);
+        new(encryption.CopyMasterKeyForMetadata, writeMode, encryption.CopyHistoricalKeys);
     public static MetadataCodec ForStore(SettingsStore store, Func<string>? writeMode = null) => new(mode =>
     {
         if (mode == EncryptionModes.Standard) return new DefaultEncryptionKeyProvider().GetMasterKey().ToArray();
         // Resolve the current DPAPI record so importing a recovery key cannot leave a stale metadata key.
         var custom = new CustomEncryptionKeyProvider(store);
-        try { return custom.GetMasterKey().ToArray(); }
+        try { return custom.CopyActiveKey(); }
         finally { custom.ClearCachedKey(); }
-    }, writeMode ?? (() => store.Load().EncryptionMode));
+    }, writeMode ?? (() => store.Load().EncryptionMode), () => HistoricalKeysForStore(store));
+
+    private static IEnumerable<byte[]> HistoricalKeysForStore(SettingsStore store)
+    {
+        var custom = new CustomEncryptionKeyProvider(store);
+        try
+        {
+            foreach (var key in custom.CopyHistoricalKeys())
+                yield return key;
+        }
+        finally { custom.ClearCachedKey(); }
+    }
 
     public string Encode(string plaintextJson)
     {

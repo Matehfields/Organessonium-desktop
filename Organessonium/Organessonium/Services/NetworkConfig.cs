@@ -34,15 +34,21 @@ public sealed class NetworkConfig
         }
     }
 
-    public HttpClient CreateClient()
+    public HttpClient CreateClient(bool allowAutoRedirect = true)
     {
-        return new HttpClient(CreateHandler(), disposeHandler: true)
+        return new HttpClient(CreateHandler(allowAutoRedirect), disposeHandler: true)
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
     }
 
-    public HttpMessageHandler CreateHandler()
+    internal HttpClient CreateAttachmentClient() => new(new DiscordAttachmentHandler(
+        CreateHandler(allowAutoRedirect: false, useCookies: false)))
+    {
+        Timeout = Timeout.InfiniteTimeSpan
+    };
+
+    public HttpMessageHandler CreateHandler(bool allowAutoRedirect = true, bool useCookies = true)
     {
         lock (_lock)
         {
@@ -50,7 +56,8 @@ public sealed class NetworkConfig
             {
                 UseProxy = !_direct,
                 Proxy = _proxy,
-                AllowAutoRedirect = true,
+                AllowAutoRedirect = allowAutoRedirect,
+                UseCookies = useCookies,
                 AutomaticDecompression = DecompressionMethods.All
             };
             return handler;

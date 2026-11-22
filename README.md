@@ -73,7 +73,8 @@ O projeto ainda não possui licença de uso e redistribuição definida. O códi
 ## Arquitetura de dados
 
 `DiscordApiClient` adiciona a autorização do bot somente às requisições destinadas à API
-HTTPS do Discord. As leituras das URLs de anexos usam o mesmo transporte sem esse cabeçalho.
+HTTPS do Discord. As leituras de anexos usam um cliente separado, sem o token do bot.
+Ele valida HTTPS e o domínio do CDN em cada requisição e redirecionamento.
 
 - `Bridge/AppController.cs` coordena upload, download, previews, transferências e a ponte WebView2.
 - `DesktopEntryPoint.cs` inicia o coletor temporário `Services/Diagnostics` antes de criar `App`; o coletor observa falhas, tempos e responsividade sem controlar os fluxos de negócio.
@@ -310,7 +311,9 @@ Os attachments criptografados usam nomes técnicos, como `payload.bin`, `chunk-1
 - **Chave personalizada:** a frase do usuário passa por PBKDF2-HMAC-SHA256 com salt aleatório e 600.000 iterações para produzir uma master key de 256 bits. O SQLite guarda apenas o material protegido pelo DPAPI do Windows para o usuário atual, nunca a frase ou a chave em plaintext.
 - **Recuperação:** Configurações permite exportar e importar um arquivo `.organessonium-key` versionado. A configuração inicial reserva uma etapa de segurança, depois do token, para escolher a proteção e importar a chave antes de conectar. Uma biblioteca personalizada exige a chave disponível antes da conexão. Criar uma chave nova requer confirmação de recuperação e não substitui a importação da chave que protege arquivos existentes; repetir a senha gera outro salt e não recupera a master key anterior. Esse arquivo é sensível e deve ser guardado fora do computador, pois permite recuperar arquivos protegidos pela chave personalizada.
 
-O Android verificado ainda importa e exporta `OEK1` e não aceita o novo `OEK2` protegido por senha. O Desktop continua importando `OEK1`, inclusive arquivos exportados pelo Android, mas um arquivo `OEK2` criado no Desktop exige atualização do importador Android antes de poder ser usado nele. Preserve as cópias legadas necessárias até essa adaptação; `OEK1` não protege a chave com senha.
+O Desktop só exporta `OEK2`. A importação aceita ainda `OEK1` e `ORGKEY` e avisa que esses formatos legados contêm a chave em claro. O Android auditado ainda precisa adotar `OEK2`. As mudanças necessárias estão no [relatório de compatibilidade](docs/COMPATIBILIDADE-MOBILE-DESKTOP.md).
+
+O Desktop arquiva a chave ativa protegida pelo DPAPI antes de ativar uma chave importada. Novos payloads personalizados usam o `keyId` interoperável do Android. A leitura de payloads sem identificador e de metadados V1 pode consultar as chaves históricas locais, validando a autenticação criptográfica. A exportação guarda a chave ativa. Mantenha uma cópia de recuperação de cada chave em uso. Até 32 chaves anteriores podem ser preservadas. Se o limite impedir uma troca, a chave ativa é mantida.
 
 Mudar o modo afeta somente uploads novos. Cada arquivo usa o modo registrado no próprio metadata, sem recriptografar conteúdo existente.
 
@@ -489,7 +492,7 @@ A configuração inicial usa três etapas: Token, Segurança e Conexão. A prime
 
 As configurações e os índices locais ficam em `organessonium.db`, dentro da pasta de dados. A tabela `settings` usa `key`, `value` e `updated_at`; cada gravação atualiza o valor e o horário em UTC pelo SQLite. O token do bot e a senha do proxy são gravados como valores protegidos pelo DPAPI no escopo do usuário Windows atual, com migração automática de registros antigos em texto simples. A interface recebe apenas indicadores de presença, nunca os valores. O logout remove esses registros junto com as demais configurações. `folder_index_map` persiste `folderId`, `threadId`, ID da mensagem em `names` e a referência do serial. `app_entries` é cache dos filhos já conhecidos, agrupado por `parent_folder_id`, e mantém também favorito, tipo de dispositivo, versão, modo e salt de criptografia sem armazenar qualquer chave.
 
-O importador mantém arquivos `config.ini` legados intactos para compatibilidade. Eles podem conter um token em texto simples e, quando ficam fora da pasta de dados atual, podem ser lidos novamente depois do logout. Sua revisão e remoção segura dependem de conferir se outras instalações ainda usam esses arquivos. A migração no SQLite não apaga backups ou cópias antigas do banco.
+O importador de `config.ini` preserva as preferências e remove o token correspondente quando confirma sua gravação no SQLite protegido por DPAPI. Uma credencial alternativa que ainda não foi importada é protegida no INI. O logout remove as credenciais dos INIs reconhecidos, inclusive fora da pasta de dados atual, antes de limpar o banco. A substituição é atômica. Se o arquivo estiver bloqueado, a migração pode concluir a gravação no banco e retomar a limpeza na próxima abertura. A migração não apaga backups ou cópias antigas.
 
 Configurações > Downloads exibe a pasta Downloads resolvida pelo Windows como destino padrão, inclusive quando redirecionada para outro volume. Uma preferência vazia usa esse destino sem abrir um seletor a cada download; escolher outra pasta continua disponível e a escolha é persistida. Não há pasta temporária configurável. Os caminhos operacionais dos checkpoints legados continuam legíveis para permitir retomada/migração, sem recriar essa preferência na interface.
 

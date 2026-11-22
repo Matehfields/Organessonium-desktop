@@ -1289,7 +1289,7 @@ public sealed partial class AppController : IAsyncDisposable
                 .Select(threadId => appsByThread[threadId])
                 .ToList();
             var downloader = Downloader();
-            using var http = NetworkConfig.Current.CreateClient();
+            using var http = NetworkConfig.Current.CreateAttachmentClient();
             using var previewSlots = new SemaphoreSlim(Math.Clamp(settings.PreviewThreads, 1, 8));
 
             async Task<string?> LoadThumbnailAsync(AppEntry app)

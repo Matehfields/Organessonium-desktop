@@ -61,7 +61,7 @@ public sealed partial class ForumDownloader
         _settings = settings;
         _encryption = encryption;
         _metadata = new MetadataService(MetadataCodec.ForEncryption(encryption));
-        _downloadClientFactory = downloadClientFactory ?? (() => NetworkConfig.Current.CreateClient());
+        _downloadClientFactory = downloadClientFactory ?? (() => NetworkConfig.Current.CreateAttachmentClient());
         _storageReads = storageReads;
     }
 
@@ -569,9 +569,11 @@ public sealed partial class ForumDownloader
         CancellationToken cancellationToken)
     {
         destDir.Create();
-        var fileName = string.IsNullOrWhiteSpace(attachment.FileName) ? "preview.bin" : attachment.FileName;
+        var cleanedName = PathRules.CleanFileName(attachment.FileName ?? "").TrimEnd('.', ' ');
+        var fileName = string.IsNullOrWhiteSpace(attachment.FileName) || cleanedName.Length == 0
+            ? "preview.bin" : cleanedName;
         var target = new FileInfo(Path.Combine(destDir.FullName, fileName));
-        using var http = NetworkConfig.Current.CreateClient();
+        using var http = NetworkConfig.Current.CreateAttachmentClient();
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -580,7 +582,7 @@ public sealed partial class ForumDownloader
                 response.EnsureSuccessStatusCode();
                 await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
                 await using var output = new FileStream(target.FullName, FileMode.Create, FileAccess.Write, FileShare.None, DownloadBufferSize, true);
-                var downloaded = await CopyWithProgressAsync(input, output, 0, Math.Max(0, attachment.Size), attachment.FileName, onProgress, cancellationToken);
+                var downloaded = await CopyWithProgressAsync(input, output, 0, Math.Max(0, attachment.Size), fileName, onProgress, cancellationToken);
                 onProgress?.Invoke(new DownloadProgress(100, "ConcluÃ­do", downloaded, Math.Max(0, attachment.Size)));
                 target.Refresh();
                 return target.Exists && target.Length > 0 ? target : null;

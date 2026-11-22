@@ -17,15 +17,19 @@ public sealed class SettingsStore : IEncryptionSecretStore
     internal const string ProtectedProxyPasswordSetting = "proxyPasswordProtectedV1";
     private readonly object _lock = new();
     private readonly bool _cleanupDefaultData;
+    private readonly string? _legacyIniPath;
 
     public SettingsStore()
         : this(ResolveDataDirectory(), migrateIni: true, cleanupDefaultData: true)
     {
     }
 
-    internal SettingsStore(DirectoryInfo dataDirectory, bool migrateIni = false, bool cleanupDefaultData = false)
+    internal SettingsStore(DirectoryInfo dataDirectory, bool migrateIni = false, bool cleanupDefaultData = false, string? legacyIniPath = null)
     {
         _cleanupDefaultData = cleanupDefaultData;
+        var appData = cleanupDefaultData ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) : "";
+        _legacyIniPath = legacyIniPath ?? (string.IsNullOrWhiteSpace(appData)
+            ? null : Path.Combine(appData, "Organessonium", "config.ini"));
         DataDirectory = dataDirectory;
         AppLogger.Configure(DataDirectory);
         PreviewCacheDirectory = Directory.CreateDirectory(System.IO.Path.Combine(DataDirectory.FullName, "Previews"));
@@ -114,6 +118,8 @@ public sealed class SettingsStore : IEncryptionSecretStore
     {
         lock (_lock)
         {
+            foreach (var ini in LegacyIniPaths())
+                ProtectIniToken(ini, null, removeAll: true);
             ThumbnailCache.Clear();
             var writerIdentities = new Dictionary<string, string>(StringComparer.Ordinal);
             using (var connection = Open())
@@ -153,7 +159,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
         using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "DELETE FROM settings; DELETE FROM app_entries; DELETE FROM folder_index_map;";
+        command.CommandText = "PRAGMA secure_delete = ON; DELETE FROM settings; DELETE FROM app_entries; DELETE FROM folder_index_map;";
         command.ExecuteNonQuery();
         transaction.Commit();
     }
@@ -795,30 +801,51 @@ public sealed class SettingsStore : IEncryptionSecretStore
     private void MigrateIniIfNeeded()
     {
         var settings = Load();
+        try
+        {
+            ImportLegacyIni(settings);
+            // Only a token read back from DPAPI can replace the matching legacy value.
+            LocalSecretProtector.TryUnprotect(ReadSettingValue(ProtectedBotTokenSetting), out var savedToken);
+            foreach (var ini in LegacyIniPaths())
+                ProtectIniToken(ini, savedToken);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+        {
+            AppLogger.Error("Settings.IniMigration", error);
+        }
+    }
+
+    private IEnumerable<string> LegacyIniPaths()
+    {
+        var local = Path.Combine(DataDirectory.FullName, "config.ini");
+        yield return local;
+        if (_legacyIniPath != null && !SamePath(local, _legacyIniPath)) yield return _legacyIniPath;
+    }
+
+    private void ImportLegacyIni(AppSettings settings)
+    {
         if (settings.IsConfigured ||
             (string.IsNullOrEmpty(settings.BotToken) && !string.IsNullOrEmpty(ReadSettingValue(ProtectedBotTokenSetting))))
         {
             return;
         }
 
-        var candidates = new List<string>
-        {
-            System.IO.Path.Combine(DataDirectory.FullName, "config.ini")
-        };
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        if (!string.IsNullOrWhiteSpace(appData))
-        {
-            candidates.Add(System.IO.Path.Combine(appData, "Organessonium", "config.ini"));
-        }
-
-        var ini = candidates.FirstOrDefault(File.Exists);
+        var ini = LegacyIniPaths().FirstOrDefault(File.Exists);
         if (ini == null)
         {
             return;
         }
 
+        if ((File.GetAttributes(ini) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("A configuração legada não pode ser um link.");
         var values = ReadIni(ini);
-        settings.BotToken = Get(values, "botToken", settings.BotToken);
+        if (string.IsNullOrEmpty(settings.BotToken))
+        {
+            settings.BotToken = Get(values, BotTokenSetting, "");
+            if (string.IsNullOrEmpty(settings.BotToken) &&
+                LocalSecretProtector.TryUnprotect(Get(values, ProtectedBotTokenSetting, ""), out var protectedToken))
+                settings.BotToken = protectedToken;
+        }
         settings.NamesChannelId = Get(values, "namesChannelId", settings.NamesChannelId);
         settings.FoldersForumId = Get(values, "foldersForumId", settings.FoldersForumId);
         settings.AppsForumId = Get(values, "appsForumId", settings.AppsForumId);
@@ -843,6 +870,57 @@ public sealed class SettingsStore : IEncryptionSecretStore
         settings.MaxParallelUploads = Math.Clamp(GetInt(values, "maxParallelUploads", settings.MaxParallelUploads), 1, DiscordLimits.MaxPendingUploadFiles);
         settings.MaxParallelDownloads = Math.Clamp(GetInt(values, "maxParallelDownloads", settings.MaxParallelDownloads), 1, 16);
         Save(settings);
+    }
+
+    private static void ProtectIniToken(string path, string? savedToken, bool removeAll = false)
+    {
+        string[] lines;
+        try
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("A configuração legada não pode ser um link.");
+            lines = File.ReadAllLines(path);
+        }
+        catch (FileNotFoundException) { return; }
+        catch (DirectoryNotFoundException) { return; }
+
+        var changed = false;
+        var safeLines = new List<string>(lines.Length);
+        foreach (var line in lines)
+        {
+            var separator = line.IndexOf('=');
+            var key = separator > 0 ? line[..separator].Trim() : "";
+            var plaintext = key.Equals(BotTokenSetting, StringComparison.OrdinalIgnoreCase);
+            var protectedEntry = key.Equals(ProtectedBotTokenSetting, StringComparison.OrdinalIgnoreCase);
+            if (!plaintext && !protectedEntry)
+            {
+                safeLines.Add(line);
+                continue;
+            }
+            var value = line[(separator + 1)..].Trim();
+            if (removeAll || (savedToken is { Length: > 0 } &&
+                (plaintext ? value == savedToken :
+                    LocalSecretProtector.TryUnprotect(value, out var oldToken) && oldToken == savedToken)))
+            {
+                changed = true;
+                continue;
+            }
+            if (plaintext)
+            {
+                safeLines.Add(ProtectedBotTokenSetting + "=" + LocalSecretProtector.Protect(value));
+                changed = true;
+            }
+            else safeLines.Add(line);
+        }
+        if (!changed) return;
+
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllLines(temporary, safeLines);
+            File.Replace(temporary, path, null);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
     string IEncryptionSecretStore.ReadEncryptionSecret(string key) => ReadSettingValue(key);

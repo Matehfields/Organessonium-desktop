@@ -15,19 +15,25 @@ public sealed partial class DiscordApiClient : IDisposable
     public const int MaxActiveThreadsCode = 160006;
 
     private readonly HttpClient _http;
+    private readonly HttpClient _attachments;
     private readonly AuthenticationHeaderValue _authorization;
     private readonly string _storageAccountKey;
     private readonly DiscordRequestLimiter _rateLimiter;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _routeLocks = new(StringComparer.Ordinal);
 
-public DiscordApiClient(string botToken)
-        : this(botToken, NetworkConfig.Current.CreateClient())
+    public DiscordApiClient(string botToken)
+        : this(botToken, NetworkConfig.Current.CreateClient(allowAutoRedirect: false), NetworkConfig.Current.CreateAttachmentClient())
     {
     }
 
-    public DiscordApiClient(string botToken, HttpClient http)
+    public DiscordApiClient(string botToken, HttpClient http) : this(botToken, http, http)
+    {
+    }
+
+    internal DiscordApiClient(string botToken, HttpClient http, HttpClient attachments)
     {
         _http = http;
+        _attachments = attachments;
         _storageAccountKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(botToken)));
         _rateLimiter = DiscordRequestLimiter.ForToken(botToken);
         _http.Timeout = Timeout.InfiniteTimeSpan;
@@ -828,7 +834,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
             {
                 try
                 {
-                    using var response = await _http.GetAsync(
+                    using var response = await _attachments.GetAsync(
                         url,
                         HttpCompletionOption.ResponseHeadersRead,
                         cancellationToken);
@@ -902,6 +908,7 @@ public async Task<IReadOnlyList<DiscordMessageDto>> GetMessagesAsync(
     {
         _payloadLifetime.Cancel();
         _http.Dispose();
+        if (!ReferenceEquals(_attachments, _http)) _attachments.Dispose();
         foreach (var gate in _routeLocks.Values)
         {
             gate.Dispose();

@@ -38,7 +38,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
             Index = new VideoChunkIndex(_attachments.Select(a => a.Size - (context == null ? 0 : EncryptionService.EnvelopeOverheadBytes)), expectedLength);
         }
         catch { http?.Dispose(); throw; }
-        _http = http ?? NetworkConfig.Current.CreateClient();
+        _http = http ?? NetworkConfig.Current.CreateAttachmentClient();
         _http.Timeout = TimeSpan.FromSeconds(60);
     }
 

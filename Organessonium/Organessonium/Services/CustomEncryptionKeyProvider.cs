@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.IO;
 
 namespace Organessonium.Services;
@@ -16,6 +17,7 @@ internal static class EncryptionSettingKeys
     public const string ProtectedMasterKey = "customEncryptionMasterKeyProtectedV1";
     public const string KdfSalt = "customEncryptionKdfSaltV1";
     public const string KdfIterations = "customEncryptionKdfIterationsV1";
+    public const string HistoricalMasterKeys = "customEncryptionHistoricalKeysProtectedV1";
 }
 
 public enum CustomKeyImportKind
@@ -46,8 +48,10 @@ public sealed class CustomEncryptionKeyProvider
     private const int ProtectedHeaderBytes = 25;
     private const int ProtectedFileBytes = ProtectedHeaderBytes + RecoveryNonceBytes + MasterKeyBytes + RecoveryTagBytes;
     private const int LegacyFileBytes = 6 + MasterKeyBytes + 32;
+    private const int MaximumHistoricalKeys = 32;
     private static readonly byte[] ProtectionEntropy = Encoding.UTF8.GetBytes("Organessonium/custom-master/v1");
     private static readonly byte[] LegacyRecoveryMagic = "OEK1"u8.ToArray();
+    private static readonly byte[] AndroidRecoveryMagic = "ORGKEY"u8.ToArray();
     private static readonly byte[] ProtectedRecoveryMagic = "OEK2"u8.ToArray();
     private byte[]? _masterKey;
     private readonly IEncryptionSecretStore _store;
@@ -61,10 +65,10 @@ public sealed class CustomEncryptionKeyProvider
 
     public void ClearCachedKey()
     {
-        var masterKey = Interlocked.Exchange(ref _masterKey, null);
-        if (masterKey != null)
+        lock (_store)
         {
-            CryptographicOperations.ZeroMemory(masterKey);
+            if (_masterKey != null) CryptographicOperations.ZeroMemory(_masterKey);
+            _masterKey = null;
         }
     }
 
@@ -103,40 +107,98 @@ public sealed class CustomEncryptionKeyProvider
         }
     }
 
-    public byte[] GetMasterKey()
+    public byte[] GetMasterKey() => CopyActiveKey();
+
+    // Callers own this copy and can zero it while another operation imports a key.
+    internal byte[] CopyActiveKey()
     {
-        if (_masterKey != null)
-        {
-            return _masterKey;
-        }
+        lock (_store) return LoadActiveKey().ToArray();
+    }
 
-        var protectedValue = _store.ReadEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey);
-        if (string.IsNullOrWhiteSpace(protectedValue))
-        {
-            throw new CustomEncryptionKeyUnavailableException("A chave personalizada não está disponível neste dispositivo.");
-        }
+    internal string ActiveKeyId
+    {
+        get { lock (_store) return KeyId(LoadActiveKey()); }
+    }
 
+    internal static string KeyId(ReadOnlySpan<byte> key) =>
+        Convert.ToBase64String(SHA256.HashData(key)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    internal byte[] CopyKey(string keyId)
+    {
+        lock (_store)
+        {
+            if (TryCopyActiveKey() is { } active)
+            {
+                if (KeyId(active) == keyId) return active;
+                CryptographicOperations.ZeroMemory(active);
+            }
+            if (ReadHistory().TryGetValue(keyId, out var stored) && TryOpenKey(stored) is { } historical)
+            {
+                if (KeyId(historical) == keyId) return historical;
+                CryptographicOperations.ZeroMemory(historical);
+            }
+        }
+        throw new CustomEncryptionKeyUnavailableException("A chave personalizada deste arquivo não está disponível.");
+    }
+
+    internal IEnumerable<byte[]> CopyHistoricalKeys()
+    {
+        Dictionary<string, string> history;
+        string? activeId = null;
+        lock (_store)
+        {
+            if (TryCopyActiveKey() is { } active)
+            {
+                activeId = KeyId(active);
+                CryptographicOperations.ZeroMemory(active);
+            }
+            history = ReadHistory();
+        }
+        foreach (var (id, stored) in history)
+        {
+            if (id == activeId || TryOpenKey(stored) is not { } historical) continue;
+            if (id.StartsWith('!') || KeyId(historical) == id)
+            {
+                yield return historical;
+            }
+            else CryptographicOperations.ZeroMemory(historical);
+        }
+    }
+
+    private byte[] LoadActiveKey() => _masterKey ??=
+        TryOpenKey(_store.ReadEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey))
+        ?? throw new CustomEncryptionKeyUnavailableException("Não foi possível abrir a chave personalizada neste dispositivo.");
+
+    private byte[]? TryCopyActiveKey()
+    {
+        try { return CopyActiveKey(); }
+        catch (CustomEncryptionKeyUnavailableException) { return null; }
+    }
+
+    private static byte[]? TryOpenKey(string stored)
+    {
+        if (string.IsNullOrEmpty(stored)) return null;
         try
         {
-            var protectedBytes = Convert.FromBase64String(protectedValue);
-            var masterKey = ProtectedData.Unprotect(protectedBytes, ProtectionEntropy, DataProtectionScope.CurrentUser);
-            if (masterKey.Length != MasterKeyBytes)
+            var protectedBytes = Convert.FromBase64String(stored);
+            try
             {
-                CryptographicOperations.ZeroMemory(masterKey);
-                throw new CryptographicException("Material de chave personalizado inválido.");
+                var key = ProtectedData.Unprotect(protectedBytes, ProtectionEntropy, DataProtectionScope.CurrentUser);
+                if (key.Length == MasterKeyBytes) return key;
+                CryptographicOperations.ZeroMemory(key);
+                return null;
             }
+            finally { CryptographicOperations.ZeroMemory(protectedBytes); }
+        }
+        catch (Exception error) when (error is FormatException or CryptographicException) { return null; }
+    }
 
-            _masterKey = masterKey;
-            return _masterKey;
-        }
-        catch (CustomEncryptionKeyUnavailableException)
-        {
-            throw;
-        }
-        catch (Exception ex) when (ex is FormatException or CryptographicException)
-        {
-            throw new CustomEncryptionKeyUnavailableException("Não foi possível abrir a chave personalizada neste dispositivo.", ex);
-        }
+    private Dictionary<string, string> ReadHistory()
+    {
+        var value = _store.ReadEncryptionSecret(EncryptionSettingKeys.HistoricalMasterKeys);
+        if (value.Length == 0) return new(StringComparer.Ordinal);
+        return JsonSerializer.Deserialize<Dictionary<string, string>>(value)
+            ?? throw new InvalidDataException("O histórico de chaves deste dispositivo é inválido.");
     }
 
     public static void ValidateRecoveryPassword(string? password)
@@ -160,7 +222,7 @@ public sealed class CustomEncryptionKeyProvider
     {
         ValidateRecoveryPassword(password);
 
-        var masterKey = GetMasterKey();
+        var masterKey = CopyActiveKey();
         var header = new byte[ProtectedHeaderBytes];
         ProtectedRecoveryMagic.CopyTo(header, 0);
         header[4] = 1;
@@ -213,6 +275,7 @@ public sealed class CustomEncryptionKeyProvider
             CryptographicOperations.ZeroMemory(salt);
             CryptographicOperations.ZeroMemory(nonce);
             CryptographicOperations.ZeroMemory(payload);
+            CryptographicOperations.ZeroMemory(masterKey);
         }
     }
 
@@ -236,9 +299,9 @@ public sealed class CustomEncryptionKeyProvider
         }
 
         var payload = new byte[(int)length];
-        await stream.ReadExactlyAsync(payload, cancellationToken);
         try
         {
+            await stream.ReadExactlyAsync(payload, cancellationToken);
             if (payload.Length > MaximumRecoveryFileBytes)
             {
                 throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
@@ -253,6 +316,11 @@ public sealed class CustomEncryptionKeyProvider
             if (payload.AsSpan().StartsWith(LegacyRecoveryMagic))
             {
                 ImportLegacy(payload);
+                return CustomKeyImportKind.Legacy;
+            }
+            if (payload.AsSpan().StartsWith(AndroidRecoveryMagic))
+            {
+                ImportLegacy(payload, android: true);
                 return CustomKeyImportKind.Legacy;
             }
 
@@ -329,17 +397,19 @@ public sealed class CustomEncryptionKeyProvider
         }
     }
 
-    private void ImportLegacy(ReadOnlySpan<byte> payload)
+    private void ImportLegacy(ReadOnlySpan<byte> payload, bool android = false)
     {
-        if (payload.Length != LegacyFileBytes || payload[4] != 1 || payload[5] != MasterKeyBytes)
+        var keyOffset = android ? 7 : 6;
+        if (payload.Length != LegacyFileBytes + (android ? 1 : 0) ||
+            (android ? payload[6] != 1 : payload[4] != 1 || payload[5] != MasterKeyBytes))
         {
             throw new InvalidOperationException("O arquivo de recuperação não possui um formato compatível.");
         }
 
-        var masterKey = payload.Slice(6, MasterKeyBytes).ToArray();
-        var body = payload.Slice(0, 6 + MasterKeyBytes);
-        var expectedTag = HMACSHA256.HashData(masterKey, body);
-        var suppliedTag = payload.Slice(6 + MasterKeyBytes, expectedTag.Length);
+        var masterKey = payload.Slice(keyOffset, MasterKeyBytes).ToArray();
+        var body = payload[..(keyOffset + MasterKeyBytes)];
+        var expectedTag = android ? SHA256.HashData(body) : HMACSHA256.HashData(masterKey, body);
+        var suppliedTag = payload[body.Length..];
         if (!CryptographicOperations.FixedTimeEquals(expectedTag, suppliedTag))
         {
             CryptographicOperations.ZeroMemory(masterKey);
@@ -370,20 +440,40 @@ public sealed class CustomEncryptionKeyProvider
         var protectedBytes = ProtectedData.Protect(masterKey, ProtectionEntropy, DataProtectionScope.CurrentUser);
         try
         {
-            _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfSalt, Convert.ToBase64String(kdfSalt));
-            _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfIterations, iterations.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            _store.WriteEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey, Convert.ToBase64String(protectedBytes));
-
-            if (_masterKey != null)
+            lock (_store)
             {
-                CryptographicOperations.ZeroMemory(_masterKey);
+                ArchivePreviousKey(masterKey);
+                _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfSalt, Convert.ToBase64String(kdfSalt));
+                _store.WriteEncryptionSecret(EncryptionSettingKeys.KdfIterations, iterations.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                _store.WriteEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey, Convert.ToBase64String(protectedBytes));
+
+                if (_masterKey != null) CryptographicOperations.ZeroMemory(_masterKey);
+                _masterKey = masterKey;
             }
-            _masterKey = masterKey;
         }
         finally
         {
             CryptographicOperations.ZeroMemory(protectedBytes);
         }
+    }
+
+    private void ArchivePreviousKey(ReadOnlySpan<byte> replacement)
+    {
+        var stored = _store.ReadEncryptionSecret(EncryptionSettingKeys.ProtectedMasterKey);
+        if (string.IsNullOrEmpty(stored)) return;
+        var previous = TryOpenKey(stored);
+        try
+        {
+            if (previous != null && CryptographicOperations.FixedTimeEquals(previous, replacement)) return;
+            var id = previous != null ? KeyId(previous) : "!" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(stored)));
+            var history = ReadHistory();
+            if (history.ContainsKey(id)) return;
+            if (history.Count >= MaximumHistoricalKeys)
+                throw new InvalidOperationException("O histórico de chaves está cheio. A chave atual foi preservada.");
+            history.Add(id, stored);
+            _store.WriteEncryptionSecret(EncryptionSettingKeys.HistoricalMasterKeys, JsonSerializer.Serialize(history));
+        }
+        finally { if (previous != null) CryptographicOperations.ZeroMemory(previous); }
     }
 }
 

@@ -26,8 +26,10 @@ public sealed class EncryptionService
 
     public bool HasCustomKey => _customKeyProvider.HasStoredKey;
 
-    internal byte[] CopyMasterKeyForMetadata(string mode) => (mode == EncryptionModes.Custom
-        ? _customKeyProvider.GetMasterKey() : _defaultKeyProvider.GetMasterKey()).ToArray();
+    internal byte[] CopyMasterKeyForMetadata(string mode) => mode == EncryptionModes.Custom
+        ? _customKeyProvider.CopyActiveKey() : _defaultKeyProvider.GetMasterKey().ToArray();
+
+    internal IEnumerable<byte[]> CopyHistoricalKeys() => _customKeyProvider.CopyHistoricalKeys();
 
     public void ClearCustomKey()
     {
@@ -42,10 +44,12 @@ public sealed class EncryptionService
 
     public EncryptionMetadata CreateFileEncryption(string mode)
     {
+        var normalizedMode = EncryptionModes.Normalize(mode);
         return new EncryptionMetadata
         {
             Version = EncryptionMetadata.CurrentVersion,
-            Mode = EncryptionModes.Normalize(mode),
+            Mode = normalizedMode,
+            KeyId = normalizedMode == EncryptionModes.Custom ? _customKeyProvider.ActiveKeyId : null,
             Salt = EncryptionMetadataCodec.EncodeSalt(RandomNumberGenerator.GetBytes(FileSaltBytes))
         };
     }
@@ -375,34 +379,36 @@ public sealed class EncryptionService
 
             if (plaintextBuffer != null && plaintextBuffer.Length != ciphertextLength)
                 throw new EncryptedPayloadFormatException("O buffer de destino não corresponde ao tamanho autenticado do payload.");
-            var fileKey = DeriveFileKey(context.FileId, context.Encryption, salt);
             var plaintext = plaintextBuffer ?? new byte[ciphertextLength];
-            try
+            var keys = ReadFileKeys(context, salt);
+            CryptographicException? authenticationError = null;
+            foreach (var fileKey in keys)
             {
-                using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
-                aes.Decrypt(
-                    payload.Slice(42, NonceBytes),
-                    payload.Slice(EnvelopeHeaderBytes, ciphertextLength),
-                    payload.Slice(EnvelopeHeaderBytes + ciphertextLength, AuthenticationTagBytes),
-                    plaintext,
-                    payload[..EnvelopeHeaderBytes]);
-                context.Checksums?.VerifyChunk(context.ChunkIndex, plaintext);
-                return plaintext;
+                try
+                {
+                    using var aes = new AesGcm(fileKey, AuthenticationTagBytes);
+                    aes.Decrypt(
+                        payload.Slice(42, NonceBytes),
+                        payload.Slice(EnvelopeHeaderBytes, ciphertextLength),
+                        payload.Slice(EnvelopeHeaderBytes + ciphertextLength, AuthenticationTagBytes),
+                        plaintext,
+                        payload[..EnvelopeHeaderBytes]);
+                    context.Checksums?.VerifyChunk(context.ChunkIndex, plaintext);
+                    return plaintext;
+                }
+                catch (AuthenticationTagMismatchException error)
+                {
+                    CryptographicOperations.ZeroMemory(plaintext);
+                    authenticationError = error;
+                }
+                catch (PayloadChecksumException)
+                {
+                    CryptographicOperations.ZeroMemory(plaintext);
+                    throw;
+                }
+                finally { CryptographicOperations.ZeroMemory(fileKey); }
             }
-            catch (CryptographicException ex)
-            {
-                CryptographicOperations.ZeroMemory(plaintext);
-                throw new EncryptedPayloadAuthenticationException("O payload criptografado não pôde ser autenticado.", ex);
-            }
-            catch (PayloadChecksumException)
-            {
-                CryptographicOperations.ZeroMemory(plaintext);
-                throw;
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(fileKey);
-            }
+            throw new EncryptedPayloadAuthenticationException("O payload criptografado não pôde ser autenticado.", authenticationError);
         }
         finally
         {
@@ -410,7 +416,37 @@ public sealed class EncryptionService
         }
     }
 
+    private IEnumerable<byte[]> ReadFileKeys(EncryptedPayloadContext context, byte[] salt)
+    {
+        var encryption = context.Encryption;
+        var custom = EncryptionModes.Normalize(encryption.Mode) == EncryptionModes.Custom;
+        byte[]? active = null;
+        try { active = DeriveFileKey(context.FileId, encryption, salt); }
+        catch (CustomEncryptionKeyUnavailableException) when (custom) { }
+        if (active != null) yield return active;
+        if (!custom || !string.IsNullOrWhiteSpace(encryption.KeyId)) yield break;
+
+        foreach (var historical in _customKeyProvider.CopyHistoricalKeys())
+        {
+            byte[] derived;
+            try { derived = DeriveFileKey(context.FileId, encryption, salt, historical); }
+            finally { CryptographicOperations.ZeroMemory(historical); }
+            yield return derived;
+        }
+    }
+
     private byte[] DeriveFileKey(string fileId, EncryptionMetadata encryption, byte[] salt)
+    {
+        var masterKey = EncryptionModes.Normalize(encryption.Mode) == EncryptionModes.Custom
+            ? string.IsNullOrWhiteSpace(encryption.KeyId)
+                ? _customKeyProvider.CopyActiveKey()
+                : _customKeyProvider.CopyKey(encryption.KeyId)
+            : _defaultKeyProvider.GetMasterKey().ToArray();
+        try { return DeriveFileKey(fileId, encryption, salt, masterKey); }
+        finally { CryptographicOperations.ZeroMemory(masterKey); }
+    }
+
+    private static byte[] DeriveFileKey(string fileId, EncryptionMetadata encryption, byte[] salt, byte[] masterKey)
     {
         if (string.IsNullOrWhiteSpace(fileId) || encryption.Version != EncryptionMetadata.CurrentVersion ||
             !EncryptionModes.IsSupported(encryption.Mode))
@@ -418,9 +454,6 @@ public sealed class EncryptionService
             throw new EncryptedPayloadFormatException("Os metadados de criptografia do arquivo são inválidos.");
         }
 
-        var masterKey = EncryptionModes.Normalize(encryption.Mode) == EncryptionModes.Custom
-            ? _customKeyProvider.GetMasterKey()
-            : _defaultKeyProvider.GetMasterKey();
         var fileKey = new byte[32];
         var encodedFileId = Encoding.UTF8.GetBytes(fileId.Trim());
         var domain = Encoding.UTF8.GetBytes("organessonium/file-key/v1");

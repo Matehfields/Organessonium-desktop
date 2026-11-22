@@ -8,7 +8,7 @@ public sealed class ProgressiveDownload : IDisposable
     private const int MaxAttempts = 4;
 private readonly IReadOnlyList<ProgressiveDownloadPart> _parts;
     private readonly FileInfo _file;
-    private readonly HttpClient _http = NetworkConfig.Current.CreateClient();
+    private readonly HttpClient _http = NetworkConfig.Current.CreateAttachmentClient();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly Action<DownloadProgress>? _onProgress;

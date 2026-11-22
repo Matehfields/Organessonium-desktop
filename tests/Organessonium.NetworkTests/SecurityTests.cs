@@ -7,6 +7,7 @@ using Microsoft.Web.WebView2.Core;
 using Organessonium.Bridge;
 using Organessonium.Models;
 using Organessonium.Services;
+using Organessonium.Services.MetadataEncryption;
 
 namespace Organessonium.NetworkTests;
 
@@ -53,6 +54,60 @@ internal static partial class Program
         return handler.ApiAuthorized && !handler.AttachmentAuthorized && contents.SequenceEqual(new byte[] { 1, 2, 3 })
             ? TestOutcome.Pass()
             : TestOutcome.Fail("a autenticação não ficou restrita à requisição da API");
+    }
+
+    private sealed class AttachmentRedirectFixture : HttpMessageHandler
+    {
+        internal int Calls { get; private set; }
+        internal bool SafeHeaders { get; private set; } = true;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++;
+            SafeHeaders &= request.Headers.Authorization == null &&
+                !request.Headers.Contains("Cookie") && request.Headers.Range?.ToString() == "bytes=0-1";
+            var response = new HttpResponseMessage(HttpStatusCode.TemporaryRedirect);
+            switch (request.RequestUri!.AbsolutePath)
+            {
+                case "/start":
+                    response.Headers.Location = new Uri("https://media.discordapp.net/next");
+                    break;
+                case "/next":
+                    response.Headers.Location = new Uri("/final", UriKind.Relative);
+                    break;
+                case "/final":
+                    response.StatusCode = HttpStatusCode.PartialContent;
+                    response.Content = new ByteArrayContent([4, 2]);
+                    break;
+                default:
+                    response.Headers.Location = new Uri("https://cdn.discordapp.com.example.test/attachment");
+                    break;
+            }
+            return Task.FromResult(response);
+        }
+    }
+
+    private static async Task<TestOutcome> DiscordAttachmentRedirectPolicyAsync()
+    {
+        var fixture = new AttachmentRedirectFixture();
+        using var client = new HttpClient(new DiscordAttachmentHandler(fixture));
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bot", "fixture");
+        client.DefaultRequestHeaders.Add("Cookie", "fixture=value");
+        client.DefaultRequestHeaders.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 1);
+        using var result = await client.GetAsync("https://cdn.discordapp.com/start");
+        var bytes = await result.Content.ReadAsByteArrayAsync();
+        RequireSync(result.StatusCode == HttpStatusCode.PartialContent && bytes.SequenceEqual(new byte[] { 4, 2 }) &&
+            fixture.Calls == 3, "anexo autorizado não chegou ao destino aprovado");
+        RequireSync(await ThrowsAsync<InvalidDataException>(() => client.GetAsync("https://cdn.discordapp.com/forbidden")) &&
+            fixture.Calls == 4, "redirecionamento externo chegou ao transporte");
+        foreach (var forbidden in new[] { "https://127.0.0.1/a", "http://cdn.discordapp.com/a",
+            "https://cdn.discordapp.com:8443/a", "https://fixture@cdn.discordapp.com/a" })
+        {
+            RequireSync(await ThrowsAsync<InvalidDataException>(() => client.GetAsync(forbidden)) &&
+                fixture.Calls == 4, "destino inválido chegou ao transporte");
+        }
+        RequireSync(fixture.SafeHeaders, "credenciais chegaram ao CDN ou o Range foi perdido");
+        return TestOutcome.Pass();
     }
 
     private static Task<TestOutcome> DiscordErrorDoesNotExposeResponseAsync()
@@ -327,6 +382,105 @@ internal static partial class Program
         }
     }
 
+    private static Task<TestOutcome> IniMigrationProtectsCredentialsAndLogoutAsync()
+    {
+        var root = Directory.CreateTempSubdirectory("organessonium-ini-logout-");
+        try
+        {
+            var data = root.CreateSubdirectory("data");
+            var legacyPath = Path.Combine(root.FullName, "config.ini");
+            const string token = "credencial-legada-ficticia";
+            File.WriteAllText(legacyPath, "botToken=" + token + "\nnamesChannelId=names\nfoldersForumId=folders\nappsForumId=files\nserialChannelId=serial\n");
+            // A lock simulates an interruption between database commit and INI replacement.
+            using (File.Open(legacyPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var interrupted = new SettingsStore(data, migrateIni: true, legacyIniPath: legacyPath);
+                RequireSync(interrupted.Load().BotToken == token, "a falha ao substituir o INI perdeu a credencial");
+            }
+            var reopened = new SettingsStore(data, migrateIni: true, legacyIniPath: legacyPath);
+            var migrated = File.ReadAllText(legacyPath);
+            RequireSync(reopened.Load().IsConfigured && !migrated.Contains(token, StringComparison.Ordinal) &&
+                migrated.Contains("namesChannelId=names", StringComparison.Ordinal), "a retomada não removeu o token já persistido ou perdeu preferências");
+
+            File.AppendAllText(legacyPath, "botToken=alternativa-legada-ficticia\n");
+            var configured = new SettingsStore(data, migrateIni: true, legacyIniPath: legacyPath);
+            var protectedIni = File.ReadAllText(legacyPath);
+            RequireSync(configured.Load().BotToken == token &&
+                !protectedIni.Contains("alternativa-legada-ficticia", StringComparison.Ordinal) &&
+                protectedIni.Contains(SettingsStore.ProtectedBotTokenSetting + "=", StringComparison.Ordinal),
+                "o token alternativo substituiu o ativo ou permaneceu em claro");
+            configured.ClearLocalDataForLogout();
+            var loggedOut = new SettingsStore(data, migrateIni: true, legacyIniPath: legacyPath);
+            RequireSync(loggedOut.Load().BotToken.Length == 0 &&
+                !File.ReadAllText(legacyPath).Contains("botToken", StringComparison.OrdinalIgnoreCase),
+                "o INI externo voltou a fornecer uma credencial após logout");
+            return Task.FromResult(TestOutcome.Pass());
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            root.Delete(recursive: true);
+        }
+    }
+
+    private static async Task<TestOutcome> CustomKeyHistoryAndAndroidRecoveryAsync()
+    {
+        var root = Directory.CreateTempSubdirectory("organessonium-key-history-");
+        try
+        {
+            var store = new SettingsStore(root);
+            var encryption = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(store));
+            var metadata = MetadataCodec.ForStore(store, () => EncryptionModes.Custom);
+            encryption.ConfigureCustomKey("chave antiga sintetica");
+            var old = encryption.CreateFileEncryption(EncryptionModes.Custom);
+            var oldContext = new EncryptedPayloadContext("before", old, EncryptedPayloadRoles.Original, 0, 1);
+            var oldPayload = encryption.EncryptBytes([8, 3], oldContext);
+            var oldMetadata = metadata.Encode("{\"fileId\":\"before\"}");
+            var noId = old.Clone();
+            noId.KeyId = null;
+            var legacyContext = new EncryptedPayloadContext("before", noId, EncryptedPayloadRoles.Original, 0, 1);
+
+            // ORGKEY stores magic, version, master key and SHA-256 of those fields.
+            var androidKey = Enumerable.Range(1, 32).Select(value => (byte)value).ToArray();
+            var legacy = new byte[71];
+            "ORGKEY"u8.CopyTo(legacy);
+            legacy[6] = 1;
+            androidKey.CopyTo(legacy, 7);
+            SHA256.HashData(legacy.AsSpan(0, 39)).CopyTo(legacy, 39);
+            var path = Path.Combine(root.FullName, "android.organessonium-key");
+            await File.WriteAllBytesAsync(path, legacy);
+            RequireSync(await encryption.ImportCustomKeyAsync(path, null) == CustomKeyImportKind.Legacy,
+                "o formato legado Android foi rejeitado");
+            var current = encryption.CreateFileEncryption(EncryptionModes.Custom);
+            var expectedId = Convert.ToBase64String(SHA256.HashData(androidKey)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            RequireSync(current.KeyId == expectedId && current.KeyId != old.KeyId, "a chave ativa não usa o identificador Android");
+            var currentContext = new EncryptedPayloadContext("after", current, EncryptedPayloadRoles.Original, 0, 1);
+            var currentPayload = encryption.EncryptBytes([9, 4], currentContext);
+
+            var reopenedStore = new SettingsStore(root);
+            var reopened = new EncryptionService(new DefaultEncryptionKeyProvider(), new CustomEncryptionKeyProvider(reopenedStore));
+            var reopenedCodec = MetadataCodec.ForStore(reopenedStore);
+            RequireSync(reopened.DecryptBytes(oldPayload, oldContext).SequenceEqual(new byte[] { 8, 3 }) &&
+                reopened.DecryptBytes(oldPayload, legacyContext).SequenceEqual(new byte[] { 8, 3 }) &&
+                reopened.DecryptBytes(currentPayload, currentContext).SequenceEqual(new byte[] { 9, 4 }) &&
+                reopenedCodec.Decode(oldMetadata).Contains("before", StringComparison.Ordinal),
+                "payload ou metadados da chave anterior ficaram ilegíveis após reabrir");
+            RequireSync(Throws<EncryptedPayloadAuthenticationException>(() => reopened.DecryptBytes(oldPayload,
+                new EncryptedPayloadContext("before", new EncryptionMetadata { Mode = old.Mode, Salt = old.Salt, KeyId = current.KeyId }, EncryptedPayloadRoles.Original, 0, 1))),
+                "uma chave explícita incorreta foi ignorada");
+            legacy[^1] ^= 1;
+            await File.WriteAllBytesAsync(path, legacy);
+            RequireSync(await ThrowsAsync<InvalidOperationException>(() => reopened.ImportCustomKeyAsync(path, null)) &&
+                reopened.CreateFileEncryption(EncryptionModes.Custom).KeyId == expectedId, "o legado adulterado trocou a chave ativa");
+            return TestOutcome.Pass();
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            root.Delete(recursive: true);
+        }
+    }
+
     private static Task<TestOutcome> WebMessagePolicyRejectsUntrustedMessagesAsync()
     {
         static bool Validate(string json) => WebMessagePolicy.TryValidate(json, out _, out _);
@@ -543,7 +697,7 @@ internal static partial class Program
             var oversizedRejected = await ThrowsAsync<InvalidOperationException>(
                 () => oversizedCrypto.ImportCustomKeyAsync(oversizedPath, recoveryPassword));
 
-            var masterKey = providerA.GetMasterKey();
+            var masterKey = providerA.CopyActiveKey();
             var legacy = new byte[70];
             "OEK1"u8.CopyTo(legacy);
             legacy[4] = 1;
