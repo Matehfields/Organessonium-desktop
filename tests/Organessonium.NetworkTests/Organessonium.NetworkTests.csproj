@@ -28,6 +28,7 @@
   <ItemGroup>
     <None Include="..\metadata-v1-vector.json" Link="metadata-v1-vector.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\metadata-v1-interop.cjs" Link="metadata-v1-interop.cjs" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="video-controls-fixture.mp4" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

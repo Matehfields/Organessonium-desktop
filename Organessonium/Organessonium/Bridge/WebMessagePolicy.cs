@@ -27,6 +27,7 @@ internal static class WebMessagePolicy
         ["refreshCurrentFolder"] = "", ["refreshServerIndex"] = "b", ["loadVisibleThumbnails"] = "SS",
         ["loadVisibleFolderStatistics"] = "S", ["requestPreview"] = "SS", ["requestVideoQuality"] = "SSS",
         ["closePreview"] = "S", ["videoPlayback"] = "SSNNBBB", ["clearPreviewCache"] = "", ["getPreviewCacheSize"] = "",
+        ["videoPlayerStats"] = "SS", ["saveVideoPreferences"] = "S", ["prepareVideoFrameDownload"] = "SS",
         ["openPreviewMedia"] = "S", ["requestPdfPages"] = "SNN", ["createFolder"] = "S", ["moveItems"] = "SS",
         ["moveItem"] = "SS", ["updateFolderColor"] = "SS", ["renameItem"] = "SS", ["requestFileInformation"] = "SS",
         ["copyFile"] = "S", ["downloadVersion"] = "SS", ["startUpload"] = "", ["startFolderUpload"] = "",

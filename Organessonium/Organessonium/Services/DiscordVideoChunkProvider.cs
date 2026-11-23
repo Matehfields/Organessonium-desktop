@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -21,6 +22,7 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
     // Scoped to this video, without the per-thread retention of ArrayPool.Shared.
     private ArrayPool<byte>? _encryptedBuffers = ArrayPool<byte>.Create(DiscordLimits.AttachmentBytes, 2);
     internal IAsyncDisposable? ReadLease { get; set; }
+    internal VideoStreamMetrics Metrics { get; } = new();
 
     public DiscordVideoChunkProvider(DiscordApiClient discord, string threadId,
         IReadOnlyList<VideoAttachment> attachments, EncryptionService encryption,
@@ -52,6 +54,9 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
         for (var attempt = 1; attempt <= 4; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var entered = false;
+            var completed = false;
+            var failed = false;
             try
             {
                 var payloadLength = checked((int)attachment.Size);
@@ -59,9 +64,14 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                     (long)BitOperations.RoundUpToPowerOf2((uint)payloadLength) + Index.Chunks[chunkIndex].Length;
                 using var memory = await RamUploadBudget.ReserveExternalBytesAsync(residentBytes, residentBytes, cancellationToken).ConfigureAwait(false);
                 using var priority = VideoNetworkPriority.Enter();
+                var started = Stopwatch.GetTimestamp();
+                Metrics.Start(attempt > 1);
+                entered = true;
                 using var response = await _http.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                Metrics.Headers(started);
                 if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.NotFound)
                 {
+                    failed = true;
                     if (string.IsNullOrWhiteSpace(attachment.MessageId))
                         throw new IOException("O anexo do vídeo não está mais disponível.");
                     var message = await _discord.ResolvePayloadMessageAsync(_threadId, attachment.MessageId, cancellationToken).ConfigureAwait(false);
@@ -84,10 +94,18 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
                 try
                 {
                     await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                    await input.ReadExactlyAsync(payload.AsMemory(0, payloadLength), cancellationToken).ConfigureAwait(false);
+                    var offset = 0;
+                    while (offset < payloadLength)
+                    {
+                        var read = await input.ReadAsync(payload.AsMemory(offset, payloadLength - offset), cancellationToken).ConfigureAwait(false);
+                        if (read == 0) throw new EndOfStreamException();
+                        Metrics.Receive(read, started, offset == 0);
+                        offset += read;
+                    }
                     var extra = new byte[1];
                     if (await input.ReadAsync(extra, cancellationToken).ConfigureAwait(false) != 0)
                         throw new InvalidDataException("O anexo do vídeo contém bytes excedentes.");
+                    completed = true;
                     if (_context == null) return payload;
                     // Authenticate GCM, role, salt, plaintext length and the real chunk ordinal first.
                     return _encryption.DecryptBytes(payload.AsSpan(0, payloadLength), _context.WithChunkIndex(chunkIndex).WithChunkCount(_attachments.Length));
@@ -97,9 +115,11 @@ public sealed class DiscordVideoChunkProvider : IVideoChunkProvider
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)
             {
+                failed = entered && !completed;
                 last = ex;
-                if (attempt < 4) await NetworkRetryPolicy.DelayAsync(attempt, cancellationToken).ConfigureAwait(false);
             }
+            finally { if (entered) Metrics.Finish(completed, failed); }
+            if (attempt < 4) await NetworkRetryPolicy.DelayAsync(attempt, cancellationToken).ConfigureAwait(false);
         }
         throw new IOException("Não foi possível carregar o chunk do vídeo após quatro tentativas.", last);
     }

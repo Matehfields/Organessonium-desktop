@@ -5,6 +5,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self'; connect-src https://media.organessonium.local; frame-src 'none'; object-src 'none'; worker-src 'self'; base-uri 'none'; form-action 'none'"/>
     <title>Organessônium</title>
     <link rel="stylesheet" href="style.css"/>
+    <link rel="stylesheet" href="video-player.css"/>
     <link rel="stylesheet" href="icons.css"/>
 </head>
 <body>
@@ -710,6 +711,12 @@
 
 <script src="bridge.js"></script>
 <script src="icons.js"></script>
+<script type="module" src="vendor/videojs/video-player.js"></script>
+<script type="module" src="vendor/videojs/ui/container.js"></script>
+<script type="module" src="vendor/videojs/ui/play-button.js"></script>
+<script type="module" src="vendor/videojs/ui/mute-button.js"></script>
+<script src="video-inspection.js"></script>
+<script src="video-player.js"></script>
 <script src="app.js"></script>
 <script src="appearance.js"></script>
 <script src="file-details.js"></script>

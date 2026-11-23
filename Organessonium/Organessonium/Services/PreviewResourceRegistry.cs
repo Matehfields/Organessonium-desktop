@@ -22,6 +22,7 @@ public sealed class PreviewResourceRegistry : IDisposable
     public string Register(FileInfo file, string mime) => Register(new Resource(file, null, null, mime));
     public string RegisterBytes(byte[] bytes, string mime) => Register(new Resource(null, bytes, null, mime));
     public string RegisterVideo(VideoStreamSession session, string mime) => Register(new Resource(null, null, session, mime));
+    internal static string CachedVideoUrl(string url) => url.Replace("/preview/", "/video-cache/", StringComparison.Ordinal);
     private string Register(Resource resource)
     {
         var id = Guid.NewGuid().ToString("N");
@@ -35,6 +36,8 @@ public sealed class PreviewResourceRegistry : IDisposable
     {
         if (_disposed) return Empty(410, "Gone");
         var resource = Find(url);
+        var cacheOnly = Uri.TryCreate(url, UriKind.Absolute, out var requested) &&
+            requested.AbsolutePath.StartsWith("/video-cache/", StringComparison.Ordinal);
         if (resource == null && ThumbnailCache.ResolveResource(url) is { } thumbnail)
         {
             using var input = EncryptedPreviewCache.OpenRead(thumbnail);
@@ -43,6 +46,7 @@ public sealed class PreviewResourceRegistry : IDisposable
             resource = new Resource(thumbnail, null, null, ThumbnailCache.DetectImageMime(header.AsSpan(0, headerBytes)));
         }
         if (resource == null) return Empty(404, "Not Found");
+        if (cacheOnly && resource.Video == null) return Empty(404, "Not Found");
         if (method is not ("GET" or "HEAD")) return Empty(405, "Method Not Allowed");
         var length = resource.Video?.Length ?? resource.FileLength ?? resource.Bytes?.LongLength ?? 0;
         var parsed = ParseRange(range, length);
@@ -61,13 +65,23 @@ public sealed class PreviewResourceRegistry : IDisposable
         {
             if (resource.Video != null)
             {
-                await resource.Responses.WaitAsync(resource.Video.Cancellation).ConfigureAwait(false);
+                if (cacheOnly)
+                {
+                    if (resource.Responses.CurrentCount <= 1 || !resource.Responses.Wait(0))
+                        return Empty(503, "Playback Busy", "Access-Control-Allow-Origin: https://organessonium.local\r\n");
+                }
+                else await resource.Responses.WaitAsync(resource.Video.Cancellation).ConfigureAwait(false);
                 var transferred = false;
                 byte[]? bytes = null;
                 try
                 {
                     bytes = VideoResponseBuffers.Rent(checked((int)count));
-                    await resource.Video.ReadAsync(start, bytes.AsMemory(0, checked((int)count)), resource.Video.Cancellation).ConfigureAwait(false);
+                    if (cacheOnly)
+                    {
+                        if (!resource.Video.TryReadCached(start, bytes.AsSpan(0, checked((int)count))))
+                            return Empty(503, "Range Not Cached", "Access-Control-Allow-Origin: https://organessonium.local\r\n");
+                    }
+                    else await resource.Video.ReadAsync(start, bytes.AsMemory(0, checked((int)count)), resource.Video.Cancellation).ConfigureAwait(false);
                     content = new AvailableMemoryStream(bytes, checked((int)count), (stream, buffer) =>
                     {
                         VideoResponseBuffers.Return(buffer, clearArray: true);
@@ -123,7 +137,7 @@ public sealed class PreviewResourceRegistry : IDisposable
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "https" || uri.Host != Host || !uri.IsDefaultPort || uri.Query.Length > 0) return null;
         var parts = uri.AbsolutePath.Split('/');
-        return parts.Length == 3 && parts[1] == "preview" && Guid.TryParseExact(parts[2], "N", out _) ? parts[2] : null;
+        return parts.Length == 3 && parts[1] is "preview" or "video-cache" && Guid.TryParseExact(parts[2], "N", out _) ? parts[2] : null;
     }
     private static PreviewResourceResponse Empty(int status, string reason, string extra = "") =>
         new(status, reason, extra + "Content-Length: 0\r\nCache-Control: no-store\r\n", null);

@@ -12,6 +12,125 @@ namespace Organessonium.NetworkTests;
 
 internal static partial class Program
 {
+    private static Task<TestOutcome> VideoPlayerControlsHiddenAsync() => OnHiddenDispatcherAsync(async () =>
+    {
+        var root = Directory.CreateTempSubdirectory("organessonium-video-controls-");
+        var hwnd = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 1100, 700, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        CoreWebView2Controller? controller = null;
+        try
+        {
+            var assets = root.CreateSubdirectory("web");
+            var assembly = typeof(PreviewResourceRegistry).Assembly;
+            foreach (var name in assembly.GetManifestResourceNames().Where(name => name.StartsWith("web/", StringComparison.Ordinal)))
+            {
+                var target = Path.Combine(assets.FullName, name[4..].Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                await using var input = assembly.GetManifestResourceStream(name)!;
+                await using var output = File.Create(target);
+                await input.CopyToAsync(output);
+            }
+            using var resources = new PreviewResourceRegistry();
+            var environment = await CoreWebView2Environment.CreateAsync(null, root.CreateSubdirectory("profile").FullName,
+                new CoreWebView2EnvironmentOptions("--autoplay-policy=no-user-gesture-required"));
+            controller = await environment.CreateCoreWebView2ControllerAsync(hwnd);
+            controller.Bounds = new System.Drawing.Rectangle(0, 0, 1100, 700);
+            var core = controller.CoreWebView2;
+            core.SetVirtualHostNameToFolderMapping("organessonium.local", assets.FullName, CoreWebView2HostResourceAccessKind.Allow);
+            using var adapter = new WebView2PreviewAdapter(core, resources);
+            adapter.Attach();
+            var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            core.NavigationCompleted += (_, e) =>
+            {
+                if (e.IsSuccess) ready.TrySetResult();
+                else ready.TrySetException(new IOException("Falha ao abrir a página local do player."));
+            };
+            core.Navigate("https://organessonium.local/index.html");
+            await ready.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            async Task CheckAsync(string script, string message, int seconds = 10)
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+                var actual = "";
+                while (!timeout.IsCancellationRequested)
+                {
+                    actual = await core.ExecuteScriptAsync(script);
+                    if (actual == "true") return;
+                    await Task.Delay(50);
+                }
+                throw new InvalidOperationException(message + " (" + actual + ")");
+            }
+            var bytes = await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "video-controls-fixture.mp4"));
+            await using var session = new VideoStreamSession(new FixtureVideoChunks(bytes), 0);
+            await using var alternate = new VideoStreamSession(new FixtureVideoChunks(bytes), 0);
+            var url = resources.RegisterVideo(session, "video/mp4");
+            var alternateUrl = resources.RegisterVideo(alternate, "video/mp4");
+            var data = JsonSerializer.Serialize(new { src = url, quality = "full", qualities = new[] { "full", "480p" },
+                cacheUrl = PreviewResourceRegistry.CachedVideoUrl(url), streamBytes = bytes.Length });
+            core.WebMessageReceived += (_, message) =>
+            {
+                using var command = JsonDocument.Parse(message.WebMessageAsJson);
+                var method = command.RootElement.GetProperty("method").GetString();
+                if (method == "videoPlayerStats")
+                    _ = core.ExecuteScriptAsync("window._onVideoPlayerStats('fixture','full'," +
+                        JsonSerializer.Serialize(session.Snapshot(), JsonOptions.Web) + ")");
+                if (method == "requestVideoQuality")
+                {
+                    var qualitySource = JsonSerializer.Serialize(new object[] { "fixture", "480p", alternateUrl, "video/mp4",
+                        PreviewResourceRegistry.CachedVideoUrl(alternateUrl), bytes.Length });
+                    _ = core.ExecuteScriptAsync("window._onVideoQualityReady(..." + qualitySource + ")");
+                }
+            };
+            await core.ExecuteScriptAsync("window.__organessoniumSettings={theme:'dark'};onBridgeReady();previewAppRef={threadId:'fixture',name:'Teste.mp4'};" +
+                "previewOverlay.classList.remove('hidden');_onPreviewReady('video','Teste.mp4'," + JsonSerializer.Serialize(data) + ")");
+            await CheckAsync("!!customElements.get('media-play-button') && document.querySelector('video')?.readyState>=2",
+                "Video.js ou o H.264 do WebView2 não ficou pronto");
+            await core.ExecuteScriptAsync("window._videoKey = key => document.querySelector('.vp-frame').dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));_videoKey('k');");
+            await CheckAsync("document.querySelector('video').currentTime>.25 && document.querySelector('.vp-buffer i')!==null", "reproduzir pelo Video.js ou exibir o buffer falhou");
+            await core.ExecuteScriptAsync("_videoKey('k');");
+            await CheckAsync("document.querySelector('video').paused && document.querySelector('.vp-spinner').hidden", "pausa intencional manteve o indicador");
+            await core.ExecuteScriptAsync("_videoKey('5');");
+            await CheckAsync("!document.querySelector('video').seeking && Math.abs(document.querySelector('video').currentTime-4)<.2", "seek proporcional falhou");
+            await core.ExecuteScriptAsync("_videoKey('.');");
+            await CheckAsync("!document.querySelector('video').seeking && document.querySelector('video').currentTime>4.02 && document.querySelector('video').currentTime<4.07",
+                "avanço por timestamp no vídeo de 25 fps falhou");
+            await core.ExecuteScriptAsync("_videoKey(',');");
+            await CheckAsync("!document.querySelector('video').seeking && Math.abs(document.querySelector('video').currentTime-4)<.025", "retrocesso de quadro falhou");
+            await core.ExecuteScriptAsync("_videoKey('>');_videoKey('m');_videoKey('i');");
+            await CheckAsync("previewOverlay.classList.contains('video-docked') && document.querySelector('video').muted && document.querySelector('video').playbackRate===1.25",
+                "mini player, silêncio ou velocidade falharam");
+            await core.ExecuteScriptAsync("_videoKey('i');_videoKey('?');");
+            await CheckAsync("!previewOverlay.classList.contains('video-docked') && document.querySelector('.vp-panel').textContent.includes('Atalhos do reprodutor')",
+                "restaurar mini player ou abrir ajuda falhou");
+            await core.ExecuteScriptAsync("_videoKey('Escape');document.querySelector('video').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true}));document.querySelector('.vp-panel [data-action=stats]').click();");
+            await CheckAsync("!document.querySelector('.vp-stats').hidden && document.querySelector('.vp-stats dl').textContent.includes('256 × 144') && document.querySelector('.vp-stats dl').textContent.includes('H.264')", "estatísticas não exibiram os dados da mídia");
+            await core.ExecuteScriptAsync("""
+                (()=>{const input=document.querySelector('.vp-frame input[type=file]');const files=new DataTransfer();
+                files.items.add(new File(['1\n00:00:01,000 --> 00:00:07,000\nLegenda de teste\n'],'teste.srt'));
+                input.files=files.files; input.dispatchEvent(new Event('change'));})()
+                """);
+            await CheckAsync("Array.from(document.querySelector('video').textTracks).some(t=>t.mode==='showing' && t.cues?.[0]?.text==='Legenda de teste')",
+                "legenda SRT não foi convertida ou exibida");
+            await core.ExecuteScriptAsync("window._originalPlayer = document.querySelector('video');" +
+                "document.querySelector('.vp-controls [data-action=settings]').click();" +
+                "document.querySelector('.vp-panel [data-action=quality]').click();" +
+                "document.querySelector('.vp-panel [data-action=\"quality:480p\"]').click();");
+            await CheckAsync("(()=>{const v=document.querySelector('video');return v===_originalPlayer && v.dataset.quality==='480p' && !v.seeking && " +
+                "v.readyState>=2 && Math.abs(v.currentTime-4)<.06 && v.paused && v.muted && v.playbackRate===1.25 && " +
+                "Array.from(v.textTracks).some(t=>t.mode==='showing' && t.cues?.[0]?.text==='Legenda de teste');})()",
+                "a troca de qualidade perdeu posição, estado ou legenda");
+            await core.ExecuteScriptAsync("closePreview();");
+            resources.RemoveUrl(url);
+            resources.RemoveUrl(alternateUrl);
+            await session.DisposeAsync();
+            RequireSync(!IsWindowVisible(hwnd) && session.CachedBytes == 0, "o teste abriu janela ou reteve cache após fechar");
+            return TestOutcome.Pass();
+        }
+        finally
+        {
+            controller?.Close();
+            DestroyWindow(hwnd);
+        }
+    });
+
     // Uses the actual embedded player and WebView2 adapter, not a browser mock or a local server.
     private static async Task<TestOutcome> WebViewVirtualVideoPlaybackAsync()
     {

@@ -776,9 +776,38 @@ public partial class MainWindow : Window
         }
     }
 
+    private (string Url, DateTimeOffset Expires)? _videoFrameDownload;
+
+    internal bool AuthorizeVideoFrameDownload(string url)
+    {
+        const string prefix = "blob:https://organessonium.local/";
+        if (!WebMessagePolicy.IsLocalDocument(WebView.Source?.AbsoluteUri) || !url.StartsWith(prefix, StringComparison.Ordinal) ||
+            !Guid.TryParseExact(url[prefix.Length..], "D", out _)) return false;
+        _videoFrameDownload = (url, DateTimeOffset.UtcNow.AddSeconds(10));
+        return true;
+    }
+
     private void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs e)
     {
-        e.Cancel = true;
+        if (_videoFrameDownload is not { } frame || frame.Expires < DateTimeOffset.UtcNow ||
+            frame.Url != e.DownloadOperation.Uri || e.DownloadOperation.MimeType != "image/png")
+        {
+            e.Cancel = true;
+            return;
+        }
+        _videoFrameDownload = null;
+        e.Handled = true;
+        var deferral = e.GetDeferral();
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            try
+            {
+                var dialog = new Microsoft.Win32.SaveFileDialog { FileName = "Quadro.png", DefaultExt = ".png", Filter = "Imagem PNG (*.png)|*.png" };
+                if (dialog.ShowDialog(this) == true) e.ResultFilePath = dialog.FileName;
+                else e.Cancel = true;
+            }
+            finally { deferral.Complete(); }
+        });
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)

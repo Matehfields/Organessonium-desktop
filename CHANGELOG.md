@@ -8,6 +8,11 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 ## [Não lançado]
 
+### Reprodução de vídeo
+
+- Novo reprodutor com Video.js embarcado, buffer por faixa, atalhos, navegação quadro a quadro, mini player, legendas e estatísticas de streaming.
+- Miniaturas na linha do tempo aproveitam o cache em RAM. A troca entre original e 480p preserva posição e estado de reprodução.
+
 ### Segurança
 
 - O token do bot e a senha do proxy passam a ser protegidos com DPAPI no escopo do usuário

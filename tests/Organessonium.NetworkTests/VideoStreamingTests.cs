@@ -29,13 +29,26 @@ internal static partial class Program
 
     private static async Task<TestOutcome> VideoVirtualResourceRangesAsync()
     {
-        await using var video = new VideoStreamSession(new PatternChunks([8, 13, 4]), 0);
+        var chunks = new PatternChunks([8, 13, 4]);
+        await using var video = new VideoStreamSession(chunks, 0);
         using var registry = new PreviewResourceRegistry();
         var url = registry.RegisterVideo(video, "video/mp4");
+        var cacheUrl = PreviewResourceRegistry.CachedVideoUrl(url);
+        var cold = await registry.OpenAsync(cacheUrl, "GET", "bytes=6-11");
+        if (cold.Status != 503 || !chunks.Starts.IsEmpty)
+            return TestOutcome.Fail("a miniatura iniciou um download fora do buffer de reprodução");
         var response = await registry.OpenAsync(url, "GET", "bytes=6-11");
         using var content = response.Content!;
         var bytes = new byte[6];
         await content.ReadExactlyAsync(bytes);
+        var cached = await registry.OpenAsync(cacheUrl, "GET", "bytes=6-11");
+        using var cacheContent = cached.Content;
+        var cachedBytes = new byte[6];
+        if (cached.Status != 206 || cacheContent == null)
+            return TestOutcome.Fail("a faixa autenticada não ficou disponível para a miniatura");
+        await cacheContent.ReadExactlyAsync(cachedBytes);
+        if (!bytes.SequenceEqual(cachedBytes) || chunks.Starts.Values.Sum() != 2)
+            return TestOutcome.Fail("a miniatura alterou os bytes ou repetiu o download");
         if (registry.BufferedResponseBytes != 0) return TestOutcome.Fail("resposta consumida reteve RAM");
         var full = await registry.OpenAsync(url, "GET", null);
         full.Content?.Dispose();
@@ -44,6 +57,8 @@ internal static partial class Program
         var multi = await registry.OpenAsync(url, "GET", "bytes=0-1,4-5");
         var outside = await registry.OpenAsync(url.Replace("media.organessonium.local", "evil.invalid"), "GET", null);
         var held = await Task.WhenAll(Enumerable.Range(0, 4).Select(i => registry.OpenAsync(url, "GET", $"bytes={i}-{i}")));
+        if ((await registry.OpenAsync(cacheUrl, "GET", "bytes=0-0")).Status != 503)
+            return TestOutcome.Fail("a miniatura não cedeu espaço para a reprodução");
         var waiting = registry.OpenAsync(url, "GET", "bytes=5-5");
         await Task.Delay(30);
         if (waiting.IsCompleted || registry.BufferedResponseBytes < 4 || registry.BufferedResponseBytes > 4L * PreviewResourceRegistry.VideoResponseBytes)
@@ -57,7 +72,7 @@ internal static partial class Program
         return response.Status == 206 && response.Headers.Contains("bytes 6-11/25") && response.Headers.Contains("Content-Length: 6") &&
             bytes.SequenceEqual(Enumerable.Range(6, 6).Select(i => (byte)i)) && full.Status == 206 && full.Headers.Contains("bytes 0-24/25") &&
             suffix.Headers.Contains("bytes 22-24/25") && suffix.Content == null && invalid.Status == 416 && multi.Status == 416 &&
-            outside.Status == 404 && closed.Status == 404
+            outside.Status == 404 && closed.Status == 404 && (await registry.OpenAsync(cacheUrl, "GET", null)).Status == 404
             ? TestOutcome.Pass() : TestOutcome.Fail("HTTP Range, fronteira, suffix, revogação ou isolamento do endereço virtual incorreto");
     }
 

@@ -62,7 +62,8 @@ let nativeTitleBarMetrics = { enabled:false, leftInset:0, rightInset:0, height:4
 let nativeTitleBarDragTimer = 0;
 let requestedFolderStatistics = new Map();
 let activeImgWrap = null; // referência ao wrap do zoom atual
-let activeVideoResizeCleanup = null;
+let activeVideoPlayer = null;
+let autoPlayNextVideoId = null;
 let pdfPreviewState = null;
 let pdfJsModulePromise = null;
 const pdfJsSelectableLayers = new Map();
@@ -1438,30 +1439,21 @@ window._onPreviewLoading = () => {
     resetPdfPreviewState();
     $('preview-zoom-controls').classList.add('hidden');
     pendingVideoQualitySwitch = null;
+    if (fileType(previewAppRef?.name || '') === 'video') {
+        $('preview-body').innerHTML = '<div class="vp-initial-spinner" role="status" aria-label="Abrindo vídeo"></div>';
+        return;
+    }
     $('preview-body').innerHTML = `<div class="preview-load-state">
         <div class="preview-progress-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
     </div>`;
 };
 
-window._onPreviewProgress = (percent, phase, downloadedBytes, totalBytes) => {
+window._onPreviewProgress = percent => {
     const value = Math.max(0, Math.min(100, Number(percent) || 0));
-    const labels = {
-        locating:t('previewLocating'), generic:t('previewDownloadGeneric'),
-        video480:t('previewDownload480'), full:t('previewDownloadFull'), cache:t('previewCache')
-    };
-    const base = labels[phase] || t('previewDownloading');
-    const downloaded = Number(downloadedBytes) || 0;
-    const total = Number(totalBytes) || 0;
-    const message = total > 0 ? `${base} - ${fmtSize(downloaded)} / ${fmtSize(total)}` : base;
-    const mediaProgress = document.querySelector('.preview-media-quality-progress');
-    if (mediaProgress && !mediaProgress.classList.contains('hidden')) {
-        mediaProgress.querySelector('span').style.width = value + '%';
-        mediaProgress.querySelector('small').textContent = message || (value + '%');
-        return;
-    }
     const state = $('preview-body').querySelector('.preview-load-state');
     if (!state) return;
     const ring = state.querySelector('.preview-progress-ring');
+    if (!ring) return;
     ring.style.setProperty('--preview-progress', value + '%');
     ring.setAttribute('aria-valuenow', String(Math.round(value)));
 };
@@ -1493,104 +1485,106 @@ window._onPreviewReady = (type, name, data, requestId) => {
         activeImgWrap = wrap;
         setupImageZoom(wrap, img);
 
-    } else if (type === 'video' || type === 'audio') {
-        const mediaInfo = safeParseJson(data, null);
-        const mime = mediaInfo && mediaInfo.mime ? mediaInfo.mime : '';
-        const src = mediaInfo && mediaInfo.src ? mediaInfo.src : '';
-        const qualities = mediaInfo && Array.isArray(mediaInfo.qualities) ? mediaInfo.qualities : [];
-        const currentQuality = mediaInfo && mediaInfo.quality ? mediaInfo.quality : 'full';
+    } else if (type === 'video') {
+        const info = safeParseJson(data, null) || {};
         const shell = document.createElement('div');
-        shell.className = `preview-media-player-shell ${type}`;
-
-        const player = document.createElement(type);
-        player.className = `preview-media-player ${type}`;
-        player.controls = type !== 'video';
+        shell.className = 'preview-media-player-shell video';
+        const player = document.createElement('video');
+        player.className = 'preview-media-player video';
         player.preload = 'metadata';
-        player.autoplay = false;
-        player.dataset.quality = currentQuality;
-        if (type === 'video') bindVideoPlayback(player, mediaInfo || {});
-        if (type === 'video') player.playsInline = true;
-        if (src) setMediaElementSource(player, src, mime);
-
-        const fallback = document.createElement('div');
-        fallback.className = 'preview-media-fallback hidden';
-        fallback.innerHTML = `<div class="preview-media-icon">${icon(type === 'audio' ? 'audio_file' : 'movie', 54, TYPE_COLOR[type])}</div>
-            <div class="preview-media-copy">
-                <strong>${esc(t('mediaLoadError'))}</strong>
-                <p>${esc(t('mediaSafeMessage'))}</p>
-                ${mime ? `<small>${esc(mime)}</small>` : ''}
-            </div>`;
-
-        const actions = document.createElement('div');
-        actions.className = 'preview-media-actions';
-        actions.innerHTML = `${type === 'video' && qualities.length > 1 ? `<div class="preview-quality-control" id="preview-video-quality-control"><span>${esc(t('quality'))}</span><button type="button" class="preview-quality-button" id="preview-video-quality-button" data-value="${esc(currentQuality)}"><strong>${esc(videoQualityLabel(currentQuality))}</strong>${icon('expand_more',16)}</button><div class="preview-quality-options hidden" id="preview-video-quality-options">${qualities.map(quality => `<button type="button" class="preview-quality-option" data-video-quality-option="${esc(quality)}" aria-selected="${quality === currentQuality ? 'true' : 'false'}">${esc(videoQualityLabel(quality))}</button>`).join('')}</div></div>` : ''}
-            <button class="btn-secondary" id="preview-open-external">${icon('open_in_new',17)}<span>${esc(t('openExternal'))}</span></button>
-            <button class="btn-secondary" id="preview-media-download">${icon('download',17)}<span>${esc(t('download'))}</span></button>`;
-
-        const qualityProgress = document.createElement('div');
-        qualityProgress.className = 'preview-media-quality-progress hidden';
-        qualityProgress.innerHTML = '<div><span></span></div><small></small>';
-
-        let videoChrome = null;
-        if (type === 'video') {
-            videoChrome = createVideoChrome(player);
-            shell.appendChild(videoChrome);
-        } else {
-            shell.appendChild(player);
-        }
-        shell.appendChild(fallback);
-        shell.appendChild(qualityProgress);
-        shell.appendChild(actions);
-        shell.addEventListener('click', e => e.stopPropagation());
+        player.playsInline = true;
+        player.crossOrigin = 'anonymous';
+        player.dataset.quality = info.quality || 'full';
+        player.dataset.qualities = JSON.stringify(info.qualities || []);
+        const id = fileRequestId(previewAppRef) || requestId;
+        const app = previewAppRef;
+        const seekQuality = (quality, persist = false) => {
+            if (pendingVideoQualitySwitch || quality === player.dataset.quality) return;
+            pendingVideoQualitySwitch = {
+                threadId: id, requested: quality, time: player.currentTime || 0, playing: !player.paused
+            };
+            activeVideoPlayer?.waiting('Trocando qualidade');
+            if (persist) {
+                settings.videoPreviewQuality = quality === '480p' ? 'low' : 'original';
+                queueSettingsSave();
+            }
+            window.bridge.requestVideoQuality(id, name, quality);
+        };
+        bindVideoPlayback(player, info);
+        activeVideoPlayer = window.VideoPlayer.mount(player, { ...info, name }, {
+            bytes: fmtSize,
+            save: preferences => window.bridge.saveVideoPreferences(JSON.stringify(preferences)),
+            stats: quality => window.bridge.videoPlayerStats(id, quality),
+            capture: url => window.bridge.prepareVideoFrameDownload(id, url),
+            quality: quality => seekQuality(quality, true),
+            fullscreen: enabled => window.bridge.setHostFullscreen?.(enabled),
+            mini: enabled => {
+                previewOverlay.classList.toggle('video-docked', enabled);
+                window.bridge.setPreviewVisible?.(!enabled);
+                scheduleNativeTitleBarDragRegion(0);
+            },
+            next: () => {
+                const next = previewFiles[previewIndex + 1];
+                if (next && fileType(next.name) === 'video') {
+                    autoPlayNextVideoId = fileRequestId(next);
+                    previewNext();
+                }
+            },
+            retry: () => { if (app) loadPreviewApp(app, true); },
+            external: () => window.bridge.openPreviewMedia(id),
+            download: () => window.bridge.startDownload(id, name),
+            blocksShortcuts: () => isSettingsOpen() || !confirmOverlay.classList.contains('hidden') ||
+                !uploadConflictOverlay.classList.contains('hidden')
+        });
+        shell.appendChild(activeVideoPlayer.host);
         body.appendChild(shell);
-
+        activeVideoPlayer.focus();
+        const playNext = autoPlayNextVideoId === id;
+        autoPlayNextVideoId = null;
+        if (playNext) {
+            player.addEventListener('canplay', () => player.play().catch(() => {}), { once: true });
+        }
         player.addEventListener('error', () => {
-            if (type === 'video' && player.error?.code === 4 && player.dataset.quality === 'full' && qualities.includes('480p')) {
-                requestQualitySwitch('480p');
+            if (!player.isConnected || player.dataset.memoryRecovery === 'true') return;
+            if (player.error?.code === 4 && player.dataset.quality === 'full' && info.qualities?.includes('480p') &&
+                player.dataset.codecFallback !== 'true') {
+                player.dataset.codecFallback = 'true';
+                seekQuality('480p');
                 return;
             }
-            if (videoChrome) videoChrome.classList.add('hidden');
-            player.classList.add('hidden');
-            fallback.classList.remove('hidden');
-        });
-        if (src) player.load();
-        else player.dispatchEvent(new Event('error'));
-        $('preview-open-external')?.addEventListener('click', e => {
-            e.stopPropagation();
-            if (previewAppRef) window.bridge.openPreviewMedia(fileRequestId(previewAppRef));
-        });
-        $('preview-media-download')?.addEventListener('click', e => {
-            e.stopPropagation();
-            if (previewAppRef) window.bridge.startDownload(fileRequestId(previewAppRef), previewAppRef.name);
-        });
-        const qualityButton = $('preview-video-quality-button');
-        const qualityOptions = $('preview-video-quality-options');
-        const requestQualitySwitch = value => {
-            if (!previewAppRef || !value) return;
-            if (value === (player.dataset.quality || currentQuality)) return;
-            pendingVideoQualitySwitch = {
-                threadId:fileRequestId(previewAppRef),
-                time:Number.isFinite(player.currentTime) ? player.currentTime : 0,
-                playing:!player.paused,
-                previousQuality:player.dataset.quality || currentQuality
+            const messages = {
+                2: 'O vídeo perdeu a conexão. Tente novamente.',
+                3: 'O Windows não conseguiu decodificar o vídeo. Tente outra qualidade, se disponível.',
+                4: 'O formato não pode ser aberto neste dispositivo ou o arquivo está indisponível.'
             };
-            setPreviewQualityUi(shell, value);
-            qualityOptions?.classList.add('hidden');
-            qualityProgress.classList.remove('hidden');
-            qualityProgress.querySelector('span').style.width = '0%';
-            qualityProgress.querySelector('small').textContent = t('previewDownloading');
-            window.bridge.requestVideoQuality(fileRequestId(previewAppRef), previewAppRef.name, value);
-        };
-        qualityButton?.addEventListener('click', e => {
-            e.stopPropagation();
-            qualityOptions?.classList.toggle('hidden');
+            activeVideoPlayer?.onError(messages[player.error?.code] || 'Não foi possível iniciar a reprodução.');
         });
-        qualityOptions?.querySelectorAll('[data-video-quality-option]').forEach(option => {
-            option.addEventListener('click', e => {
-                e.stopPropagation();
-                requestQualitySwitch(option.dataset.videoQualityOption || '');
-            });
-        });
+        if (info.src) setMediaElementSource(player, info.src, info.mime);
+        else activeVideoPlayer.onError('O arquivo está indisponível.');
+
+    } else if (type === 'audio') {
+        const info = safeParseJson(data, null) || {};
+        const shell = document.createElement('div');
+        shell.className = 'preview-media-player-shell audio';
+        const player = document.createElement('audio');
+        player.className = 'preview-media-player audio';
+        player.controls = true;
+        player.preload = 'metadata';
+        const fallback = document.createElement('div');
+        fallback.className = 'preview-media-fallback hidden';
+        fallback.textContent = t('mediaLoadError');
+        const actions = document.createElement('div');
+        actions.className = 'preview-media-actions';
+        actions.innerHTML = '<button class="btn-secondary" data-audio-external>' + icon('open_in_new',17) +
+            '<span>' + esc(t('openExternal')) + '</span></button><button class="btn-secondary" data-audio-download>' +
+            icon('download',17) + '<span>' + esc(t('download')) + '</span></button>';
+        actions.querySelector('[data-audio-external]').onclick = () => window.bridge.openPreviewMedia(fileRequestId(previewAppRef));
+        actions.querySelector('[data-audio-download]').onclick = () => window.bridge.startDownload(fileRequestId(previewAppRef), name);
+        player.addEventListener('error', () => { player.hidden = true; fallback.classList.remove('hidden'); });
+        shell.append(player, fallback, actions);
+        body.appendChild(shell);
+        if (info.src) setMediaElementSource(player, info.src, info.mime);
+        else player.dispatchEvent(new Event('error'));
 
     } else if (type === 'pdf') {
         const pdf = document.createElement('div');
@@ -1645,70 +1639,54 @@ window._onPreviewError = msg => {
     $('preview-body').innerHTML = `<div class="preview-unsupported">${icon('error',48,'#595959')}<p>${esc(t('previewErrorTitle'))}</p><small>${esc(msg)}</small></div>`;
 };
 
-window._onVideoQualityReady = (threadId, quality, src, mime) => {
-    if (!previewAppRef || fileRequestId(previewAppRef) !== threadId) return;
-    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
-    const player = shell && shell.querySelector('video');
-    if (!player || !src) return;
-    const saved = pendingVideoQualitySwitch && pendingVideoQualitySwitch.threadId === threadId
-        ? pendingVideoQualitySwitch
-        : { time:player.currentTime || 0, playing:!player.paused };
+window._onVideoQualityReady = (id, quality, src, mime, cacheUrl, streamBytes) => {
+    if (!previewAppRef || fileRequestId(previewAppRef) !== id || !activeVideoPlayer || !src) return;
+    const player = $('preview-body').querySelector('video');
+    const saved = pendingVideoQualitySwitch;
+    if (!player || !saved || saved.threadId !== id || saved.requested !== quality) return;
     pendingVideoQualitySwitch = null;
-    const progress = shell.querySelector('.preview-media-quality-progress');
-    if (progress) progress.classList.add('hidden');
-    setPreviewQualityUi(shell, quality);
+    activeVideoPlayer.qualityFinished({ cacheUrl, streamBytes });
+    activeVideoPlayer.clearError();
     player.dataset.quality = quality;
     delete player.dataset.memoryRecovery;
-    player.classList.remove('hidden');
-    shell.querySelector('.preview-video-frame')?.classList.remove('hidden');
-    shell.querySelector('.preview-media-fallback')?.classList.add('hidden');
-    setMediaElementSource(player, src, mime);
     player.addEventListener('loadedmetadata', () => {
-        if (Number.isFinite(saved.time) && saved.time > 0) player.currentTime = Math.min(saved.time, player.duration || saved.time);
+        if (saved.time > 0 && Number.isFinite(player.duration)) player.currentTime = Math.min(saved.time, player.duration);
         if (saved.playing) player.play().catch(() => {});
     }, { once:true });
-    player.load();
+    setMediaElementSource(player, src, mime);
 };
-
-window._onVideoQualityError = (threadId, message) => {
-    if (!previewAppRef || fileRequestId(previewAppRef) !== threadId) return;
-    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
-    if (!shell) return;
-    shell.querySelector('.preview-media-quality-progress')?.classList.add('hidden');
-    if (pendingVideoQualitySwitch?.previousQuality) setPreviewQualityUi(shell, pendingVideoQualitySwitch.previousQuality);
+window._onVideoQualityError = (id, message) => {
+    if (fileRequestId(previewAppRef) !== id || !activeVideoPlayer) return;
+    activeVideoPlayer.qualityFinished();
     pendingVideoQualitySwitch = null;
-    if (shell.querySelector('video')?.dataset.memoryRecovery === 'true') {
-        window._onVideoStreamError(threadId, t('videoMemoryStopped'), t('videoMemoryTitle'));
+    if ($('preview-body').querySelector('video')?.dataset.memoryRecovery === 'true') {
+        activeVideoPlayer.onError(t('videoMemoryStopped'), t('videoMemoryTitle'));
         return;
     }
     setStatus(t('errorPrefix') + (message || t('previewErrorTitle')), false);
 };
-
-function videoQualityLabel(quality) {
-    return quality === '480p' ? t('preview480') : t('fullQuality');
-}
-
-function setPreviewQualityUi(shell, quality) {
-    if (!shell || !quality) return;
-    const button = shell.querySelector('#preview-video-quality-button');
-    if (button) {
-        button.dataset.value = quality;
-        const label = button.querySelector('strong');
-        if (label) label.textContent = videoQualityLabel(quality);
-    }
-    shell.querySelectorAll('[data-video-quality-option]').forEach(option => {
-        option.setAttribute('aria-selected', option.dataset.videoQualityOption === quality ? 'true' : 'false');
-    });
-}
+window._onVideoPlayerStats = (id, quality, values) => {
+    if (fileRequestId(previewAppRef) === id && $('preview-body').querySelector('video')?.dataset.quality === quality)
+        activeVideoPlayer?.statsReady(values);
+};
+window._onVideoFrameDownloadReady = (id, url) => {
+    if (fileRequestId(previewAppRef) === id) activeVideoPlayer?.captureReady(url);
+};
 
 function setMediaElementSource(player, src, mime) {
     player.pause();
     player.removeAttribute('src');
-    while (player.firstChild) player.removeChild(player.firstChild);
-    const source = document.createElement('source');
-    source.src = src;
-    if (mime && player.canPlayType(mime)) source.type = mime;
-    player.appendChild(source);
+    player.querySelectorAll('source').forEach(source => source.remove());
+    if (player.tagName === 'VIDEO') {
+        // Let Chromium sniff formats such as MOV without a declared unsupported MIME.
+        player.src = src;
+    } else {
+        const source = document.createElement('source');
+        source.src = src;
+        if (mime && player.canPlayType(mime)) source.type = mime;
+        player.prepend(source);
+    }
+    player.load();
 }
 
 function reportVideoPlayback(player, force = false, seeking = false) {
@@ -1724,225 +1702,59 @@ function bindVideoPlayback(player, info) {
     let lastReport = 0;
     player.addEventListener('loadedmetadata', () => {
         const savedDuration = Number(info.savedDuration) || 0;
-        const compatible = !savedDuration || Math.abs(player.duration - savedDuration) <= Math.max(5, savedDuration * 0.01);
+        const compatible = info.preferences?.resume !== false && (!savedDuration || Math.abs(player.duration - savedDuration) <= Math.max(5, savedDuration * 0.01));
         if (compatible && Number(info.resumeSeconds) > 0 && Number(info.resumeSeconds) < player.duration * 0.95)
             player.currentTime = Number(info.resumeSeconds);
     }, { once:true });
     player.addEventListener('timeupdate', () => {
-        if (Date.now() - lastReport < 1000) return;
+        if (player.seeking || Date.now() - lastReport < 1000) return;
         lastReport = Date.now();
         reportVideoPlayback(player);
     });
-    ['play', 'playing', 'pause', 'ended'].forEach(event => player.addEventListener(event, () => reportVideoPlayback(player, event === 'pause' || event === 'ended')));
+    ['play', 'playing', 'pause', 'ended'].forEach(event => player.addEventListener(event, () =>
+        reportVideoPlayback(player, event === 'pause' || event === 'ended', player.seeking)));
     player.addEventListener('seeking', () => reportVideoPlayback(player, true, true));
-    const buffering = visible => {
-        const progress = player.closest('.preview-media-player-shell')?.querySelector('.preview-media-quality-progress');
-        if (!progress || pendingVideoQualitySwitch) return;
-        progress.classList.toggle('hidden', !visible);
-        if (visible) { progress.querySelector('small').textContent = t('loading'); progress.querySelector('span').style.width = '25%'; }
-    };
-    ['waiting', 'stalled'].forEach(event => player.addEventListener(event, () => buffering(true)));
-    ['playing', 'canplay', 'seeked'].forEach(event => player.addEventListener(event, () => buffering(false)));
+    player.addEventListener('seeked', () => reportVideoPlayback(player, true));
 }
 
-function stopVideoPlayback() {
+function stopVideoPlayback(dispose = true) {
     const player = $('preview-body')?.querySelector('video');
     if (!player) return;
     reportVideoPlayback(player, true);
+    if (dispose && activeVideoPlayer) { activeVideoPlayer.dispose(); activeVideoPlayer = null; }
     player.pause();
     player.removeAttribute('src');
-    player.replaceChildren();
+    if (dispose) player.replaceChildren();
     player.load();
 }
 
 let pendingVideoMemoryRecovery = null;
-window._onVideoMemoryPressure = threadId => {
-    if (fileRequestId(previewAppRef) !== threadId) return;
-    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
-    const player = shell?.querySelector('video');
+window._onVideoMemoryPressure = id => {
+    if (fileRequestId(previewAppRef) !== id || !activeVideoPlayer) return;
+    const player = $('preview-body').querySelector('video');
     if (!player) return;
     const fallback = player.dataset.quality !== '480p' && player.dataset.memoryFallbackAttempted !== 'true' &&
-        !!shell.querySelector('[data-video-quality-option="480p"]');
+        !!safeParseJson(player.dataset.qualities, []).includes('480p');
     if (fallback) player.dataset.memoryFallbackAttempted = 'true';
     player.dataset.memoryRecovery = 'true';
     pendingVideoMemoryRecovery = fallback ? {
-        threadId, time: Number.isFinite(player.currentTime) ? player.currentTime : 0,
-        playing: !player.paused, previousQuality: player.dataset.quality
+        threadId: id, requested: '480p', time: Number.isFinite(player.currentTime) ? player.currentTime : 0, playing: !player.paused
     } : null;
-    stopVideoPlayback();
-    if (!fallback) { window._onVideoStreamError(threadId, t('videoMemoryStopped'), t('videoMemoryTitle')); return; }
-    const progress = shell.querySelector('.preview-media-quality-progress');
-    progress?.classList.remove('hidden');
-    if (progress?.querySelector('small')) progress.querySelector('small').textContent = t('videoMemoryFallback');
+    stopVideoPlayback(false);
+    if (fallback) activeVideoPlayer.waiting(t('videoMemoryFallback'));
+    else activeVideoPlayer.onError(t('videoMemoryStopped'), t('videoMemoryTitle'));
 };
-window._onVideoMemoryReleased = threadId => {
-    if (fileRequestId(previewAppRef) !== threadId || pendingVideoMemoryRecovery?.threadId !== threadId) return;
+window._onVideoMemoryReleased = id => {
+    if (fileRequestId(previewAppRef) !== id || pendingVideoMemoryRecovery?.threadId !== id) return;
     pendingVideoQualitySwitch = pendingVideoMemoryRecovery;
     pendingVideoMemoryRecovery = null;
-    window.bridge.requestVideoQuality(threadId, previewAppRef.name, '480p');
+    window.bridge.requestVideoQuality(id, previewAppRef.name, '480p');
 };
-
-window._onVideoStreamError = (threadId, message, title) => {
-    if (fileRequestId(previewAppRef) !== threadId) return;
-    const shell = $('preview-body').querySelector('.preview-media-player-shell.video');
-    if (!shell) return;
-    shell.querySelector('video')?.pause();
-    shell.querySelector('.preview-video-frame')?.classList.add('hidden');
-    shell.querySelector('.preview-media-quality-progress')?.classList.add('hidden');
-    const fallback = shell.querySelector('.preview-media-fallback');
-    fallback?.classList.remove('hidden');
-    if (fallback?.querySelector('p')) fallback.querySelector('p').textContent = message;
-    if (title && fallback?.querySelector('strong')) fallback.querySelector('strong').textContent = title;
+window._onVideoStreamError = (id, message, title) => {
+    if (fileRequestId(previewAppRef) === id) activeVideoPlayer?.onError(message, title);
 };
 
 window.addEventListener?.('pagehide', () => reportVideoPlayback($('preview-body')?.querySelector('video'), true));
-
-function createVideoChrome(player) {
-    try {
-        const savedVolume = JSON.parse(localStorage.getItem('video-volume') || 'null');
-        if (savedVolume && Number.isFinite(savedVolume.volume)) {
-            player.volume = Math.max(0, Math.min(1, savedVolume.volume));
-            player.muted = !!savedVolume.muted;
-        }
-    } catch (_) {}
-    player.addEventListener('volumechange', () => {
-        try { localStorage.setItem('video-volume', JSON.stringify({volume:player.volume, muted:player.muted})); } catch (_) {}
-    });
-    const frame = document.createElement('div');
-    frame.className = 'preview-video-frame';
-    frame.appendChild(player);
-    const controls = document.createElement('div');
-    controls.className = 'preview-video-controls';
-    controls.innerHTML = `<button data-video-play title="Play">${icon('play_arrow',20)}</button>
-        <span data-video-current>0:00</span>
-        <input data-video-seek type="range" min="0" max="1000" value="0" step="1" aria-label="Seek">
-        <span data-video-duration>0:00</span>
-        <button data-video-mute title="Mute">${icon('volume_up',19)}</button>
-        <input data-video-volume type="range" min="0" max="1" value="1" step="0.01" aria-label="Volume">
-        <button data-video-fullscreen title="Fullscreen">${icon('fullscreen',20)}</button>`;
-    frame.appendChild(controls);
-
-    const play = controls.querySelector('[data-video-play]');
-    const seek = controls.querySelector('[data-video-seek]');
-    const current = controls.querySelector('[data-video-current]');
-    const duration = controls.querySelector('[data-video-duration]');
-    const mute = controls.querySelector('[data-video-mute]');
-    const volume = controls.querySelector('[data-video-volume]');
-    let seeking = false;
-    let resizeTimer = 0;
-    let hostFullscreen = false;
-
-    function syncFrameSize() {
-        if (player.tagName !== 'VIDEO' || !player.videoWidth || !player.videoHeight) return;
-        if (document.fullscreenElement === frame) return;
-        const shell = frame.parentElement;
-        const shellWidth = shell ? shell.clientWidth : 0;
-        const maxWidth = Math.max(260, Math.min(1200, shellWidth || window.innerWidth - 56));
-        const maxHeight = Math.max(180, Math.min(740, Math.round(window.innerHeight * 0.68)));
-        const scale = Math.min(maxWidth / player.videoWidth, maxHeight / player.videoHeight);
-        const width = Math.max(180, Math.round(player.videoWidth * scale));
-        const height = Math.max(140, Math.round(player.videoHeight * scale));
-        const controlsMinWidth = maxWidth >= 540 ? 540 : maxWidth;
-        const frameWidth = Math.min(maxWidth, Math.max(width, controlsMinWidth));
-        frame.style.width = frameWidth + 'px';
-        player.style.width = Math.min(width, frameWidth) + 'px';
-        player.style.height = Math.min(height, maxHeight) + 'px';
-    }
-
-    function scheduleFrameSize() {
-        clearTimeout(resizeTimer);
-        resizeTimer = setTimeout(syncFrameSize, 30);
-    }
-
-
-    function setVideoFullscreen(enabled) {
-        hostFullscreen = !!enabled;
-        frame.classList.toggle('is-fullscreen', hostFullscreen || document.fullscreenElement === frame);
-        if (window.bridge && typeof window.bridge.setHostFullscreen === 'function') {
-            window.bridge.setHostFullscreen(hostFullscreen);
-        }
-        if (!hostFullscreen) scheduleFrameSize();
-    }
-    function refresh() {
-        const dur = Number.isFinite(player.duration) ? player.duration : 0;
-        const cur = Number.isFinite(player.currentTime) ? player.currentTime : 0;
-        play.innerHTML = icon(player.paused ? 'play_arrow' : 'pause', 20);
-        current.textContent = formatMediaTime(cur);
-        duration.textContent = formatMediaTime(dur);
-        if (!seeking) seek.value = dur > 0 ? String(Math.round(cur / dur * 1000)) : '0';
-        mute.innerHTML = icon(player.muted || player.volume === 0 ? 'volume_off' : 'volume_up', 19);
-        volume.value = player.muted ? '0' : String(player.volume);
-    }
-
-    play.addEventListener('click', e => {
-        e.stopPropagation();
-        if (player.paused) player.play().catch(() => {});
-        else player.pause();
-        refresh();
-    });
-    player.addEventListener('click', e => {
-        e.stopPropagation();
-        play.click();
-    });
-    seek.addEventListener('input', () => {
-        seeking = true;
-        const dur = Number.isFinite(player.duration) ? player.duration : 0;
-        current.textContent = formatMediaTime(dur * (Number(seek.value) || 0) / 1000);
-    });
-    seek.addEventListener('change', () => {
-        const dur = Number.isFinite(player.duration) ? player.duration : 0;
-        if (dur > 0) player.currentTime = dur * (Number(seek.value) || 0) / 1000;
-        seeking = false;
-        refresh();
-    });
-    mute.addEventListener('click', e => {
-        e.stopPropagation();
-        player.muted = !player.muted;
-        refresh();
-    });
-    volume.addEventListener('input', () => {
-        player.volume = Math.max(0, Math.min(1, Number(volume.value) || 0));
-        player.muted = player.volume === 0;
-        refresh();
-    });
-    controls.querySelector('[data-video-fullscreen]').addEventListener('click', async e => {
-        e.stopPropagation();
-        if (document.fullscreenElement === frame || hostFullscreen) {
-            if (document.fullscreenElement === frame) await document.exitFullscreen().catch(() => {});
-            setVideoFullscreen(false);
-            return;
-        }
-
-        let nativeStarted = false;
-        if (frame.requestFullscreen) {
-            try {
-                await frame.requestFullscreen();
-                nativeStarted = document.fullscreenElement === frame;
-            } catch (_) {}
-        }
-
-        setVideoFullscreen(true);
-        if (!nativeStarted) syncFrameSize();
-    });
-    ['loadedmetadata', 'timeupdate', 'play', 'pause', 'volumechange', 'durationchange'].forEach(eventName => {
-        player.addEventListener(eventName, refresh);
-    });
-    player.addEventListener('loadedmetadata', syncFrameSize);
-    const handleFullscreenChange = () => {
-        setVideoFullscreen(document.fullscreenElement === frame);
-    };
-    if (activeVideoResizeCleanup) activeVideoResizeCleanup();
-    window.addEventListener('resize', scheduleFrameSize, { passive:true });
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    activeVideoResizeCleanup = () => {
-        if (document.fullscreenElement === frame) document.exitFullscreen().catch(() => {});
-        setVideoFullscreen(false);
-        window.removeEventListener('resize', scheduleFrameSize);
-        document.removeEventListener('fullscreenchange', handleFullscreenChange);
-    };
-    refresh();
-    return frame;
-}
 
 function formatMediaTime(seconds) {
     seconds = Math.max(0, Math.floor(Number(seconds) || 0));
@@ -3567,7 +3379,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (selectedKeys.size) { clearSelection(); return; }
             closeSidebarNewMenu(); sortMenu.classList.add('hidden'); typeFilterMenu.classList.add('hidden'); dateFilterMenu.classList.add('hidden'); hideCtx(); closeSettings(); closeFolderModal(); hideConfirm(); closeMoveModal();
         }
-        if (!previewOverlay.classList.contains('hidden')) {
+        if (!previewOverlay.classList.contains('hidden') && !activeVideoPlayer?.isMini()) {
             if (e.key==='ArrowLeft')  previewPrev();
             if (e.key==='ArrowRight') previewNext();
             if (e.key==='+' || e.key==='=') { if (activeImgWrap) activeImgWrap._zoomIn(); }
@@ -3882,7 +3694,7 @@ function setupImageZoom(wrap, img) {
 }
 
 function disposeActiveImage() {
-    if (activeVideoResizeCleanup) { activeVideoResizeCleanup(); activeVideoResizeCleanup = null; }
+    if (activeVideoPlayer) stopVideoPlayback();
     if (activeImgWrap && typeof activeImgWrap._dispose === 'function') activeImgWrap._dispose();
     activeImgWrap = null;
 }
@@ -5663,13 +5475,15 @@ function canPreview(name) { return !!name; }
 function loadPreviewApp(app, showLoading) {
     window.bridge.setPreviewVisible?.(true);
     stopVideoPlayback();
+    pendingVideoQualitySwitch = null;
+    pendingVideoMemoryRecovery = null;
     const previous = previewAppRef;
     if (previous && fileRequestId(previous) !== fileRequestId(app)) window.bridge.closePreview(fileRequestId(previous));
     previewAppRef = app;
     $('preview-filename').textContent = app.name;
     $('preview-filesize').textContent = fmtSize(app.sizeBytes);
     updatePreviewNav();
-    if (showLoading) window._onPreviewLoading();
+    if (showLoading || fileType(app.name) === 'video') window._onPreviewLoading();
     window.bridge.requestPreview(fileRequestId(app), app.name);
 }
 
@@ -5697,6 +5511,8 @@ function closePreview() {
     disposeActiveImage();
     resetPdfPreviewState();
     pendingVideoQualitySwitch = null;
+    pendingVideoMemoryRecovery = null;
+    autoPlayNextVideoId = null;
     previewOverlay.classList.add('hidden');
     scheduleNativeTitleBarDragRegion(0);
     $('preview-body').innerHTML = `<div class="preview-load-state">

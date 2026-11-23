@@ -79,6 +79,27 @@ public sealed class SettingsStore : IEncryptionSecretStore
         return value.Length == 0 ? [] : System.Text.Json.JsonSerializer.Deserialize<List<LibraryMutation>>(value, JsonOptions.Web) ?? [];
     }
 
+    internal VideoPlayerPreferences LoadVideoPlayerPreferences()
+    {
+        var value = ReadSettingValue("videoPlayerPreferences");
+        try
+        {
+            return value.Length == 0 ? new() :
+                System.Text.Json.JsonSerializer.Deserialize<VideoPlayerPreferences>(value, JsonOptions.Web)?.Normalize() ?? new();
+        }
+        catch (System.Text.Json.JsonException) { return new(); }
+    }
+
+    internal void SaveVideoPlayerPreferences(VideoPlayerPreferences preferences)
+    {
+        lock (_lock)
+        {
+            using var connection = Open();
+            Upsert(connection, "videoPlayerPreferences",
+                System.Text.Json.JsonSerializer.Serialize(preferences.Normalize() with { Initialized = true }, JsonOptions.Web));
+        }
+    }
+
     internal void SaveLibraryMutations(string key, IReadOnlyList<LibraryMutation> mutations)
     {
         lock (_lock)

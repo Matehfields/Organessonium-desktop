@@ -22,9 +22,11 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
     private int _current;
     private int _demandCount;
     private bool _playing;
+    private bool _seeking;
     private bool _closed;
     private bool _resourcesDisposed;
     private int _activeReads;
+    private long _reusedBytes;
     private readonly TaskCompletionSource _readsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Exception? _failure;
 
@@ -47,6 +49,16 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
     public string State { get; private set; } = "Opening";
     public long CachedBytes { get { lock (_sync) return _cache.Values.Sum(b => b.LongLength); } }
     public int CachedChunks { get { lock (_sync) return _cache.Count; } }
+    internal object Snapshot()
+    {
+        lock (_sync)
+            return new
+            {
+                state = State, ramBytes = _cache.Values.Sum(chunk => chunk.LongLength), diskBytes = 0,
+                reusedBytes = _reusedBytes, cachedChunks = _cache.Count, activeChunks = _pending.Count,
+                source = (_provider as DiscordVideoChunkProvider)?.Metrics.Snapshot()
+            };
+    }
     public Task WarmUpAsync() => GetChunkAsync(0, _lifetime.Token, demand: true);
 
     public void SetPlaying(bool playing, bool seeking = false)
@@ -55,6 +67,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
         {
             if (_closed) return;
             _playing = playing;
+            _seeking = seeking;
             State = seeking ? "Seeking" : playing ? "Playing" : "Idle";
             if (seeking || !playing) CancelPrefetchLocked();
             else SchedulePrefetchLocked();
@@ -67,7 +80,17 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
         var token = linked.Token;
         token.ThrowIfCancellationRequested();
-        lock (_sync) { ObjectDisposedException.ThrowIf(_closed, this); _activeReads++; }
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_closed, this);
+            _activeReads++;
+            if (_seeking && offset < Length)
+            {
+                var target = _provider.Index.Find(offset).Index;
+                foreach (var item in _pending)
+                    if (Math.Abs(item.Key - target) > 1) item.Value.Cancellation.Cancel();
+            }
+        }
         var entered = false;
         try
         {
@@ -78,6 +101,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
         while (copied < count)
         {
             var chunk = _provider.Index.Find(offset + copied);
+            bool cached;
             lock (_sync)
             {
                 ObjectDisposedException.ThrowIf(_closed, this);
@@ -87,6 +111,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
                     _current = chunk.Index;
                 }
                 _readers[chunk.Index] = _readers.GetValueOrDefault(chunk.Index) + 1;
+                cached = _cache.ContainsKey(chunk.Index);
                 EvictLocked();
             }
             try
@@ -95,6 +120,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
                 var inside = checked((int)(offset + copied - chunk.Start));
                 var take = Math.Min(count - copied, bytes.Length - inside);
                 bytes.AsMemory(inside, take).CopyTo(destination[copied..]);
+                if (cached) lock (_sync) _reusedBytes += take;
                 copied += take;
             }
             finally
@@ -113,6 +139,26 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
         {
             if (entered) _reads.Release();
             lock (_sync) if (--_activeReads == 0 && _closed) _readsDrained.TrySetResult();
+        }
+    }
+
+    internal bool TryReadCached(long offset, Span<byte> destination)
+    {
+        lock (_sync)
+        {
+            if (_closed || offset < 0 || offset > Length - destination.Length) return false;
+            var copied = 0;
+            while (copied < destination.Length)
+            {
+                var chunk = _provider.Index.Find(offset + copied);
+                if (!_cache.TryGetValue(chunk.Index, out var bytes)) return false;
+                var inside = checked((int)(offset + copied - chunk.Start));
+                var count = Math.Min(destination.Length - copied, bytes.Length - inside);
+                bytes.AsSpan(inside, count).CopyTo(destination[copied..]);
+                copied += count;
+            }
+            _reusedBytes += copied;
+            return true;
         }
     }
 

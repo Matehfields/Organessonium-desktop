@@ -289,6 +289,9 @@ public sealed partial class AppController : IAsyncDisposable
             case "requestVideoQuality": _ = RequestVideoQualitySafeAsync(ArgString(args, 0), ArgString(args, 1), ArgString(args, 2)); return Task.CompletedTask;
             case "closePreview": ClosePreview(ArgString(args, 0)); return Task.CompletedTask;
             case "videoPlayback": _ = RunAsync(() => UpdateVideoPlaybackAsync(args)); return Task.CompletedTask;
+            case "videoPlayerStats": return SendVideoPlayerStatsAsync(ArgString(args, 0), ArgString(args, 1));
+            case "saveVideoPreferences": SaveVideoPreferences(ArgString(args, 0)); return Task.CompletedTask;
+            case "prepareVideoFrameDownload": return PrepareVideoFrameDownloadAsync(ArgString(args, 0), ArgString(args, 1));
             case "clearPreviewCache": _ = RunAsync(ClearPreviewCacheAsync); return Task.CompletedTask;
             case "getPreviewCacheSize": _ = RunAsync(SendPreviewCacheSizeAsync); return Task.CompletedTask;
             case "openPreviewMedia": _ = RunAsync(() => RunTrackedPreviewAsync(() => OpenPreviewMediaAsync(ArgString(args, 0)))); return Task.CompletedTask;
@@ -1592,7 +1595,9 @@ public sealed partial class AppController : IAsyncDisposable
                 {
                     src = streamUrl, mime = low ? "video/mp4" : MediaMime(name), quality = low ? "480p" : "full",
                     qualities, fileId = entry.FileId, resumeSeconds = progress?.ResumeAt() ?? 0,
-                    savedDuration = progress?.DurationSeconds ?? 0
+                    savedDuration = progress?.DurationSeconds ?? 0, preferences = _store.LoadVideoPlayerPreferences(),
+                    streamBytes = _previewResources.GetVideo(streamUrl)?.Length ?? 0, originalBytes = entry.SizeBytes,
+                    uploadedAt = entry.UploadedAt, cacheUrl = PreviewResourceRegistry.CachedVideoUrl(streamUrl)
                 }, JsonOptions.Web), threadId);
                 return;
             }
@@ -1767,7 +1772,7 @@ public sealed partial class AppController : IAsyncDisposable
         var existing = GetPreviewUrl(threadId, quality);
         if (existing != null)
         {
-            await _bridge.CallAsync("_onVideoQualityReady", threadId, quality, existing, quality == "480p" ? "video/mp4" : MediaMime(name));
+            await SendVideoQualityReadyAsync(threadId, name, quality, existing);
             return;
         }
 
@@ -1781,7 +1786,8 @@ public sealed partial class AppController : IAsyncDisposable
                 if (_videoSessions.TryRemove(key, out var old)) await old.DisposeAsync();
                 if (_previewUrls.TryRemove(key, out var oldUrl)) _previewResources.RemoveUrl(oldUrl);
             }
-            await _bridge.CallAsync("_onVideoQualityReady", threadId, quality, streamUrl, quality == "480p" ? "video/mp4" : MediaMime(name));
+            cancellation.ThrowIfCancellationRequested();
+            await SendVideoQualityReadyAsync(threadId, name, quality, streamUrl);
             return;
         }
         throw new InvalidOperationException("Metadados do vídeo não encontrados.");
