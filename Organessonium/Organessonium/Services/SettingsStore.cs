@@ -417,7 +417,7 @@ public sealed class SettingsStore : IEncryptionSecretStore
     internal AppEntry? LoadCachedFileEntry(string folderId, string metadataMessageId) =>
         LoadCachedEntriesForFolder(folderId, metadataMessageId).FirstOrDefault();
 
-    internal AppEntry? LoadCachedFileByRequestId(string id)
+    internal AppEntry? LoadCachedFileByRequestId(string id, string? outsideFolderId = null)
     {
         if (string.IsNullOrWhiteSpace(id)) return null;
         lock (_lock)
@@ -426,9 +426,12 @@ public sealed class SettingsStore : IEncryptionSecretStore
             using var command = connection.CreateCommand();
             command.CommandText = """
                 SELECT COALESCE(parent_folder_id, ''), names_message_id FROM app_entries
-                WHERE type = 'file' AND (names_message_id = $id OR file_id = $id) LIMIT 1
+                WHERE type = 'file' AND (names_message_id = $id OR file_id = $id)
+                  AND ($outside IS NULL OR COALESCE(NULLIF(parent_folder_id, ''), 'root') <> $outside COLLATE NOCASE)
+                LIMIT 1
                 """;
             command.Parameters.AddWithValue("$id", id);
+            command.Parameters.AddWithValue("$outside", (object?)outsideFolderId ?? DBNull.Value);
             using var reader = command.ExecuteReader();
             if (!reader.Read()) return null;
             var folderId = reader.GetString(0);

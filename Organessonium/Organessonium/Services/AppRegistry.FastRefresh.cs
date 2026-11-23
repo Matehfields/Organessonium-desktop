@@ -12,6 +12,8 @@ public sealed partial class AppRegistry
         if (!allowMetadataFallback && !_mappings.ContainsKey(NormalizeFolderId(folderId)))
             return await LoadCachedFolderAsync(folderId, path, token);
         var mapping = await GetMappingAsync(folderId, token);
+        if (allowMetadataFallback && _reconciledFolderMappings.TryGetValue(mapping.FolderId, out var scanned) && scanned == mapping)
+            return await LoadCachedFolderAsync(folderId, path, token);
         var serial = await _serials.LoadFolderAsync(mapping, token);
         if (serial == null) return allowMetadataFallback ? await RefreshFolderAsync(folderId, path, token) : await LoadCachedFolderAsync(folderId, path, token);
         await _entryMutationGate.WaitAsync(token);

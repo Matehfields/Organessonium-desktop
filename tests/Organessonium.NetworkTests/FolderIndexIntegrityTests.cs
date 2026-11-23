@@ -63,6 +63,18 @@ internal static partial class Program
         await h.Registry.RefreshServerIndexAsync(true);
         RequireSync((await h.Registry.LoadCachedFolderAsync(folder.FolderId, entry.Path)).Single().FileId == entry.FileId,
             "o índice vazio substituiu um serial que ainda registra arquivos");
+
+        var moved = entry.AtLocation(AppRegistry.RootFolderId, "/");
+        moved.MetadataMessageId = "";
+        await h.Registry.AddEntryAsync(moved);
+        writes = h.Server.PublishedContents.Count;
+        await h.Registry.RefreshServerIndexAsync(false);
+        RequireSync((await h.Registry.LoadFolderSerialAsync(folder.FolderId, entry.Path)).Count == 0 &&
+            writes == h.Server.PublishedContents.Count, "a conferência não reconheceu o arquivo movido sem publicar mensagens");
+        await h.Registry.RefreshServerIndexAsync(true);
+        RequireSync((await h.Registry.LoadFolderSerialAsync(folder.FolderId, entry.Path)).Count == 0 &&
+            (await h.Registry.LoadFolderSerialAsync(AppRegistry.RootFolderId, "/")).Any(file => file.FileId == moved.FileId),
+            "a reconstrução manteve a referência antiga ou perdeu o arquivo no destino confirmado");
         return TestOutcome.Pass();
     }
 }

@@ -63,6 +63,32 @@ public sealed partial class AppRegistry
         await _discord.RenameThreadAsync(mapping.ThreadId, title, token, onRateLimitWait);
     }
 
+    private async Task<bool> VerifyMovedSerialFilesAsync(FolderIndexMapping source, FolderSerial serial, CancellationToken token)
+    {
+        foreach (var child in serial.Children)
+        {
+            if (child.IsFolder) return false;
+            var cached = _store.LoadCachedFileByRequestId(child.Id, source.FolderId);
+            if (cached == null || cached.FileId != child.Id || cached.ThreadId != child.ThreadId ||
+                !_mappings.TryGetValue(NormalizeFolderId(cached.ParentFolderId), out var destination) ||
+                destination.ThreadId == source.ThreadId || string.IsNullOrWhiteSpace(cached.MetadataMessageId))
+                return false;
+            try
+            {
+                await VerifyFolderDestinationAsync(destination, cached.ParentFolderId, token);
+                var message = await _discord.GetMessageAsync(destination.ThreadId, cached.MetadataMessageId, token);
+                if ((await _metadata.ReadEnvelopeAsync(message, token))?.Entry is not FileMetadata file ||
+                    file.FileId != child.Id || file.ThreadId != child.ThreadId ||
+                    !string.Equals(file.ParentFolderId, destination.FolderId, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            catch (InvalidDataException) { return false; }
+            catch (DiscordApiException error) when (error.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
+            { return false; }
+        }
+        return true;
+    }
+
     private async Task VerifyFolderDestinationAsync(FolderIndexMapping mapping, string? expectedFolderId, CancellationToken token)
     {
         var expected = NormalizeFolderId(expectedFolderId);
