@@ -548,8 +548,8 @@
                 ['Qualidade e resolução', (video.dataset.quality === '480p' ? '480p' : 'Original') + ' · ' + resolution(video.videoWidth, video.videoHeight)],
                 ['Resolução original', resolution(original?.width, original?.height)],
                 ['Área de apresentação', resolution(video.clientWidth, video.clientHeight)],
-                ['FPS da faixa / apresentados (estimativa)', (metadata?.video?.fps ? decimal(metadata.video.fps) : 'Indisponível') +
-                    ' / ' + (displayedFps == null ? 'Indisponível' : decimal(displayedFps))],
+                ['FPS original / faixa atual / apresentados', [original?.fps, metadata?.video?.fps, displayedFps]
+                    .map(value => value == null ? 'Indisponível' : decimal(value)).join(' / ')],
                 ['Quadros processados / descartados', quality ? quality.totalVideoFrames + ' / ' + quality.droppedVideoFrames +
                     ' (' + decimal(quality.totalVideoFrames ? quality.droppedVideoFrames / quality.totalVideoFrames * 100 : 0) + '%)' : 'Indisponível'],
                 ['Codecs', (metadata?.video?.codec || 'Indisponível') + ' / ' + (metadata?.audio?.codec || 'Indisponível')],

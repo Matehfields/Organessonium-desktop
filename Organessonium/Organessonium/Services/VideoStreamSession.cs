@@ -80,17 +80,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
         var token = linked.Token;
         token.ThrowIfCancellationRequested();
-        lock (_sync)
-        {
-            ObjectDisposedException.ThrowIf(_closed, this);
-            _activeReads++;
-            if (_seeking && offset < Length)
-            {
-                var target = _provider.Index.Find(offset).Index;
-                foreach (var item in _pending)
-                    if (Math.Abs(item.Key - target) > 1) item.Value.Cancellation.Cancel();
-            }
-        }
+        lock (_sync) { ObjectDisposedException.ThrowIf(_closed, this); _activeReads++; }
         var entered = false;
         try
         {
@@ -229,7 +219,7 @@ public sealed class VideoStreamSession : IVirtualFile, IAsyncDisposable, IDispos
 
     private void SchedulePrefetchLocked()
     {
-        if (_closed || !_playing || PrefetchChunks == 0 || _prefetch != null || _failure != null) return;
+        if (_closed || !_playing || _seeking || PrefetchChunks == 0 || _prefetch != null || _failure != null) return;
         _prefetch = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         var source = _prefetch;
         var current = _current;

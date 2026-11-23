@@ -182,8 +182,13 @@ internal static partial class Program
         await video.WarmUpAsync();
         video.SetPlaying(true);
         await WaitForVideoConditionAsync(() => provider.Starts.ContainsKey(1));
+        video.SetPlaying(true, seeking: true);
         await video.ReadAsync(10 * 1024, new byte[16]);
         await WaitForVideoConditionAsync(() => provider.Cancelled.Contains(1));
+        await Task.Delay(80);
+        if (provider.Starts.ContainsKey(11)) return TestOutcome.Fail("o seek reiniciou a antecipação antes da posição estabilizar");
+        video.SetPlaying(true);
+        await WaitForVideoConditionAsync(() => provider.Starts.ContainsKey(11));
         await video.DisposeAsync();
         if (video.CachedBytes != 0 || video.State != "Closed" || !provider.Disposed) return TestOutcome.Fail("fechar não liberou a sessão");
         var bounded = new PatternChunks(Enumerable.Repeat(1024, 20).ToArray());

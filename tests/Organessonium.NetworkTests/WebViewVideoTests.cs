@@ -33,9 +33,11 @@ internal static partial class Program
             var environment = await CoreWebView2Environment.CreateAsync(null, root.CreateSubdirectory("profile").FullName,
                 new CoreWebView2EnvironmentOptions("--autoplay-policy=no-user-gesture-required"));
             controller = await environment.CreateCoreWebView2ControllerAsync(hwnd);
+            controller.IsVisible = true;
             controller.Bounds = new System.Drawing.Rectangle(0, 0, 1100, 700);
             var core = controller.CoreWebView2;
             core.SetVirtualHostNameToFolderMapping("organessonium.local", assets.FullName, CoreWebView2HostResourceAccessKind.Allow);
+            await core.AddScriptToExecuteOnDocumentCreatedAsync("window._playerErrors=[];window.addEventListener('error',e=>_playerErrors.push(e.message||e.target.src),true);");
             using var adapter = new WebView2PreviewAdapter(core, resources);
             adapter.Attach();
             var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -56,7 +58,10 @@ internal static partial class Program
                     if (actual == "true") return;
                     await Task.Delay(50);
                 }
-                throw new InvalidOperationException(message + " (" + actual + ")");
+                var state = await core.ExecuteScriptAsync("(()=>{const v=document.querySelector('video');return {errors:_playerErrors,player:!!customElements.get('media-play-button')," +
+                    "mounted:!!v,ready:v?.readyState,network:v?.networkState,hasSource:!!v?.getAttribute('src')," +
+                    "mediaError:v?.error?.message,frame:!!document.querySelector('.vp-frame')};})()");
+                throw new InvalidOperationException(message + " (" + actual + "; " + state + ")");
             }
             var bytes = await File.ReadAllBytesAsync(Path.Combine(AppContext.BaseDirectory, "video-controls-fixture.mp4"));
             await using var session = new VideoStreamSession(new FixtureVideoChunks(bytes), 0);
@@ -100,7 +105,14 @@ internal static partial class Program
             await core.ExecuteScriptAsync("_videoKey('i');_videoKey('?');");
             await CheckAsync("!previewOverlay.classList.contains('video-docked') && document.querySelector('.vp-panel').textContent.includes('Atalhos do reprodutor')",
                 "restaurar mini player ou abrir ajuda falhou");
-            await core.ExecuteScriptAsync("_videoKey('Escape');document.querySelector('video').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true}));document.querySelector('.vp-panel [data-action=stats]').click();");
+            await core.ExecuteScriptAsync("_videoKey('Escape');_videoKey('f');");
+            await CheckAsync("(()=>{const frame=document.querySelector('.vp-frame');const box=frame.getBoundingClientRect();" +
+                "return frame.classList.contains('is-fullscreen') && box.left<=1 && box.top<=1 && " +
+                "Math.abs(box.width-innerWidth)<2 && Math.abs(box.height-innerHeight)<2;})()", "a tela cheia deixou margens ou não abriu");
+            await core.ExecuteScriptAsync("_videoKey('Escape');");
+            await CheckAsync("!document.querySelector('.vp-frame').classList.contains('is-fullscreen')", "o player não saiu da tela cheia");
+            await core.ExecuteScriptAsync("document.querySelector('video').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true}));" +
+                "document.querySelector('.vp-panel [data-action=stats]').click();");
             await CheckAsync("!document.querySelector('.vp-stats').hidden && document.querySelector('.vp-stats dl').textContent.includes('256 × 144') && document.querySelector('.vp-stats dl').textContent.includes('H.264')", "estatísticas não exibiram os dados da mídia");
             await core.ExecuteScriptAsync("""
                 (()=>{const input=document.querySelector('.vp-frame input[type=file]');const files=new DataTransfer();
