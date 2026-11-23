@@ -88,6 +88,14 @@ internal static partial class Program
                 "previewOverlay.classList.remove('hidden');_onPreviewReady('video','Teste.mp4'," + JsonSerializer.Serialize(data) + ")");
             await CheckAsync("!!customElements.get('media-play-button') && document.querySelector('video')?.readyState>=2",
                 "Video.js ou o H.264 do WebView2 não ficou pronto");
+            const string normalLayout = "(()=>{const body=document.getElementById('preview-body');" +
+                "const frame=body.querySelector('.vp-frame').getBoundingClientRect();" +
+                "const play=body.querySelector('[data-video-play]').getBoundingClientRect();" +
+                "return frame.width>=body.clientWidth*.75 && frame.height>150 && play.left>=frame.left && play.right<=frame.right;})()";
+            await CheckAsync(normalLayout, "a coluna do player recolheu na janela normal");
+            controller.Bounds = new System.Drawing.Rectangle(0, 0, 600, 480);
+            await CheckAsync("innerWidth<=600 && " + normalLayout, "o player perdeu a largura ao reduzir a janela");
+            controller.Bounds = new System.Drawing.Rectangle(0, 0, 1100, 700);
             await core.ExecuteScriptAsync("window._videoKey = key => document.querySelector('.vp-frame').dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));_videoKey('k');");
             await CheckAsync("document.querySelector('video').currentTime>.25 && document.querySelector('.vp-buffer i')!==null", "reproduzir pelo Video.js ou exibir o buffer falhou");
             await core.ExecuteScriptAsync("_videoKey('k');");

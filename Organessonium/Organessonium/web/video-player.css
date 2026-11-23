@@ -6,6 +6,7 @@
     min-width: 0;
     padding: 16px 0;
     display: grid;
+    grid-template: minmax(0, 1fr) / minmax(0, 1fr);
     place-items: center;
 }
 .vp-host { display: block; width: min(100%, 1420px); height: 100%; min-height: 0; }
