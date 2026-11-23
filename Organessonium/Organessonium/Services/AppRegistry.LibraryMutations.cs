@@ -66,7 +66,7 @@ public sealed partial class AppRegistry
                     if (published != null) move.Destination.MetadataMessageId = published.MetadataMessageId;
                 }
                 if (move.Destination.MetadataMessageId.Length == 0)
-                    await _metadata.SendEntryAsync(_discord, destination.ThreadId, move.Destination, token);
+                    await SendFolderEntryAsync(destination, move.Destination, token);
             }
             checkpoint();
 

@@ -59,6 +59,7 @@ internal static partial class Program
         ("settingsPageHiddenBrowser", SettingsPageHiddenBrowserAsync),
         ("sharedStorageCapacityAndPacking", SharedStorageCapacityAndPackingAsync),
         ("sharedStorageJournalRouting", SharedStorageJournalRoutingAsync),
+        ("folderIndexWriteIntegrity", FolderIndexWriteIntegrityAsync),
         ("sharedStoragePublicationPipeline", SharedStoragePublicationPipelineAsync),
         ("mappingRefreshPreservesConcurrentCreation", MappingRefreshPreservesConcurrentCreationAsync),
         ("uploadBatchCadence", UploadBatchCadenceAsync),

@@ -40,6 +40,7 @@ public sealed partial class AppController
                             }));
                             if (_registry == registry && !_loggingOut) await PublishLibraryFileCountAsync(registry);
                             await registry.RunJanitorAsync(token);
+                            await registry.AuditFolderIndexesAsync(token);
                         }, api.PayloadLifetime);
                     }
                     catch (OperationCanceledException) when (api.PayloadLifetime.IsCancellationRequested) { break; }

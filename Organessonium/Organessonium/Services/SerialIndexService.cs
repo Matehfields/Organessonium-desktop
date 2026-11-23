@@ -270,7 +270,7 @@ public sealed class SerialIndexService
             var temporary = await WriteTemporarySerialAsync(serial.FolderId, bytes, cancellationToken);
             try
             {
-                var envelope = _metadataCodec.Encode(SerialMessageEnvelope.Encode(serial.FolderId, "", hash));
+                var envelope = SerialMessageEnvelope.EncodeNamed(serial.FolderId, serial.FolderName, hash);
                 var sent = current == null
                     ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
                     : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, current.Id, envelope, temporary, cancellationToken);
@@ -372,7 +372,7 @@ public sealed class SerialIndexService
         var temporary = await WriteTemporarySerialAsync(serial.FolderId, bytes, cancellationToken);
         try
         {
-            var envelope = _metadataCodec.Encode(SerialMessageEnvelope.Encode(serial.FolderId, "", hash));
+            var envelope = SerialMessageEnvelope.EncodeNamed(serial.FolderId, serial.FolderName, hash);
             var message = remoteMissing
                 ? await _discord.SendFileMessageAsync(_settings.SerialChannelId, envelope, temporary, cancellationToken)
                 : await _discord.ReplaceFileMessageAsync(_settings.SerialChannelId, mapping.SerialMessageId, envelope, temporary, cancellationToken);
@@ -868,7 +868,11 @@ public sealed record SerialMessageEnvelope(
             ["folderId"] = folderId,
             ["sha256"] = sha256
         };
-        if (folderName.Length > 0) payload["folderName"] = folderName;
+        if (folderName.Length > 0)
+        {
+            payload["folderName"] = folderName;
+            payload["name"] = folderName;
+        }
         return JsonSerializer.Serialize(payload, JsonOptions.Web);
     }
 
@@ -877,9 +881,13 @@ public sealed record SerialMessageEnvelope(
         var candidate = folderName ?? "";
         while (Encode(folderId, candidate, sha256).Length > MaxDiscordContentLength && candidate.Length > 0)
         {
-            candidate = candidate[..^1];
+            var remove = candidate.Length > 1 && char.IsSurrogatePair(candidate[^2], candidate[^1]) ? 2 : 1;
+            candidate = candidate[..^remove];
         }
 
         return candidate;
     }
+
+    internal static string EncodeNamed(string folderId, string folderName, string sha256) =>
+        Encode(folderId, FolderNameForMessage(folderId, folderName, sha256), sha256);
 }

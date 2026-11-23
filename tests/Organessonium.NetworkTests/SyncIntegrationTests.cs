@@ -100,12 +100,13 @@ internal static partial class Program
             RequireSync(!File.Exists(SyncPaths.Resolve(b.LocalPath, "src/grande.dat")) &&
                 (await deviceRegistry.RefreshFolderAsync(folderId, a.CloudPath + "/src")).Count == 0 &&
                 !server.DeletedChannels.Contains(revision.Payload!.ThreadId), "tombstone não atualizou cards ou apagou a última cópia de recuperação");
-            RequireSync(server.PublishedContents.All(content => content == "" || content == "metadata" || MetadataCodec.Standard().IsEncrypted(content)),
+            RequireSync(server.PublishedContents.All(content => content == "" || content == "metadata" ||
+                SerialMessageEnvelope.TryParse(content, out _) || MetadataCodec.Standard().IsEncrypted(content)),
                 "uma publicação nova deixou campos em plaintext");
             RequireSync(server.PublishedMetadataAttachments.All(content => MetadataCodec.Standard().IsEncrypted(content)),
                 "um metadata/serial foi publicado como anexo em plaintext");
-            RequireSync(server.PublishedTitles.All(title => !title.Contains("Projetos") && !title.Contains("grande.dat") && !title.Contains(a.SyncFolderId)),
-                "título do post revelou organização ou nome");
+            RequireSync(server.PublishedTitles.All(title => !title.Contains("grande.dat")),
+                "título do post revelou nome de arquivo");
             return TestOutcome.Pass();
         }
         finally { SqliteConnection.ClearAllPools(); try { temporary.Delete(true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
@@ -176,6 +177,7 @@ internal static partial class Program
                 lock (_gate)
                 {
                     if (parts.Length == 1) return Json(new { id = channel, type = channel is "folders" or "files" ? 15 : 11, guild_id = "fixture",
+                        name = _threadNames.GetValueOrDefault(channel, ""),
                         thread_metadata = new { archived = ArchivedThreads.GetValueOrDefault(channel), locked = LockedThreads.GetValueOrDefault(channel) } });
                     if (parts.Length > 2 && parts[1] == "threads") return Json(new { threads = Threads().Where(thread => thread.ParentId == channel).ToArray(), has_more = false });
                     if (parts.Length == 3 && _channels.GetValueOrDefault(channel)?.TryGetValue(parts[2], out var m) == true)
@@ -213,6 +215,8 @@ internal static partial class Program
                 using var state = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
                 lock (_gate)
                 {
+                    if (state.RootElement.TryGetProperty("name", out var name))
+                        _threadNames[channel] = name.GetString()!;
                     if (state.RootElement.TryGetProperty("archived", out var archived))
                     {
                         if (!archived.GetBoolean() && RejectNextUnarchive) { RejectNextUnarchive = false; return new(HttpStatusCode.Forbidden); }

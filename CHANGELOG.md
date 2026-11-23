@@ -85,6 +85,11 @@ compartilhado V2 e sincronização entre dispositivos.
 
 ### Corrigido
 
+- O Desktop valida o identificador da pasta antes de publicar metadados no Discord.
+  A auditoria em segundo plano registra duplicatas, referências ausentes e divergências
+  entre seriais e metadados. A varredura periódica atualiza a biblioteca local sem republicar seriais.
+- Threads de índice e localizadores de seriais exibem o nome da pasta. Renomear uma
+  pasta atualiza o título da thread, preservando o identificador usado para o roteamento.
 - A reconstrução do serial de favoritos aguarda a publicação de seriais, evitando falhas
   de autenticação durante atualizações concorrentes de miniaturas.
 - O download de anexos múltiplos preserva o erro original ao encontrar uma parte inválida,

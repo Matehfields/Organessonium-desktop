@@ -12,6 +12,7 @@ internal sealed partial class SharedStorageManager
     private DateTime _snapshotSaved;
     internal async Task WarmReadIndexAsync(CancellationToken token)
     {
+        if (_journalThreadId == null && !_store.LoadFolderIndexMappings().ContainsKey(AppRegistry.StorageJournalFolderId)) return;
         await _gate.WaitAsync(token);
         try { await RefreshJournalAsync(token); }
         finally { _gate.Release(); }

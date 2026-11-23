@@ -104,7 +104,7 @@ public sealed partial class AppRegistry
             try
             {
                 // Publish first. A failed destination must leave the original metadata and payloads intact.
-                await _metadata.SendEntryAsync(_discord, destination.ThreadId, detailed, cancellationToken);
+                await SendFolderEntryAsync(destination, detailed, cancellationToken);
                 try
                 {
                     await _metadata.DeleteEntryAsync(_discord, sourceChannelId, entry, cancellationToken);

@@ -20,7 +20,7 @@ public sealed partial class AppRegistry
             await CreateFolderIndexAsync(SynchronizedRootFolderId, RootFolderId, "synchronized", SynchronizedRootPath, token, false);
             var root = await GetMappingAsync(SynchronizedRootFolderId, token);
             foreach (var device in devices)
-                await _metadata.SendEntryAsync(_discord, root.ThreadId, device, token);
+                await SendFolderEntryAsync(root, device, token);
             _store.CacheFolderEntries(SynchronizedRootFolderId, devices);
         }
         var id = "pc-" + deviceId;
@@ -74,7 +74,7 @@ public sealed partial class AppRegistry
             folder.ThreadId = (await EnsureFolderIndexAsync(folder, token)).ThreadId;
             var parent = await GetMappingAsync(NormalizeFolderId(folder.ParentFolderId), token);
             await _discord.UnarchiveThreadAsync(parent.ThreadId, token);
-            await _metadata.SendEntryAsync(_discord, parent.ThreadId, folder, token);
+            await SendFolderEntryAsync(parent, folder, token);
             var entries = _store.LoadCachedEntriesForFolder(NormalizeFolderId(folder.ParentFolderId));
             ReplaceEntry(entries, folder);
             _store.CacheFolderEntries(NormalizeFolderId(folder.ParentFolderId), entries);
@@ -106,6 +106,13 @@ public sealed partial class AppRegistry
             _syncMappingsChecked = DateTime.UtcNow;
         }
         return await GetMappingAsync(folderId, token);
+    }
+
+    internal async Task<FolderIndexMapping> SyncWriteMappingAsync(string folderId, CancellationToken token)
+    {
+        var mapping = await SyncMappingAsync(folderId, token);
+        await VerifyFolderDestinationAsync(mapping, folderId, token);
+        return mapping;
     }
 
     public async Task<string> ProjectSyncRevisionAsync(SyncFolderBinding binding, SyncRevision revision, CancellationToken token)

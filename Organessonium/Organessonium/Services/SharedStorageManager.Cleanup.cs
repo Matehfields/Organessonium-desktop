@@ -23,11 +23,15 @@ internal sealed partial class SharedStorageManager
 
     internal async Task<bool> CompleteCleanupAsync(StorageCleanupRecord request, CancellationToken token)
     {
-        await ReleaseReferenceAsync(request.Scope, request.FileId, token);
         await _gate.WaitAsync(token);
         try
         {
             await RefreshJournalAsync(token);
+            if (NeedsCleanupRelease(request))
+            {
+                await ReleaseReferenceAsync(request.Scope, request.FileId, token);
+                await RefreshJournalAsync(token);
+            }
             return await CleanAsync(request, token);
         }
         finally { _gate.Release(); }
@@ -37,17 +41,24 @@ internal sealed partial class SharedStorageManager
         Func<StorageCleanupRecord, bool, Task> onCompleted, CancellationToken token)
     {
         if (requests.Count == 0) return;
-        await Parallel.ForEachAsync(requests,
-            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token },
-            async (request, cancellation) => await ReleaseReferenceAsync(request.Scope, request.FileId, cancellation));
         await _gate.WaitAsync(token);
         try
         {
             await RefreshJournalAsync(token);
+            var releases = requests.Where(NeedsCleanupRelease).DistinctBy(request => request.Scope).ToArray();
+            await Parallel.ForEachAsync(releases,
+                new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = token },
+                async (request, cancellation) => await ReleaseReferenceAsync(request.Scope, request.FileId, cancellation));
+            if (releases.Length > 0) await RefreshJournalAsync(token);
             await CleanBatchAsync(requests, onCompleted, token);
         }
         finally { _gate.Release(); }
     }
+
+    private bool NeedsCleanupRelease(StorageCleanupRecord request) =>
+        !_appliedCleanups.Contains(request.OperationId) &&
+        (!_references.TryGetValue(request.Scope, out var reference) || reference.State != "released" ||
+         reference.FileId != request.FileId);
 
     private async Task CleanBatchAsync(IReadOnlyList<StorageCleanupRecord> requests,
         Func<StorageCleanupRecord, bool, Task> onCompleted, CancellationToken token, bool continueOnFailure = true)

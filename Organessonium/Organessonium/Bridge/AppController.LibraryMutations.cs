@@ -73,7 +73,7 @@ public sealed partial class AppController
             throw new InvalidOperationException("A pasta de destino não está disponível.");
         var job = new LibraryMutation(LibraryMutationKind.CreateFolder, [new(folder, folder, CreatingFolder: true)], TransferState.Now())
         {
-            FolderCreation = new FolderCreationCheckpoint("index-" + NewId())
+            FolderCreation = new FolderCreationCheckpoint(AppRegistry.FolderThreadTitle(folder.Name, folder.FolderId))
         };
         await EnqueueLibraryMutationAsync(session, job);
     }

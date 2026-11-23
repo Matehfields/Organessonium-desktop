@@ -10,6 +10,44 @@ public static class Program
     {
         var store = new SettingsStore();
         var settings = store.Load();
+        if (args.Contains("--audit-folder-indexes", StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                NetworkConfig.Current.Apply(settings.Proxy);
+                using var api = new DiscordApiClient(settings.BotToken);
+                var metadata = new MetadataService(MetadataCodec.ForStore(store), api.DownloadAttachmentBytesAsync);
+                var audit = new FolderIndexAudit(api, metadata);
+                var names = await api.GetMessagesAsync(settings.NamesChannelId, null);
+                var mappings = await metadata.ReadFolderIndexMappingsInParallelAsync(names, 4);
+                Console.WriteLine($"names: messages={names.Count}, mappings={mappings.Count}");
+                var journal = mappings.FirstOrDefault(mapping => mapping.FolderId == "storage-v2");
+                if (journal != null)
+                {
+                    var inventory = await audit.ScanAsync(journal.ThreadId, journal.FolderId, null, default);
+                    PrintInventory("storage-v2", inventory);
+                    foreach (var pair in inventory.Counts) Console.WriteLine($"  {pair.Key}: {pair.Value}");
+                    foreach (var pair in inventory.ReferenceKinds) Console.WriteLine($"  reference.{pair.Key}: {pair.Value}");
+                }
+                if (args.Contains("--journal-only", StringComparer.OrdinalIgnoreCase)) return 0;
+
+                var serials = new SerialIndexService(api, store, settings);
+                var checkedFiles = 0;
+                var folderNumber = 0;
+                var verifyPayloads = args.Contains("--verify-payloads", StringComparer.OrdinalIgnoreCase);
+                foreach (var mapping in mappings.Where(mapping => mapping.FolderId != "storage-v2"))
+                {
+                    var serial = await serials.LoadFolderAsync(mapping);
+                    var inventory = await audit.ScanAsync(mapping.ThreadId, mapping.FolderId, serial, default,
+                        payloadBudget: verifyPayloads ? int.MaxValue : 0);
+                    PrintInventory($"folder-{++folderNumber}", inventory);
+                    checkedFiles += inventory.UniqueFiles;
+                }
+                Console.WriteLine($"Audited {folderNumber} mapped folder indexes; {checkedFiles} file identities counted across them.");
+                return 0;
+            }
+            catch (Exception error) { Console.WriteLine("Index audit failed: " + error.GetType().Name); return 1; }
+        }
         if (args.Contains("--migrate-storage-journal", StringComparer.OrdinalIgnoreCase))
         {
             if (System.Diagnostics.Process.GetProcessesByName("Organessonium").Length != 0)
@@ -116,4 +154,12 @@ public static class Program
             return 1;
         }
     }
+
+    private static void PrintInventory(string label, IndexInventory inventory) =>
+        Console.WriteLine($"{label}: messages={inventory.Messages}, files={inventory.UniqueFiles}, " +
+            $"headers={inventory.Headers}, wrongFolder={inventory.WrongFolder}, duplicates={inventory.Duplicates}, " +
+            $"unreadable={inventory.Unreadable}, serialFiles={inventory.SerialFiles}, " +
+            $"serialWithoutMetadata={inventory.IndexedWithoutMetadata}, metadataOutsideSerial={inventory.MetadataWithoutIndex}, " +
+            $"checkedPayloads={inventory.CheckedPayloads}, orphanCandidates={inventory.Orphans}, " +
+            $"unknownPayloads={inventory.UnknownPayloads}, pendingCandidates={inventory.Pending}");
 }

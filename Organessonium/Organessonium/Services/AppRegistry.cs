@@ -23,6 +23,7 @@ public sealed partial class AppRegistry
     private readonly ConcurrentDictionary<string, FolderIndexMapping> _mappings;
     private readonly ConcurrentDictionary<string, FolderDescriptor> _descriptors = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Task<List<AppEntry>>> _folderRefreshes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, FolderIndexMapping> _reconciledFolderMappings = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _folderFileCounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LibraryStatistics> _libraryStatistics = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _deferredFolderSerials = new(StringComparer.OrdinalIgnoreCase);
@@ -59,7 +60,9 @@ public sealed partial class AppRegistry
         var normalizedFolderId = NormalizeFolderId(folderId);
         var cached = _store.LoadCachedEntriesForFolder(normalizedFolderId);
         // Confirmed upload metadata can be newer than the serial until the batch ends.
-        var serial = Volatile.Read(ref _uploadIndexBatches) > 0 || _publishingLibraryFolders.ContainsKey(normalizedFolderId) ? null
+        var reconciled = _reconciledFolderMappings.TryGetValue(normalizedFolderId, out var scanned) &&
+            _mappings.TryGetValue(normalizedFolderId, out var current) && scanned == current;
+        var serial = reconciled || Volatile.Read(ref _uploadIndexBatches) > 0 || _publishingLibraryFolders.ContainsKey(normalizedFolderId) ? null
             : await _serials.LoadCachedFolderAsync(normalizedFolderId, cancellationToken);
         var entries = serial == null
             ? cached
@@ -160,16 +163,17 @@ public sealed partial class AppRegistry
                 "/",
                 visited,
                 cancellationToken,
-                onFolderRefreshed);
+                onFolderRefreshed,
+                readOnly: !rebuildSerials);
 
             if (_mappings.ContainsKey(SynchronizedRootFolderId) && !visited.Contains(SynchronizedRootFolderId))
             {
-                await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken, onFolderRefreshed);
+                await RefreshMappedTreeAsync(SynchronizedRootFolderId, SynchronizedRootPath, visited, cancellationToken, onFolderRefreshed, readOnly: !rebuildSerials);
             }
 
             if (_mappings.ContainsKey(TrashFolderId))
             {
-                await RefreshMappedTreeAsync(TrashFolderId, TrashPath, visited, cancellationToken, onFolderRefreshed);
+                await RefreshMappedTreeAsync(TrashFolderId, TrashPath, visited, cancellationToken, onFolderRefreshed, readOnly: !rebuildSerials);
             }
 
             if (rebuildSerials)
@@ -403,14 +407,18 @@ public sealed partial class AppRegistry
         string folderPath,
         HashSet<string> visited,
         CancellationToken cancellationToken,
-        Func<string, IReadOnlyList<AppEntry>, Task>? onFolderRefreshed = null)
+        Func<string, IReadOnlyList<AppEntry>, Task>? onFolderRefreshed = null,
+        bool readOnly = false)
     {
         if (!visited.Add(folderId))
         {
             return;
         }
 
-        var entries = await RefreshFolderAsync(folderId, folderPath, cancellationToken);
+        if (readOnly && !_mappings.ContainsKey(folderId)) return;
+        var entries = readOnly
+            ? await RefreshFolderCoreAsync(folderId, folderPath, cancellationToken, readOnly: true)
+            : await RefreshFolderAsync(folderId, folderPath, cancellationToken);
         if (onFolderRefreshed != null)
         {
             await onFolderRefreshed(folderId, entries);
@@ -425,7 +433,8 @@ public sealed partial class AppRegistry
                 PathRules.ChildPath(folder),
                 visited,
                 cancellationToken,
-                onFolderRefreshed);
+                onFolderRefreshed,
+                readOnly);
         }
     }
 
@@ -964,6 +973,7 @@ public sealed partial class AppRegistry
         var parentFolderId = NormalizeFolderId(entry.ParentFolderId);
         entry.ParentFolderId = parentFolderId;
         var parent = await GetMappingAsync(parentFolderId, cancellationToken);
+        await VerifyFolderDestinationAsync(parent, parentFolderId, cancellationToken);
         await using var parentWrite = !synchronizeSerials && _uploadIndexBatches > 0
             ? null : await _discord.AcquireThreadWriteAsync(parent.ThreadId, cancellationToken);
         await OpenEntryIndexAsync(parent.ThreadId, synchronizeSerials, cancellationToken, onRateLimitWait);
@@ -993,7 +1003,7 @@ public sealed partial class AppRegistry
 
         try
         {
-            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait,
+            await SendFolderEntryAsync(parent, entry, cancellationToken, onRateLimitWait,
                 replayUnknownResult: creation == null);
             var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
             ReplaceEntry(siblings, entry);
@@ -1067,7 +1077,7 @@ public sealed partial class AppRegistry
         await _discord.UnarchiveThreadAsync(parent.ThreadId, cancellationToken, onRateLimitWait);
         try
         {
-            await _metadata.UpsertEntryAsync(_discord, parent.ThreadId, entry, cancellationToken, onRateLimitWait);
+            await UpsertFolderEntryAsync(parent, entry, cancellationToken, onRateLimitWait);
             var siblings = _store.LoadCachedEntriesForFolder(parentFolderId);
             ReplaceEntry(siblings, entry);
             _store.CacheFolderEntries(parentFolderId, siblings);
@@ -1077,17 +1087,9 @@ public sealed partial class AppRegistry
             if (entry.Type == "folder")
             {
                 var mapping = await GetMappingAsync(entry.FolderId, cancellationToken);
-                await _discord.UnarchiveThreadAsync(mapping.ThreadId, cancellationToken, onRateLimitWait);
-                try
-                {
-                    await _discord.RenameThreadAsync(mapping.ThreadId, FolderThreadTitle(entry.Name, entry.FolderId), cancellationToken, onRateLimitWait);
-                    var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
-                    await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
-                }
-                finally
-                {
-                    await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
-                }
+                await RenameVerifiedIndexAsync(mapping, entry.Name, cancellationToken, onRateLimitWait);
+                var children = _store.LoadCachedEntriesForFolder(entry.FolderId);
+                await SynchronizeFolderSerialAsync(entry.FolderId, PathRules.ChildPath(entry), children, cancellationToken);
             }
         }
         finally
@@ -1152,7 +1154,7 @@ public sealed partial class AppRegistry
         await _discord.UnarchiveThreadAsync(destination.ThreadId, cancellationToken, onRateLimitWait);
         try
         {
-            await _metadata.SendEntryAsync(_discord, destination.ThreadId, entry, cancellationToken, onRateLimitWait);
+            await SendFolderEntryAsync(destination, entry, cancellationToken, onRateLimitWait);
             var destinationChildren = _store.LoadCachedEntriesForFolder(destinationFolderId);
             ReplaceEntry(destinationChildren, entry);
             _store.CacheFolderEntries(destinationFolderId, destinationChildren);
@@ -1362,7 +1364,8 @@ public sealed partial class AppRegistry
     private async Task<List<AppEntry>> RefreshFolderCoreAsync(
         string folderId,
         string folderPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool readOnly = false)
     {
         var revision = Volatile.Read(ref _libraryPublicationRevision);
         try
@@ -1388,10 +1391,25 @@ public sealed partial class AppRegistry
                 }
             }
 
-            var mapping = await GetMappingAsync(folderId, cancellationToken);
+            FolderIndexMapping mapping;
+            if (readOnly)
+            {
+                if (!_mappings.TryGetValue(folderId, out var currentMapping))
+                    return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+                mapping = currentMapping;
+            }
+            else mapping = await GetMappingAsync(folderId, cancellationToken);
             var workers = Math.Clamp(_settings.SearchWorkers, 1, 8);
             var messages = await _discord.GetMessagesInParallelAsync(mapping.ThreadId, workers, cancellationToken);
             var envelopes = await _metadata.ReadEnvelopesInParallelAsync(messages, workers, cancellationToken);
+            var headers = envelopes.Select(envelope => envelope.Entry).OfType<FolderIndexHeaderMetadata>().ToArray();
+            if (headers.Length > 1 || headers.Any(header =>
+                    !header.FolderId.Equals(folderId, StringComparison.OrdinalIgnoreCase)))
+            {
+                var error = IndexDestinationMismatch();
+                if (!readOnly) throw error;
+                return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+            }
             if (messages.Count > 0 && envelopes.Count == 0 && _store.LoadCachedEntriesForFolder(folderId).Count > 0)
             {
                 throw new InvalidOperationException("A leitura do índice da pasta não retornou metadados válidos; o cache foi preservado.");
@@ -1399,19 +1417,26 @@ public sealed partial class AppRegistry
             var entries = _metadata.ToFolderEntries(envelopes, folderId, folderPath, MappingSnapshot());
             NormalizeFolderEntries(entries, folderId, folderPath);
             RecordDescriptors(entries);
-            if (!folderId.Equals(TrashFolderId, StringComparison.OrdinalIgnoreCase))
+            if (!readOnly && !folderId.Equals(TrashFolderId, StringComparison.OrdinalIgnoreCase))
                 await ConsolidateDuplicateFolderEntriesAsync(folderId, entries, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             if (revision != Volatile.Read(ref _libraryPublicationRevision) || _publishingLibraryFolders.ContainsKey(folderId))
                 return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
             _store.CacheFolderEntries(folderId, entries);
-            await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
-            await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
+            if (readOnly)
+            {
+                _reconciledFolderMappings[folderId] = mapping;
+            }
+            else
+            {
+                await SynchronizeFolderSerialAsync(folderId, folderPath, entries, cancellationToken);
+                await ArchiveFolderThreadAsync(mapping.ThreadId, cancellationToken);
+            }
             return entries;
         }
         finally
         {
-            _folderRefreshes.TryRemove(folderId, out _);
+            if (!readOnly) _folderRefreshes.TryRemove(folderId, out _);
         }
     }
 
@@ -1548,7 +1573,7 @@ public sealed partial class AppRegistry
             child.MetadataMessageId = "";
             try
             {
-                await _metadata.SendEntryAsync(_discord, destinationMapping.ThreadId, child, cancellationToken);
+                await SendFolderEntryAsync(destinationMapping, child, cancellationToken);
             }
             catch
             {
@@ -1688,6 +1713,7 @@ public sealed partial class AppRegistry
                 creation?.PostTitle ?? FolderThreadTitle(name, folderId), header, cancellationToken,
                 replayUnknownResult: creation == null);
             threadId = post.ThreadId;
+            _verifiedIndexFolders[threadId] = folderId;
             if (creation != null)
             {
                 creation.ThreadId = threadId;
@@ -2217,9 +2243,18 @@ public sealed partial class AppRegistry
         return ulong.TryParse(id, out var parsed) ? parsed : 0;
     }
 
-    private static string FolderThreadTitle(string name, string folderId)
+    internal static string FolderThreadTitle(string name, string folderId)
     {
-        return "index-" + Guid.NewGuid().ToString("N");
+        var label = string.Concat(name.Select(character => char.IsControl(character) ? ' ' : character)).Trim();
+        if (label.Length == 0) label = "Pasta";
+        var suffix = " [" + folderId[..Math.Min(folderId.Length, 50)] + "]";
+        var limit = DiscordLimits.ThreadNameCharacters - suffix.Length;
+        if (label.Length > limit)
+        {
+            if (char.IsHighSurrogate(label[limit - 1])) limit--;
+            label = label[..limit].TrimEnd();
+        }
+        return label + suffix;
     }
 
     private sealed record FolderDescriptor(string FolderId, string ParentFolderId, string Name, string Path);

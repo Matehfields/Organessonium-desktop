@@ -98,7 +98,13 @@ public sealed partial class AppRegistry
         if (threadId == null)
         {
             var threads = await _discord.GetForumThreadsAsync(_settings.FoldersForumId, token);
-            threadId = threads.FirstOrDefault(thread => thread.Name == creation.PostTitle)?.Id;
+            foreach (var candidate in threads.Where(thread => thread.Name == creation.PostTitle ||
+                         thread.Name == FolderThreadTitle(folder.Name, folder.FolderId)))
+            {
+                var header = await ReadFolderIndexHeaderAsync(candidate.Id, token);
+                if (header?.FolderId == folder.FolderId && header.ParentFolderId == folder.ParentFolderId)
+                    return candidate.Id;
+            }
         }
         if (threadId == null) return null;
 

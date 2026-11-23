@@ -142,7 +142,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             .Where(r => r.FileId == revision.FileId || r.RelativePath.Equals(revision.RelativePath, StringComparison.OrdinalIgnoreCase)).ToList();
         if (!current.Select(r => r.RevisionId).Order(StringComparer.Ordinal).SequenceEqual(expectedHeads.Order(StringComparer.Ordinal)))
             throw new SyncConcurrencyException();
-        var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+        var mapping = await _registry.SyncWriteMappingAsync(folder.CloudFolderId, token);
         await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
         var json = _metadata.EncodeJson(JsonSerializer.Serialize(revision, SyncJson.Options));
         DiscordMessageDto message;
@@ -193,7 +193,7 @@ public sealed class CloudSyncRepository : ICloudSyncRepository, IDisposable
             foreach (var prior in parents.Where(r => r.FileId != revision.FileId ||
                          !r.RelativePath.Equals(revision.RelativePath, StringComparison.OrdinalIgnoreCase)))
                 await _registry.RemoveSyncProjectionAsync(folder, prior, token);
-            var mapping = await _registry.SyncMappingAsync(folder.CloudFolderId, token);
+            var mapping = await _registry.SyncWriteMappingAsync(folder.CloudFolderId, token);
             await _api.UnarchiveThreadAsync(mapping.ThreadId, token);
             var marker = await _api.CreateMessageAsync(mapping.ThreadId, _metadata.EncodeJson(JsonSerializer.Serialize(new
                 { schemaVersion = 1, entryType = "syncApplied", revisionId = revision.RevisionId }, JsonOptions.Web)), token);

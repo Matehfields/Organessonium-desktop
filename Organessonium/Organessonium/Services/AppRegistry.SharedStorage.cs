@@ -16,9 +16,17 @@ public sealed partial class AppRegistry
         {
             // Establish root first, preserving the existing empty-account initialization contract.
             await GetMappingAsync(RootFolderId, token);
-            if (_mappings.TryGetValue(StorageJournalFolderId, out var cached)) return cached;
+            if (_mappings.TryGetValue(StorageJournalFolderId, out var cached))
+            {
+                await VerifyFolderDestinationAsync(cached, StorageJournalFolderId, token);
+                return cached;
+            }
             await RefreshMappingsAsync(token);
-            if (_mappings.TryGetValue(StorageJournalFolderId, out var existing)) return existing;
+            if (_mappings.TryGetValue(StorageJournalFolderId, out var existing))
+            {
+                await VerifyFolderDestinationAsync(existing, StorageJournalFolderId, token);
+                return existing;
+            }
             // No folder entry is published in root: this is an internal index, not a library card.
             return await CreateFolderIndexAsync(StorageJournalFolderId, RootFolderId, StorageJournalFolderId,
                 "/@storage-v2", token, synchronizeSerials: false);

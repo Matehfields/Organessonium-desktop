@@ -350,6 +350,21 @@ internal sealed partial class SharedStorageManager
     internal Task ReleaseReferenceAsync(string scope, string fileId, CancellationToken token) =>
         WriteRecordAsync(new StorageReferenceRecord { Scope = scope, FileId = fileId, State = "released", OwnerId = OwnerId }, null, token);
 
+    internal async Task AuditPendingIndexOperationsAsync(CancellationToken token)
+    {
+        await _gate.WaitAsync(token);
+        try
+        {
+            Diagnostics.DevelopmentDiagnostics.Current?.Record("index.journal_pending", "maintenance", new
+            {
+                cleanups = _cleanups.Keys.Count(id => !_appliedCleanups.Contains(id)),
+                mutations = _mutations.Values.Count(mutation => mutation.Pending),
+                creations = PendingCreations().Count
+            });
+        }
+        finally { _gate.Release(); }
+    }
+
     internal async Task ReconcileReservationsAsync(CancellationToken token)
     {
         await _gate.WaitAsync(token);

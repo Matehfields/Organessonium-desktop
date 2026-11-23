@@ -16,7 +16,7 @@ public sealed partial class AppRegistry
             await OpenEntryIndexAsync(parent.ThreadId, false, token, onRateLimitWait);
             // Preserve the publication/cache ordering used by folder reconciliation.
             // The journal's independent confirmations do not need this index gate.
-            await _metadata.SendEntryAsync(_discord, parent.ThreadId, entry, token, onRateLimitWait);
+            await SendFolderEntryAsync(parent, entry, token, onRateLimitWait);
             _store.CacheUploadedEntry(entry);
         }
         finally { _entryMutationGate.Release(); }
