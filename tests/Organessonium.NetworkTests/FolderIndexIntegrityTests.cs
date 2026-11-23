@@ -56,6 +56,13 @@ internal static partial class Program
             "a revisão passiva publicou mensagens");
         RequireSync((await h.Registry.LoadCachedFolderAsync(folder.FolderId, entry.Path)).Single().FileId == entry.FileId,
             "a navegação voltou ao serial desatualizado depois da revisão passiva");
+
+        await h.Registry.SynchronizeFolderSerialsAsync([folder.FolderId]);
+        foreach (var message in h.Server.Messages(folder.ThreadId).Skip(1))
+            await h.Api.DeleteMessageAsync(folder.ThreadId, message.Id);
+        await h.Registry.RefreshServerIndexAsync(true);
+        RequireSync((await h.Registry.LoadCachedFolderAsync(folder.FolderId, entry.Path)).Single().FileId == entry.FileId,
+            "o índice vazio substituiu um serial que ainda registra arquivos");
         return TestOutcome.Pass();
     }
 }

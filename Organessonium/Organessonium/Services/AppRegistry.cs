@@ -1422,6 +1422,14 @@ public sealed partial class AppRegistry
             cancellationToken.ThrowIfCancellationRequested();
             if (revision != Volatile.Read(ref _libraryPublicationRevision) || _publishingLibraryFolders.ContainsKey(folderId))
                 return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+            if (entries.Count == 0 && mapping.SerialMessageId.Length > 0 &&
+                await _serials.LoadFolderAsync(mapping, cancellationToken) is { Children.Count: > 0 })
+            {
+                // The last verified serial can still be the only locator for intact payloads.
+                _reconciledFolderMappings.TryRemove(folderId, out _);
+                Diagnostics.DevelopmentDiagnostics.Current?.Record("index.empty_with_serial", "maintenance", new { count = 1 });
+                return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+            }
             _store.CacheFolderEntries(folderId, entries);
             if (readOnly)
             {
@@ -1940,7 +1948,7 @@ public sealed partial class AppRegistry
 
         var cachedEntries = cachedOnly
             ? _store.LoadCachedEntriesForFolder(folderId)
-            : await RefreshFolderAsync(folderId, ResolveKnownFolderPath(folderId), cancellationToken);
+            : await RefreshFolderCoreAsync(folderId, ResolveKnownFolderPath(folderId), cancellationToken, readOnly: true);
         if (cachedOnly && cachedEntries.Count == 0) return null;
         long cachedFileCount = cachedEntries.LongCount(entry => entry.Type != "folder");
         long cachedFolderCount = cachedEntries.LongCount(entry => entry.Type == "folder");
