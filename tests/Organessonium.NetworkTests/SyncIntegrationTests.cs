@@ -148,9 +148,9 @@ internal static partial class Program
             Add("names", JsonSerializer.Serialize(new FolderMetadata { FolderId = "synchronized", Name = "synchronized", ParentFolderId = "root" }, JsonOptions.Web));
             Add("names", JsonSerializer.Serialize(new FolderMetadata { FolderId = "phone-id", Name = "PHONE", ParentFolderId = "synchronized", DeviceType = "phone" }, JsonOptions.Web));
         }
-        private DiscordMessageDto Add(string channel, string content)
+        private DiscordMessageDto Add(string channel, string content, string? id = null)
         {
-            var message = new DiscordMessageDto { Id = (++_next).ToString(), Content = content };
+            var message = new DiscordMessageDto { Id = id ?? (++_next).ToString(), Content = content };
             _channels[channel][message.Id] = message; return message;
         }
         public DiscordMessageDto SeedLegacyMetadata(string json)
@@ -180,6 +180,9 @@ internal static partial class Program
                         name = _threadNames.GetValueOrDefault(channel, ""),
                         thread_metadata = new { archived = ArchivedThreads.GetValueOrDefault(channel), locked = LockedThreads.GetValueOrDefault(channel) } });
                     if (parts.Length > 2 && parts[1] == "threads") return Json(new { threads = Threads().Where(thread => thread.ParentId == channel).ToArray(), has_more = false });
+                    // This legacy fixture uses an alias instead of a snowflake for the root thread.
+                    if (parts.Length == 3 && parts[1] == "messages" && channel == "root-thread" && parts[2] == channel)
+                        return Json(_channels[channel].Values.First());
                     if (parts.Length == 3 && _channels.GetValueOrDefault(channel)?.TryGetValue(parts[2], out var m) == true)
                     { MessageReads.AddOrUpdate((channel, parts[2]), 1, (_, count) => count + 1); return Json(m); }
                     if (parts.Length == 2 && parts[1] == "messages")
@@ -271,7 +274,7 @@ internal static partial class Program
                         PublishedTitles.Add(document.RootElement.GetProperty("name").GetString()!);
                         var thread = (++_next).ToString(); _channels[thread] = []; _parents[thread] = channel;
                         _threadNames[thread] = document.RootElement.GetProperty("name").GetString()!;
-                        var message = Add(thread, content); Attach(message, uploadedFiles);
+                        var message = Add(thread, content, id: thread); Attach(message, uploadedFiles);
                         if (channel == "files") PayloadPosts++;
                         return Json(new { id = thread, message });
                     }
