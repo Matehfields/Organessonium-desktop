@@ -85,6 +85,10 @@ compartilhado V2 e sincronização entre dispositivos.
 
 ### Corrigido
 
+- Mover, renomear, enviar à Lixeira e restaurar podem ser retomados por outro Desktop
+  através de uma operação cifrada no canal de seriais. A fila remove a mensagem após a conclusão.
+- Uploads Desktop recuperam lotes pelo plano e pelos anexos confirmados. A confirmação
+  em mensagem separada e a republicação de referências em mudanças apenas de localização ou nome foram eliminadas.
 - O Desktop valida o identificador da pasta antes de publicar metadados no Discord.
   A auditoria em segundo plano registra duplicatas, referências ausentes e divergências
   entre seriais e metadados. A varredura periódica atualiza a biblioteca local sem republicar seriais.

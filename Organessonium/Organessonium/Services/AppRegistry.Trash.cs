@@ -153,7 +153,6 @@ public sealed partial class AppRegistry
             additional.RemoveAll(candidate => SameEntryIdentity(candidate, detailed));
             if (restore && detailed.Favorite) additional.Add(detailed);
             await RebuildFavoritesSerialAsync(additional, cancellationToken);
-            if (detailed.Type == "file") await SharedStorage.PublishFileReferenceAsync(detailed, destination.ThreadId, cancellationToken);
             return detailed;
         }
         finally { _entryMutationGate.Release(); }

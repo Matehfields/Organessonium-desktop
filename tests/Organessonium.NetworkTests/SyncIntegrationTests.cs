@@ -119,6 +119,7 @@ internal static partial class Program
         private readonly Dictionary<string, byte[]> _attachments = new();
         private readonly Dictionary<string, string> _parents = new();
         private readonly Dictionary<string, string> _threadNames = new();
+        private readonly Dictionary<string, DiscordMessageDto> _messagesByNonce = new();
         private ulong _next = 930000000000000000;
         public int PayloadPosts { get; private set; }
         public bool RejectNextFileProjection;
@@ -150,7 +151,8 @@ internal static partial class Program
         }
         private DiscordMessageDto Add(string channel, string content, string? id = null)
         {
-            var message = new DiscordMessageDto { Id = id ?? (++_next).ToString(), Content = content };
+            var message = new DiscordMessageDto { Id = id ?? (++_next).ToString(), Content = content,
+                Author = new DiscordUserDto { Id = "fixture-bot", Bot = true } };
             _channels[channel][message.Id] = message; return message;
         }
         public DiscordMessageDto SeedLegacyMetadata(string json)
@@ -166,6 +168,7 @@ internal static partial class Program
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/users/@me", StringComparison.Ordinal)) return Json(new { id = "fixture-bot", bot = true });
             if (path.StartsWith("/attachments/", StringComparison.Ordinal))
             { lock (_gate) return new(HttpStatusCode.OK) { Content = new ByteArrayContent(_attachments[path.Split('/')[^1]]) }; }
             if (path.Contains("/guilds/", StringComparison.Ordinal)) { lock (_gate) return Json(new { threads = Threads().Where(thread => !thread.ThreadMetadata!.Archived).ToArray() }); }
@@ -279,6 +282,17 @@ internal static partial class Program
                         return Json(new { id = thread, message });
                     }
                     var result = request.Method == HttpMethod.Post ? Add(channel, content) : new DiscordMessageDto { Id = parts[2], Content = content };
+                    if (request.Method == HttpMethod.Post && payload.TryGetProperty("nonce", out var nonce) &&
+                        payload.TryGetProperty("enforce_nonce", out var enforce) && enforce.GetBoolean())
+                    {
+                        if (_messagesByNonce.TryGetValue(nonce.GetString()!, out var alreadySent) &&
+                            _channels[channel].ContainsKey(alreadySent.Id))
+                        {
+                            _channels[channel].Remove(result.Id);
+                            return Json(alreadySent);
+                        }
+                        _messagesByNonce[nonce.GetString()!] = result;
+                    }
                     if (request.Method == HttpMethod.Patch && _channels[channel].TryGetValue(parts[2], out var previous))
                     {
                         if (!payload.TryGetProperty("content", out _)) result.Content = previous.Content;

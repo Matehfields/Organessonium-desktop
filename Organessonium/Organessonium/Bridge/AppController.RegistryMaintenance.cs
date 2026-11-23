@@ -30,6 +30,9 @@ public sealed partial class AppController
                 {
                     try
                     {
+                        try { await ReadRemoteLibraryMutationsAsync(registry, api.PayloadLifetime); }
+                        catch (Exception error) when (!api.PayloadLifetime.IsCancellationRequested)
+                        { AppLogger.Error("Registry.ReadRemoteLibraryOperations", error); }
                         await registry.SharedStorage.RunBackgroundAsync(async token =>
                         {
                             await Task.WhenAll(registry.SharedStorage.WarmReadIndexAsync(token), registry.RefreshServerIndexAsync(false, token, async (id, entries) =>

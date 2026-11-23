@@ -65,9 +65,16 @@ public sealed class MetadataService
         AppEntry entry,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        bool replayUnknownResult = true)
+        bool replayUnknownResult = true,
+        string? nonce = null)
     {
         entry.Normalize();
+        if (nonce != null)
+        {
+            var encoded = EncodeJson(SerializeMetadata(CreateMetadata(entry), CompactJsonOptions));
+            var sent = await discord.WriteEncodedDocumentAsync(channelId, encoded, null, cancellationToken, nonce: nonce);
+            return entry.MetadataMessageId = sent.Id;
+        }
         var payload = await CreateWritePayloadAsync(entry, cancellationToken);
         try
         {

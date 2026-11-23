@@ -2040,10 +2040,7 @@ public sealed partial class AppController : IAsyncDisposable
             return;
         }
 
-        var registry = Registry();
-        await using var serialBatch = registry.BeginSerialBatch();
-        var all = CurrentLocalEntries();
-        var entry = all.FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
+        var entry = CurrentLocalEntries().FirstOrDefault(a => a.MetadataMessageId == metadataMessageId);
         if (entry == null)
         {
             await ErrorAsync("Item não encontrado.");
@@ -2056,31 +2053,14 @@ public sealed partial class AppController : IAsyncDisposable
             return;
         }
 
-        if (IsFolderEntry(entry))
-        {
-            var oldFolderPath = PathRules.ChildPath(entry);
-            var parentPath = PathRules.Normalize(entry.Path);
-            var newFolderPath = PathRules.Normalize(parentPath == "/" ? "/" + clean : parentPath + "/" + clean);
-            entry.Name = clean;
-            entry.ModifiedAt = TransferState.Now();
-            await registry.UpdateEntryAsync(entry);
-            foreach (var child in all.Where(child => !ReferenceEquals(child, entry) && IsInsideFolder(child, oldFolderPath)))
-            {
-                child.Path = MovedChildPath(oldFolderPath, newFolderPath, PathRules.Normalize(child.Path));
-            }
-        }
-        else
-        {
-            entry = await registry.LoadFileDetailsAsync(entry, forceRefresh: true);
-            ReplaceLocalEntry(all, entry);
-            entry.Name = clean;
-            entry.ModifiedAt = TransferState.Now();
-            await registry.UpdateEntryAsync(entry);
-        }
-
-        await serialBatch.DisposeAsync();
-        await PublishLocalRegistryAsync(registry, all);
-        await _bridge.CallAsync("_onStatus", "OK Item renomeado.", false);
+        var session = LibraryMutations();
+        var source = session.Pending.SelectMany(job => job.Changes)
+            .LastOrDefault(change => EntryCacheKey(change.Source) == EntryCacheKey(entry))?.Destination ?? entry;
+        var destination = source.AtLocation(source.ParentFolderId ?? AppRegistry.RootFolderId, source.Path);
+        destination.Name = clean;
+        destination.ModifiedAt = TransferState.Now();
+        await EnqueueLibraryMutationAsync(session, new LibraryMutation(LibraryMutationKind.Rename,
+            [new(source, destination)], destination.ModifiedAt));
     }
 
     private async Task StartUploadDialogAsync()

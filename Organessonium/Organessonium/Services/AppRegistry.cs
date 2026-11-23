@@ -1046,7 +1046,8 @@ public sealed partial class AppRegistry
         AppEntry entry,
         CancellationToken cancellationToken = default,
         Func<TimeSpan, Task>? onRateLimitWait = null,
-        FileMetadata? expectedPayload = null)
+        FileMetadata? expectedPayload = null,
+        string? pendingOperation = null)
     {
         await using var priority = SharedStorage.PrioritizeMutations();
         if (entry.Type == "file" && entry.LogicalChunkCount == 0)
@@ -1055,7 +1056,7 @@ public sealed partial class AppRegistry
             CopyFilePayload(details, entry);
         }
         entry.Normalize();
-        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken);
+        await using var mutation = await SharedStorage.AcquireMetadataMutationAsync(entry, cancellationToken, pendingOperation);
         if (entry.Type == "file" && (entry.Storage?.Shared == true || expectedPayload?.Storage?.Shared == true))
         {
             var basis = expectedPayload == null ? entry : _metadata.ToAppEntry(new MetadataEnvelope(entry.MetadataMessageId, expectedPayload))!;
@@ -1097,9 +1098,10 @@ public sealed partial class AppRegistry
             await ArchiveFolderThreadAsync(parent.ThreadId, cancellationToken);
         }
 
-        if (entry.Type == "file")
+        if (entry.Type == "file" && expectedPayload != null)
             await SharedStorage.PublishFileReferenceAsync(entry, parent.ThreadId, cancellationToken);
         await RebuildFavoritesSerialAsync(cancellationToken);
+        mutation?.MarkApplied();
     }
 
     public async Task MoveEntryAsync(
@@ -1169,8 +1171,6 @@ public sealed partial class AppRegistry
             await ArchiveFolderThreadAsync(destination.ThreadId, cancellationToken);
         }
 
-        if (entry.Type == "file")
-            await SharedStorage.PublishFileReferenceAsync(entry, destination.ThreadId, cancellationToken);
         if (synchronizeSerials && entry.Type == "folder")
         {
             var children = _store.LoadCachedEntriesForFolder(entry.FolderId);

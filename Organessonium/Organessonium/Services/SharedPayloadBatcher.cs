@@ -179,17 +179,7 @@ internal sealed partial class SharedPayloadBatcher(SharedStorageManager storage,
                 batch.Select(work => work.Context.ChunkIndex).ToArray(), batch.Select(work => work.Part).ToArray());
             var references = mapped.Select(chunk => new ChunkReference
             { Index = chunk.Index, MessageId = chunk.MessageId, AttachmentId = chunk.AttachmentId }).ToArray();
-            // Remote receipt precedes local checkpoints; it survives a partial multi-file checkpoint write.
-            await storage.WriteRecordAsync(new
-            {
-                schemaVersion = 1,
-                entryType = "storageBatchReceipt",
-                batchId = plan.BatchId,
-                threadId,
-                messageId = message.Id,
-                attachments = mapped.Select((chunk, index) => new
-                { filename = batch[index].Part.FileName, attachmentId = chunk.AttachmentId, sizeBytes = chunk.SizeBytes }).ToArray()
-            }, null, CancellationToken.None);
+            // Recovery matches the durable plan against the authenticated payload message and attachments.
             var failures = new Exception?[batch.Count];
             for (var index = 0; index < batch.Count; index++)
             {

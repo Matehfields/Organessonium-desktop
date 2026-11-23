@@ -328,8 +328,10 @@ internal sealed partial class SharedStorageManager
     internal async Task PublishFileReferenceAsync(AppEntry entry, string metadataThread, CancellationToken token)
     {
         if (entry.Type != "file") return;
-        await PublishReferenceAsync("file:" + entry.FileId, entry.FileId,
-            Payloads(MetadataService.CreateFileMetadata(entry)), metadataThread, entry.MetadataMessageId, token);
+        var payloads = Payloads(MetadataService.CreateFileMetadata(entry));
+        if (!payloads.Any(payload => payload.Storage?.Shared == true)) return;
+        await PublishReferenceAsync("file:" + entry.FileId, entry.FileId, payloads,
+            metadataThread, entry.MetadataMessageId, token);
     }
 
     internal async Task PublishReferenceAsync(string scope, string fileId, List<StoragePayloadVersion> payloads,
@@ -359,6 +361,7 @@ internal sealed partial class SharedStorageManager
             {
                 cleanups = _cleanups.Keys.Count(id => !_appliedCleanups.Contains(id)),
                 mutations = _mutations.Values.Count(mutation => mutation.Pending),
+                reservations = _catalog.Values.Sum(row => row.Members.Sum(member => member.PendingVersions.Count)),
                 creations = PendingCreations().Count
             });
         }

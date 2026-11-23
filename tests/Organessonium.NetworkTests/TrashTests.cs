@@ -355,7 +355,8 @@ internal static partial class Program
 
         private DiscordMessageDto Add(string channel, string content)
         {
-            var message = new DiscordMessageDto { Id = (++_nextId).ToString(), Content = content };
+            var message = new DiscordMessageDto { Id = (++_nextId).ToString(), Content = content,
+                Author = new DiscordUserDto { Id = "trash-fixture-bot", Bot = true } };
             _channels[channel][message.Id] = message; return message;
         }
         public FolderIndexMapping AddFavoritesIndex(string serialMessageId)
@@ -374,6 +375,7 @@ internal static partial class Program
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/users/@me", StringComparison.Ordinal)) return Json(new { id = "trash-fixture-bot", bot = true });
             if (path.StartsWith("/attachments/", StringComparison.Ordinal))
                 return new(HttpStatusCode.OK) { Content = new ByteArrayContent(Serials[path.Split('/')[^1]]) };
             var parts = path[(path.IndexOf("/channels/", StringComparison.Ordinal) + 10)..].Split('/');
@@ -421,7 +423,9 @@ internal static partial class Program
             if (bytes != null)
             {
                 Serials[result.Id] = bytes;
-                result.Attachments = [new DiscordAttachmentDto { Id = result.Id, FileName = "folder.bin", Size = bytes.Length, Url = "https://trash.fixture/attachments/" + result.Id }];
+                result.Attachments = [new DiscordAttachmentDto { Id = result.Id,
+                    FileName = content.StartsWith("library-operation-v1:", StringComparison.Ordinal) || content == "metadata" ? "metadata.json" : "folder.bin",
+                    Size = bytes.Length, Url = "https://trash.fixture/attachments/" + result.Id }];
             }
             _channels[channel][result.Id] = result;
             return Json(result);

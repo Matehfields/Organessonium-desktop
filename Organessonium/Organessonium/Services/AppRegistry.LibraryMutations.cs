@@ -36,7 +36,7 @@ public sealed partial class AppRegistry
         if (moves.Any(move => move.Source.Storage?.Shared == true || move.Source.Versions.Any(version => version.Payload.Storage?.Shared == true)))
             channels = channels.Append((await GetStorageJournalIndexAsync(token)).ThreadId);
         await using var writes = await SharedStorage.HoldWritesAsync(channels, token);
-        var claims = new Stack<IAsyncDisposable>();
+        var claims = new Stack<SharedStorageManager.MetadataMutationLease>();
         var affectedFolders = moves.SelectMany(move => new[] { NormalizeFolderId(move.Source.ParentFolderId), NormalizeFolderId(move.Destination.ParentFolderId) })
             .Concat(moves.Where(move => move.Destination.Type == "folder").Select(move => move.Destination.FolderId))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -45,17 +45,10 @@ public sealed partial class AppRegistry
             var recovery = new Dictionary<string, List<AppEntry>>(StringComparer.OrdinalIgnoreCase);
             foreach (var move in moves)
             {
-                if (await SharedStorage.AcquireMetadataMutationAsync(move.Source, token) is { } claim)
-                {
-                    claims.Push(claim);
-                    var live = await FindLibrarySourceAsync(move.Source, token);
-                    if (live == null ? move.Destination.MetadataMessageId.Length == 0 :
-                        live.Value.Entry.ModifiedAt != move.Source.ModifiedAt || live.Value.Entry.VersionId != move.Source.VersionId)
-                        throw new InvalidOperationException("O item foi alterado no servidor durante a movimentação.");
-                }
-                if (move.Destination.MetadataMessageId.Length > 0) continue;
+                var claim = await SharedStorage.AcquireMetadataMutationAsync(move.Source, token, LibraryOperationClaim(job, move.Source));
+                if (claim != null) claims.Push(claim);
                 var destination = targets[move.Destination.ParentFolderId!];
-                if (retry)
+                if (retry && move.Destination.MetadataMessageId.Length == 0)
                 {
                     if (!recovery.TryGetValue(destination.FolderId, out var entries))
                         recovery[destination.FolderId] = entries = await ReadLibraryDestinationAsync(destination, move.Destination.Path, token);
@@ -65,8 +58,16 @@ public sealed partial class AppRegistry
                         entry.ModifiedAt == move.Destination.ModifiedAt);
                     if (published != null) move.Destination.MetadataMessageId = published.MetadataMessageId;
                 }
+                if (claim != null || job.RemoteMessageId.Length > 0)
+                {
+                    var live = await FindLibrarySourceAsync(move.Source, token);
+                    if (live == null ? move.Destination.MetadataMessageId.Length == 0 :
+                        live.Value.Entry.ModifiedAt != move.Source.ModifiedAt || live.Value.Entry.VersionId != move.Source.VersionId)
+                        throw new InvalidOperationException("O item foi alterado no servidor durante a movimentação.");
+                }
                 if (move.Destination.MetadataMessageId.Length == 0)
-                    await SendFolderEntryAsync(destination, move.Destination, token);
+                    await SendFolderEntryAsync(destination, move.Destination, token, nonce: job.RemoteMessageId.Length == 0 ? null :
+                        LibraryOperationNonce(job.OperationId, move.Source.MetadataMessageId));
             }
             checkpoint();
 
@@ -80,9 +81,6 @@ public sealed partial class AppRegistry
             // Both indices point to readable metadata before the previous messages are removed.
             foreach (var move in moves)
             {
-                var destination = targets[move.Destination.ParentFolderId!];
-                if (move.Destination.Type == "file")
-                    await SharedStorage.PublishFileReferenceAsync(move.Destination, destination.ThreadId, token);
                 try { await _metadata.DeleteEntryAsync(_discord, move.SourceChannelId, move.Source, token); }
                 catch (DiscordApiException error) when ((int)error.StatusCode == 404) { }
             }
@@ -97,17 +95,24 @@ public sealed partial class AppRegistry
                 if (move.Destination.Favorite && job.Kind != LibraryMutationKind.Trash) additional.Add(move.Destination);
             }
             await RebuildFavoritesSerialAsync(additional, token);
+            foreach (var claim in claims) claim.MarkApplied();
             return moves.Select(move => move.Destination).ToList();
         }
         finally
         {
             foreach (var folder in affectedFolders) _publishingLibraryFolders.TryRemove(folder, out _);
             Interlocked.Increment(ref _libraryPublicationRevision);
+            Exception? releaseFailure = null;
             while (claims.TryPop(out var claim))
             {
                 try { await claim.DisposeAsync(); }
-                catch (Exception error) { AppLogger.Error("Registry.ReleaseLibraryMutation", error); }
+                catch (Exception error)
+                {
+                    AppLogger.Error("Registry.ReleaseLibraryMutation", error);
+                    if (job.RemoteMessageId.Length > 0) releaseFailure ??= error;
+                }
             }
+            if (releaseFailure != null) throw releaseFailure;
         }
     }
 

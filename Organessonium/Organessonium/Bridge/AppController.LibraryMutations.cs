@@ -40,6 +40,25 @@ public sealed partial class AppController
         StartLibraryMutationWorker(session);
     }
 
+    private async Task ReadRemoteLibraryMutationsAsync(AppRegistry registry, CancellationToken token)
+    {
+        var remote = await registry.LoadLibraryOperationSerialsAsync(token);
+        if (remote.Count == 0) return;
+        await _owner.Dispatcher.InvokeAsync(async () =>
+        {
+            if (_registry != registry || _loggingOut || token.IsCancellationRequested) return;
+            var session = LibraryMutations();
+            var known = session.Pending.Select(job => job.OperationId).ToHashSet(StringComparer.Ordinal);
+            var incoming = remote.Where(job => known.Add(job.OperationId)).ToList();
+            if (incoming.Count == 0) return;
+            session.Pending.AddRange(incoming);
+            try { SaveLibraryMutations(session); }
+            catch { foreach (var job in incoming) session.Pending.Remove(job); throw; }
+            await PublishPendingLibraryChangesAsync(session);
+            StartLibraryMutationWorker(session);
+        }).Task.Unwrap();
+    }
+
     private Task DeleteItemsAsync(string idsJson, bool permanently) =>
         QueueLibraryMutationAsync(permanently ? LibraryMutationKind.Delete : LibraryMutationKind.Trash, idsJson);
 
@@ -188,6 +207,7 @@ public sealed partial class AppController
                 var registry = session.Registry;
                 var completed = new List<AppEntry>();
                 Exception? rejected = null;
+                var changingRemoteMarker = false;
                 try
                 {
                     using var network = NetworkRetryPolicy.TransferScope(token);
@@ -227,22 +247,38 @@ public sealed partial class AppController
                             throw new InvalidOperationException($"{failed} item(ns) não puderam ser apagados.");
                         }
                     }
-                    else
+                    else if (await registry.EnsureLibraryOperationSerialAsync(job, () => SaveLibraryMutations(session), token))
                     {
-                        completed = await registry.ApplyLibraryRelocationsAsync(job, () => SaveLibraryMutations(session), token);
+                        completed = job.Kind == LibraryMutationKind.Rename
+                            ? await registry.ApplyLibraryRenameAsync(job, token)
+                            : await registry.ApplyLibraryRelocationsAsync(job, () => SaveLibraryMutations(session), token);
                         await PublishRelocatedEntriesAsync(job, completed);
+                        changingRemoteMarker = true;
+                        await registry.CompleteLibraryOperationSerialAsync(job, token);
                     }
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
                 catch (Exception error)
                 {
                     AppLogger.Error("Registry.LibraryMutation", error);
-                    if (job.SerialPublished || job.FolderCreation is { ThreadId: not null } or { Published: not null } ||
+                    if (changingRemoteMarker || job.SerialPublished || job.FolderCreation is { ThreadId: not null } or { Published: not null } ||
+                        (job.RemoteMessageId.Length > 0 && error is SharedStorageManager.MetadataMutationConflictException) ||
                         job.Relocations?.Any(move => move.Destination.MetadataMessageId.Length > 0) == true ||
                         NetworkRetryPolicy.IsTransient(error) || error is DiscordApiException api && NetworkRetryPolicy.IsTransientStatus(api.StatusCode))
                     {
                         await NetworkRetryPolicy.DelayAsync(++retry, token);
                         continue;
+                    }
+                    if (job.RemoteMessageId.Length > 0)
+                    {
+                        try { await registry.CompleteLibraryOperationSerialAsync(job, token, rejected: true); }
+                        catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+                        catch (Exception completionError)
+                        {
+                            AppLogger.Error("Registry.CompleteLibraryOperation", completionError);
+                            await NetworkRetryPolicy.DelayAsync(++retry, token);
+                            continue;
+                        }
                     }
                     rejected = error;
                 }

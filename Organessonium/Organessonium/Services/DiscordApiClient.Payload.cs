@@ -158,17 +158,38 @@ public sealed partial class DiscordApiClient
         finally { state.Gate.Release(); }
     }
 
-    internal async Task<DiscordMessageDto> WriteEncodedDocumentAsync(string channelId, string encoded,
-        string? messageId, CancellationToken token, bool serializeRoute = true)
+    private string? _authenticatedUserId;
+
+    internal async Task<string> GetAuthenticatedUserIdAsync(CancellationToken token)
     {
-        if (encoded.Length <= DiscordLimits.MessageContentCharacters)
-            return string.IsNullOrEmpty(messageId) ? await CreateMessageAsync(channelId, encoded, token, serializeRoute: serializeRoute) :
+        if (_authenticatedUserId is { } id) return id;
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, "users/@me"), token);
+        var user = await ReadJsonAsync<DiscordUserDto>(response, token);
+        if (!user.Bot || string.IsNullOrEmpty(user.Id)) throw new InvalidDataException("Identidade do bot indisponível.");
+        return _authenticatedUserId = user.Id;
+    }
+
+    internal async Task<DiscordMessageDto> WriteEncodedDocumentAsync(string channelId, string encoded,
+        string? messageId, CancellationToken token, bool serializeRoute = true, string? marker = null, string? nonce = null)
+    {
+        if (marker == null && encoded.Length <= DiscordLimits.MessageContentCharacters)
+            return string.IsNullOrEmpty(messageId) ? await CreateMessageAsync(channelId, encoded, token, serializeRoute: serializeRoute, nonce: nonce) :
                 await UpdateMessageAsync(channelId, messageId, encoded, token, clearAttachments: true);
         var bytes = Encoding.UTF8.GetBytes(encoded);
         if (bytes.Length > DiscordLimits.AttachmentBytes) throw new InvalidDataException("O documento excede o limite de metadata.");
         using var response = await SendAsync(() =>
         {
-            var payload = JsonSerializer.Serialize(new { content = "metadata", attachments = new[] { new { id = 0, filename = "metadata.json" } } }, JsonOptions.Web);
+            var fields = new Dictionary<string, object>
+            {
+                ["content"] = marker ?? "metadata",
+                ["attachments"] = new[] { new { id = 0, filename = "metadata.json" } }
+            };
+            if (nonce != null)
+            {
+                fields["nonce"] = nonce;
+                fields["enforce_nonce"] = true;
+            }
+            var payload = JsonSerializer.Serialize(fields, JsonOptions.Web);
             var multipart = new MultipartFormDataContent();
             multipart.Add(new StringContent(payload, Encoding.UTF8, "application/json"), "payload_json");
             multipart.Add(new StreamContent(new MemoryStream(bytes, writable: false)), "files[0]", "metadata.json");

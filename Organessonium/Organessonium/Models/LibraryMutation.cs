@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace Organessonium.Models;
 
-internal enum LibraryMutationKind { Move, Trash, Restore, Delete, CreateFolder }
+internal enum LibraryMutationKind { Move, Trash, Restore, Delete, CreateFolder, Rename }
 
 internal sealed record LibraryChange(
     [property: JsonPropertyName("source")] AppEntry Source,
@@ -22,6 +22,9 @@ internal sealed record FolderCreationCheckpoint(string PostTitle)
 
 internal sealed record LibraryMutation(LibraryMutationKind Kind, List<LibraryChange> Changes, string Timestamp)
 {
+    public string OperationId { get; init; } = Guid.NewGuid().ToString("N");
+    public bool RemoteAttempted { get; set; }
+    public string RemoteMessageId { get; set; } = "";
     public FolderCreationCheckpoint? FolderCreation { get; init; }
     public bool ReadWholeTrash { get; set; }
     public List<LibraryRelocation>? Relocations { get; set; }

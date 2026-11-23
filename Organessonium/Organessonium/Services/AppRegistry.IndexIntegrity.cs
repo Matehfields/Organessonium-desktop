@@ -135,10 +135,11 @@ public sealed partial class AppRegistry
     }
 
     private async Task<string> SendFolderEntryAsync(FolderIndexMapping mapping, AppEntry entry,
-        CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, bool replayUnknownResult = true)
+        CancellationToken token, Func<TimeSpan, Task>? onRateLimitWait = null, bool replayUnknownResult = true,
+        string? nonce = null)
     {
         await VerifyFolderDestinationAsync(mapping, entry.ParentFolderId, token);
-        return await _metadata.SendEntryAsync(_discord, mapping.ThreadId, entry, token, onRateLimitWait, replayUnknownResult);
+        return await _metadata.SendEntryAsync(_discord, mapping.ThreadId, entry, token, onRateLimitWait, replayUnknownResult, nonce);
     }
 
     private async Task<string> UpsertFolderEntryAsync(FolderIndexMapping mapping, AppEntry entry,

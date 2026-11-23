@@ -131,7 +131,6 @@ public sealed class FolderIndexAudit(DiscordApiClient discord, MetadataService m
     private static void TrackPending(JsonElement record, string kind, HashSet<string> pending)
     {
         var operation = Field(record, "operationId");
-        var batch = Field(record, "batchId");
         switch (kind)
         {
             case "storageCleanup" when operation.Length > 0: pending.Add("cleanup:" + operation); break;
@@ -140,8 +139,6 @@ public sealed class FolderIndexAudit(DiscordApiClient discord, MetadataService m
                 if (Field(record, "state") == "pending") pending.Add("mutation:" + operation);
                 else if (Field(record, "state") == "completed") pending.Remove("mutation:" + operation);
                 break;
-            case "storageBatchPlan" when batch.Length > 0: pending.Add("batch:" + batch); break;
-            case "storageBatchReceipt": pending.Remove("batch:" + batch); break;
         }
     }
 
