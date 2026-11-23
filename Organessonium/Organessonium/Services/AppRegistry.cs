@@ -1423,20 +1423,28 @@ public sealed partial class AppRegistry
             if (revision != Volatile.Read(ref _libraryPublicationRevision) || _publishingLibraryFolders.ContainsKey(folderId))
                 return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
             if (entries.Count == 0 && mapping.SerialMessageId.Length > 0 &&
-                await _serials.LoadFolderAsync(mapping, cancellationToken) is { Children.Count: > 0 } previous)
+                await _serials.LoadFolderAsync(mapping, cancellationToken) is { Children.Count: > 0 })
             {
-                // The last verified serial can still be the only locator for intact payloads.
-                var moved = await VerifyMovedSerialFilesAsync(mapping, previous, cancellationToken);
-                Diagnostics.DevelopmentDiagnostics.Current?.Record("index.empty_with_serial", "maintenance",
-                    new { files = previous.Children.Count, moved });
+                // Another device may have completed a deletion and published an empty serial.
+                await RefreshMappingsAsync(cancellationToken);
+                if (!_mappings.TryGetValue(folderId, out var refreshed) || refreshed.ThreadId != mapping.ThreadId)
+                    return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+                mapping = refreshed;
+                if (await _serials.LoadFolderAsync(mapping, cancellationToken) is { Children.Count: > 0 } previous)
+                {
+                    // An unexplained empty index cannot replace the last known locator for intact payloads.
+                    var moved = await VerifyMovedSerialFilesAsync(mapping, previous, cancellationToken);
+                    Diagnostics.DevelopmentDiagnostics.Current?.Record("index.empty_with_serial", "maintenance",
+                        new { files = previous.Children.Count, moved });
+                    if (!moved)
+                    {
+                        _reconciledFolderMappings.TryRemove(folderId, out _);
+                        return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
+                    }
+                }
                 if (revision != Volatile.Read(ref _libraryPublicationRevision) || !_mappings.TryGetValue(folderId, out var current) ||
                     current != mapping || _publishingLibraryFolders.ContainsKey(folderId))
                     return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
-                if (!moved)
-                {
-                    _reconciledFolderMappings.TryRemove(folderId, out _);
-                    return await LoadCachedFolderAsync(folderId, folderPath, cancellationToken);
-                }
             }
             _store.CacheFolderEntries(folderId, entries);
             if (readOnly)
