@@ -20,7 +20,7 @@
     min-height: 0;
     overflow: hidden;
     background: #08090b;
-    border: 1px solid rgb(255 255 255 / .08);
+    border: 0;
     border-radius: 14px;
     color: #f6f6f8;
     isolation: isolate;
@@ -45,7 +45,6 @@
     inset: 0;
     width: 100vw;
     height: 100vh;
-    border: 0;
     border-radius: 0;
     z-index: 1;
 }
@@ -85,6 +84,8 @@
 .vp-button:hover, .vp-time:hover { background: rgb(255 255 255 / .13); }
 .vp-button[aria-pressed="true"], .vp-panel [aria-current="true"] { color: var(--vp-accent); background: rgb(255 255 255 / .09); }
 .vp-time { display: inline-flex; gap: 4px; padding-inline: 6px; color: #dddde2; white-space: nowrap; font-variant-numeric: tabular-nums; font-size: 12px; }
+.vp-frame.preview-video-frame:focus { outline: none; }
+.vp-frame:focus-visible [data-video-play],
 .vp-frame :focus-visible { outline: 2px solid #eeeef1; outline-offset: -2px; }
 .vp-timeline { position: relative; height: 18px; margin: 0 2px 3px; }
 .vp-track { position: absolute; inset: 50% 0 auto; height: 4px; transform: translateY(-50%); background: #3a3b40; border-radius: 6px; }
@@ -184,11 +185,11 @@
 .vp-error p { margin: 8px 0; }
 .vp-error div { display: flex; justify-content: center; gap: 6px; }
 .vp-frame video::cue { font-size: var(--vp-caption-size, 100%); color: var(--vp-caption-color, white); background: var(--vp-caption-bg, #000b); }
-.preview-overlay.video-docked { inset: auto 16px 16px auto; width: min(420px, calc(100vw - 32px)); height: min(288px, 49vh); border: 1px solid #3a3a42; border-radius: 12px; box-shadow: 0 7px 23px #0008; overflow: hidden; }
+.preview-overlay.video-docked { inset: auto 16px 16px auto; width: min(420px, calc(100vw - 32px)); height: min(288px, 49vh); border-radius: 12px; box-shadow: 0 7px 23px #0008; overflow: hidden; }
 .video-docked .preview-topbar { padding: 0 4px; height: 32px; }
 .video-docked .preview-nav-btn, .video-docked .preview-topbar-actions { display: none; }
 .video-docked .preview-media-player-shell.video { padding: 0; }
-.video-docked .vp-frame.preview-video-frame { border: 0; border-radius: 0; }
+.video-docked .vp-frame.preview-video-frame { border-radius: 0; }
 .vp-mini [data-action="back"], .vp-mini [data-action="forward"], .vp-mini [data-action="restart"],
 .vp-mini [data-action="pip"], .vp-mini [data-action="fullscreen"], .vp-mini .vp-volume { display: none; }
 @media (max-width: 700px) {

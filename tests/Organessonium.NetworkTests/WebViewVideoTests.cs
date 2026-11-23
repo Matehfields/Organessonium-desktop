@@ -83,7 +83,8 @@ internal static partial class Program
             const string normalLayout = "(()=>{const body=document.getElementById('preview-body');" +
                 "const frame=body.querySelector('.vp-frame').getBoundingClientRect();" +
                 "const play=body.querySelector('[data-video-play]').getBoundingClientRect();" +
-                "return frame.width>=body.clientWidth*.75 && frame.height>150 && play.left>=frame.left && play.right<=frame.right;})()";
+                "return frame.width>=body.clientWidth*.75 && frame.height>150 && play.left>=frame.left && play.right<=frame.right && " +
+                "getComputedStyle(body.querySelector('.vp-frame')).borderTopWidth==='0px';})()";
             await CheckAsync(normalLayout, "a coluna do player recolheu na janela normal");
             controller.Bounds = new System.Drawing.Rectangle(0, 0, 600, 480);
             await CheckAsync("innerWidth<=600 && " + normalLayout, "o player perdeu a largura ao reduzir a janela");
