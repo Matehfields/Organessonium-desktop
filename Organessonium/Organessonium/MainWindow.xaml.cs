@@ -940,11 +940,10 @@ public partial class MainWindow : Window
         return ExtractEmbeddedWebRoot();
     }
 
-    private static DirectoryInfo ExtractEmbeddedWebRoot()
+    internal static DirectoryInfo ExtractEmbeddedWebRoot(string? target = null)
     {
         var assembly = Assembly.GetExecutingAssembly();
         var resources = assembly.GetManifestResourceNames()
-            .Select(name => name.Replace('\\', '/'))
             .Where(name => name.StartsWith("web/", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (resources.Count == 0)
@@ -952,7 +951,7 @@ public partial class MainWindow : Window
             throw new DirectoryNotFoundException("Arquivos web embutidos não encontrados.");
         }
 
-        var target = Path.Combine(
+        target ??= Path.Combine(
             Path.GetTempPath(),
             "Organessonium",
             "web-" + assembly.ManifestModule.ModuleVersionId.ToString("N"));
@@ -975,7 +974,7 @@ public partial class MainWindow : Window
 
         foreach (var resource in resources)
         {
-            var relative = resource["web/".Length..];
+            var relative = resource["web/".Length..].Replace('\\', '/');
             if (string.IsNullOrWhiteSpace(relative))
             {
                 continue;

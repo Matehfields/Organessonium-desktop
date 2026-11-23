@@ -19,16 +19,7 @@ internal static partial class Program
         CoreWebView2Controller? controller = null;
         try
         {
-            var assets = root.CreateSubdirectory("web");
-            var assembly = typeof(PreviewResourceRegistry).Assembly;
-            foreach (var name in assembly.GetManifestResourceNames().Where(name => name.StartsWith("web/", StringComparison.Ordinal)))
-            {
-                var target = Path.Combine(assets.FullName, name[4..].Replace('/', Path.DirectorySeparatorChar));
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                await using var input = assembly.GetManifestResourceStream(name)!;
-                await using var output = File.Create(target);
-                await input.CopyToAsync(output);
-            }
+            var assets = MainWindow.ExtractEmbeddedWebRoot(Path.Combine(root.FullName, "web"));
             using var resources = new PreviewResourceRegistry();
             var environment = await CoreWebView2Environment.CreateAsync(null, root.CreateSubdirectory("profile").FullName,
                 new CoreWebView2EnvironmentOptions("--autoplay-policy=no-user-gesture-required"));
@@ -86,8 +77,9 @@ internal static partial class Program
             };
             await core.ExecuteScriptAsync("window.__organessoniumSettings={theme:'dark'};onBridgeReady();previewAppRef={threadId:'fixture',name:'Teste.mp4'};" +
                 "previewOverlay.classList.remove('hidden');_onPreviewReady('video','Teste.mp4'," + JsonSerializer.Serialize(data) + ")");
-            await CheckAsync("!!customElements.get('media-play-button') && document.querySelector('video')?.readyState>=2",
-                "Video.js ou o H.264 do WebView2 não ficou pronto");
+            await core.ExecuteScriptAsync("document.fonts.load('20px \"Material Symbols Rounded\"').then(fonts=>window._playerIcons=fonts.length>0);");
+            await CheckAsync("window._playerIcons===true && !!customElements.get('media-play-button') && document.querySelector('video')?.readyState>=2",
+                "a fonte de ícones, o Video.js ou o H.264 do WebView2 não ficou pronto");
             const string normalLayout = "(()=>{const body=document.getElementById('preview-body');" +
                 "const frame=body.querySelector('.vp-frame').getBoundingClientRect();" +
                 "const play=body.querySelector('[data-video-play]').getBoundingClientRect();" +
