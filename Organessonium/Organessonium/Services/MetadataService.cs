@@ -463,6 +463,7 @@ public sealed class MetadataService
         }
 
         entry.MetadataMessageId = envelope.MessageId;
+        entry.LibraryOperationId = envelope.Entry.LibraryOperationId;
         entry.ModifiedAt = envelope.Entry.ModifiedAt ?? entry.UploadedAt;
         entry.Trash = envelope.Entry.Trash;
         entry.Sync = envelope.Entry.Sync;
@@ -476,6 +477,7 @@ public sealed class MetadataService
         return new FileMetadata
         {
             SchemaVersion = SchemaVersion,
+            LibraryOperationId = entry.LibraryOperationId,
             Storage = entry.Storage,
             FileId = string.IsNullOrWhiteSpace(entry.FileId) ? Guid.NewGuid().ToString("N") : entry.FileId,
             ThreadId = entry.ThreadId,
@@ -577,6 +579,7 @@ public sealed class MetadataService
         return new FolderMetadata
         {
             SchemaVersion = SchemaVersion,
+            LibraryOperationId = entry.LibraryOperationId,
             FolderId = string.IsNullOrWhiteSpace(entry.FolderId) ? Guid.NewGuid().ToString("N") : entry.FolderId,
             // The authoritative folderId -> threadId relationship lives in names.
             ThreadId = null,

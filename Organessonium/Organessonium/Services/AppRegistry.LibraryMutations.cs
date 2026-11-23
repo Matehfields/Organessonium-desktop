@@ -55,19 +55,24 @@ public sealed partial class AppRegistry
                     var published = entries.FirstOrDefault(entry => SameEntryIdentity(entry, move.Destination) &&
                         entry.VersionId == move.Destination.VersionId && entry.Encryption?.Salt == move.Destination.Encryption?.Salt &&
                         entry.Name == move.Destination.Name && entry.Trash?.DeletedAt == move.Destination.Trash?.DeletedAt &&
-                        entry.ModifiedAt == move.Destination.ModifiedAt);
+                        (job.RemoteMessageId.Length > 0 ? entry.LibraryOperationId == job.OperationId :
+                            SameLibraryTimestamp(entry.ModifiedAt, move.Destination.ModifiedAt)));
                     if (published != null) move.Destination.MetadataMessageId = published.MetadataMessageId;
                 }
                 if (claim != null || job.RemoteMessageId.Length > 0)
                 {
                     var live = await FindLibrarySourceAsync(move.Source, token);
                     if (live == null ? move.Destination.MetadataMessageId.Length == 0 :
-                        live.Value.Entry.ModifiedAt != move.Source.ModifiedAt || live.Value.Entry.VersionId != move.Source.VersionId)
+                        !SameLibraryTimestamp(live.Value.Entry.ModifiedAt, move.Source.ModifiedAt) ||
+                        live.Value.Entry.VersionId != move.Source.VersionId)
                         throw new InvalidOperationException("O item foi alterado no servidor durante a movimentação.");
                 }
                 if (move.Destination.MetadataMessageId.Length == 0)
+                {
+                    if (job.RemoteMessageId.Length > 0) move.Destination.LibraryOperationId = job.OperationId;
                     await SendFolderEntryAsync(destination, move.Destination, token, nonce: job.RemoteMessageId.Length == 0 ? null :
                         LibraryOperationNonce(job.OperationId, move.Source.MetadataMessageId));
+                }
             }
             checkpoint();
 

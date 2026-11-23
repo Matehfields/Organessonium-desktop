@@ -22,6 +22,10 @@ public sealed partial class AppRegistry
     internal static string? LibraryOperationClaim(LibraryMutation job, AppEntry entry) =>
         job.RemoteMessageId.Length == 0 ? null : "library-" + LibraryOperationNonce(job.OperationId, entry.MetadataMessageId);
 
+    private static bool SameLibraryTimestamp(string left, string right) =>
+        left == right || (DateTimeOffset.TryParse(left, out var first) && DateTimeOffset.TryParse(right, out var second) &&
+            first.ToUnixTimeSeconds() == second.ToUnixTimeSeconds());
+
     internal async Task<List<LibraryMutation>> LoadLibraryOperationSerialsAsync(CancellationToken token)
     {
         if (string.IsNullOrEmpty(_settings.SerialChannelId)) return [];
@@ -123,14 +127,15 @@ public sealed partial class AppRegistry
         var change = job.Changes.Single();
         var (live, _) = await ReadTrashEntryAsync(change.Source, token);
         var name = change.Destination!.Name;
-        if (live.Name != name || live.ModifiedAt != job.Timestamp)
+        if (live.Name != name || live.LibraryOperationId != job.OperationId)
         {
             if (live.Name != change.Source.Name ||
-                (change.Source.ModifiedAt.Length > 0 && live.ModifiedAt != change.Source.ModifiedAt))
+                (change.Source.ModifiedAt.Length > 0 && !SameLibraryTimestamp(live.ModifiedAt, change.Source.ModifiedAt)))
                 throw new InvalidOperationException("O item foi alterado no servidor antes de ser renomeado.");
             live.Name = name;
             live.ModifiedAt = job.Timestamp;
         }
+        live.LibraryOperationId = job.OperationId;
         // Retry the index/thread update even if the metadata PATCH was confirmed before a disconnect.
         await UpdateEntryAsync(live, token, pendingOperation: LibraryOperationClaim(job, live));
         return [live];

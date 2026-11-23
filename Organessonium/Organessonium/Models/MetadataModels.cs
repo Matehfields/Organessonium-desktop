@@ -4,6 +4,10 @@ namespace Organessonium.Models;
 
 public abstract class MetadataEntry
 {
+    [JsonPropertyName("libraryOperationId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LibraryOperationId { get; set; }
+
     [JsonPropertyName("modifiedAt")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ModifiedAt { get; set; }

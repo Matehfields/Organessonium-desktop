@@ -4,6 +4,9 @@ namespace Organessonium.Models;
 
 public sealed class AppEntry
 {
+    [JsonIgnore]
+    internal string? LibraryOperationId { get; set; }
+
     internal AppEntry AtLocation(string folderId, string path)
     {
         var entry = (AppEntry)MemberwiseClone();

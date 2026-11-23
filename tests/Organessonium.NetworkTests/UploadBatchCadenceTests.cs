@@ -41,7 +41,7 @@ internal static partial class Program
         string Ids() => System.Text.Json.JsonSerializer.Serialize(Visible().Where(entry => entry.Type == "file").Select(entry => entry.MetadataMessageId));
         transport.Reset(mappings["destination"].ThreadId);
         await Invoke("QueueLibraryMutationAsync", LibraryMutationKind.Move, Ids(), "/Destino");
-        RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 &&
+        RequireSync(transport.FilesAtFirstSerial == 12 && transport.SerialWrites == 3 && transport.OperationWrites == 1 &&
             Visible().Count(entry => entry.Type == "file" && entry.Path == "/Destino") == 12,
             "mover publicou seriais por item ou perdeu os cards");
         transport.Reset(mappings["destination"].ThreadId);
@@ -146,12 +146,12 @@ internal static partial class Program
         private readonly HttpMessageInvoker _forward = new(inner, false);
         private int _activeJournal;
         internal readonly Stopwatch Clock = new();
-        internal int Requests, JournalParallel, SerialWrites, FilesAtFirstSerial, Files;
+        internal int Requests, JournalParallel, SerialWrites, FilesAtFirstSerial, Files, OperationWrites;
         internal long FirstPayloadMs = -1;
         internal List<int> FilesBeforePoolCreation = [];
         private string _projection = "root-thread";
         internal void Reset(string projection)
-        { _projection = projection; SerialWrites = FilesAtFirstSerial = Files = 0; }
+        { _projection = projection; SerialWrites = FilesAtFirstSerial = Files = OperationWrites = 0; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref Requests);
@@ -173,7 +173,11 @@ internal static partial class Program
                 if (writing && path.Contains($"/channels/{_projection}/messages", StringComparison.Ordinal)) Interlocked.Increment(ref Files);
                 if (writing && path.Contains("/channels/serial/messages", StringComparison.Ordinal))
                 {
-                    if (Interlocked.Increment(ref SerialWrites) == 1) FilesAtFirstSerial = Files;
+                    var operation = request.Content is MultipartFormDataContent document &&
+                        document.Any(part => (part.Headers.ContentDisposition?.FileNameStar ??
+                            part.Headers.ContentDisposition?.FileName?.Trim('"')) == "metadata.json");
+                    if (operation) Interlocked.Increment(ref OperationWrites);
+                    else if (Interlocked.Increment(ref SerialWrites) == 1) FilesAtFirstSerial = Files;
                 }
                 if (writing && request.Content is System.Net.Http.MultipartFormDataContent &&
                     !path.Contains("/channels/serial/", StringComparison.Ordinal) && !path.Contains($"/channels/{journal}/", StringComparison.Ordinal) &&
