@@ -88,7 +88,7 @@ internal static partial class Program
                         using var message = JsonDocument.Parse(e.WebMessageAsJson);
                         var method = message.RootElement.GetProperty("method").GetString();
                         if (method is "refreshServerIndex" or "refreshCurrentFolder" or "setCurrentPath" or "deleteItems" or
-                            "restoreItems" or "restoreTrash" or "moveItems" or "requestFileInformation" or "loadFavorites")
+                            "restoreItems" or "restoreTrash" or "moveItems" or "requestFileInformation" or "loadFavorites" or "searchLibrary")
                             if (controller != null) await controller.HandleJsonMessageAsync(e.WebMessageAsJson);
                     };
                     async Task OpenLibraryAsync(bool reopened = false)
@@ -239,8 +239,9 @@ internal static partial class Program
                     await DeleteVisibleAsync("Fotos", true, false, 6);
                     if (handler.Entry("photos-thread", "file-b") == null || handler.DeletedChannels.Count != 1)
                         throw new InvalidDataException("Mover uma pasta apagou seus filhos.");
-                    await view.CoreWebView2.ExecuteScriptAsync("searchQuery='inside-photos';render()");
-                    await RequireLibraryScriptAsync(view, "document.querySelectorAll('#files-grid .file-card:not(.folder-card)').length===0", "A busca normal exibe filhos da lixeira.");
+                    await view.CoreWebView2.ExecuteScriptAsync("$('search-input').value='inside-photos';$('search-input').dispatchEvent(new Event('input'))");
+                    await WaitForLibraryScriptAsync(view, "!$('library-search-popup').hidden&&$('library-search-status').textContent===t('searchEmpty')");
+                    await view.CoreWebView2.ExecuteScriptAsync("LibrarySearch.clear()");
                     await ClickSidebarAsync("trash", 0, 1);
                     await view.CoreWebView2.ExecuteScriptAsync("document.querySelector('#files-grid .folder-card').dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}));document.getElementById('main-area').dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true}))");
                     await RequireLibraryScriptAsync(view, "document.getElementById('confirm-overlay').classList.contains('hidden')", "Delete na lixeira ofereceu uma exclusão permanente implícita.");

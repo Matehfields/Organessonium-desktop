@@ -67,6 +67,12 @@ internal static partial class Program
                 if (publication && script.Contains("Found during maintenance.bin", StringComparison.Ordinal)) maintenancePublished.TrySetResult();
             });
             controller = new AppController(new System.Windows.Window(), h.Store, bridge, _ => Task.CompletedTask);
+            view.WebMessageReceived += async (_, message) =>
+            {
+                using var command = JsonDocument.Parse(message.WebMessageAsJson);
+                if (command.RootElement.GetProperty("method").GetString() == "searchLibrary")
+                    await controller.HandleJsonMessageAsync(message.WebMessageAsJson);
+            };
             var session = new DiscordSession();
             typeof(DiscordSession).GetProperty("Api")!.SetValue(session, api);
             typeof(DiscordSession).GetProperty("Settings")!.SetValue(session, h.Settings);
@@ -92,6 +98,7 @@ internal static partial class Program
             var browsing = Enumerable.Range(0, 2305).Select(index => new AppEntry { Type = "file", Name = $"photo-{index:D4}.jpg",
                 FileId = "browse-" + index, ThreadId = "browse-thread-" + index, MetadataMessageId = "browse-meta-" + index,
                 ParentFolderId = "browse", Path = "/Browse", SizeBytes = 1024 }).ToArray();
+            h.Store.CacheFolderEntries("browse", browsing);
             var navigated = entries.Concat(browsing).ToList();
             typeof(AppController).GetField("_loadedApps", flags)!.SetValue(controller, navigated);
             typeof(AppController).GetField("_currentPath", flags)!.SetValue(controller, "/Browse");
@@ -129,12 +136,16 @@ internal static partial class Program
             await view.ExecuteScriptAsync("setView('list')");
             RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.file-list-files .file-row').length===200") == "true",
                 "a lista ignorou o limite já carregado");
-            await view.ExecuteScriptAsync("setView('grid');document.getElementById('search-input').value='photo-2304';document.getElementById('search-input').dispatchEvent(new Event('input'))");
-            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===1&&document.querySelector('.cards-grid .file-card').textContent.includes('2304')") == "true",
-                "a busca considerou somente os primeiros cem arquivos");
-            await view.ExecuteScriptAsync("document.getElementById('search-input').value='';document.getElementById('search-input').dispatchEvent(new Event('input'));clearSelection();selectAllCurrentView()");
-            RequireSync(await view.ExecuteScriptAsync("selectedKeys.size===2305&&document.querySelectorAll('.cards-grid .file-card').length===100") == "true",
-                "a seleção de todos perdeu itens ainda não renderizados ou a busca não reiniciou a página");
+            await view.ExecuteScriptAsync("setView('grid');document.getElementById('main-area').scrollTop=0;" +
+                "window.__beforeSearch=document.querySelectorAll('.cards-grid .file-card').length;" +
+                "document.getElementById('search-input').value='photo-2304';document.getElementById('search-input').dispatchEvent(new Event('input'))");
+            const string result = "document.querySelector('#library-search-results [role=option]')?.textContent.includes('photo-2304.jpg')===true";
+            for (var attempt = 0; attempt < 80 && await view.ExecuteScriptAsync(result) != "true"; attempt++) await Task.Delay(50);
+            RequireSync(await view.ExecuteScriptAsync(result) == "true", "a busca considerou somente arquivos já renderizados");
+            await view.ExecuteScriptAsync("LibrarySearch.clear();clearSelection();selectAllCurrentView()");
+            RequireSync(await view.ExecuteScriptAsync("selectedKeys.size===2305") == "true", "a seleção de todos perdeu itens não renderizados");
+            RequireSync(await view.ExecuteScriptAsync("document.querySelectorAll('.cards-grid .file-card').length===window.__beforeSearch") == "true",
+                "a busca alterou a página em exibição");
             await view.ExecuteScriptAsync("clearSelection();navigate('/',false,'root')");
             typeof(AppController).GetField("_currentPath", flags)!.SetValue(controller, "/");
             RequireSync(transport.RootProofReads == 1 && transport.RootArchiveChanges <= 2,
