@@ -114,7 +114,7 @@ jobs:
           ./release/Test-ReleaseArtifacts.ps1 @parameters
 
       - name: Armazenar artefatos para análise
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: organessonium-${{ steps.version.outputs.version }}-build.${{ steps.version.outputs.build }}
           path: artifacts/releases/${{ steps.version.outputs.version }}-build.${{ steps.version.outputs.build }}/**
