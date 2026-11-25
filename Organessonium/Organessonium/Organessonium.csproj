@@ -37,7 +37,7 @@
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
-    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="1.8.260803002" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.7.0" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="1.8.260804001" Condition="'$(WindowsAppSDKSelfContained)' == 'false'" />
   </ItemGroup>
 
