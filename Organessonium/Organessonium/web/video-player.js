@@ -430,15 +430,17 @@
             (panel.querySelector('button:not([data-action="closePanel"])') || panel.querySelector('button'))?.focus({ preventScroll: true });
             reveal();
         }
-        async function fullscreen() {
-            if (document.fullscreenElement === frame) { await document.exitFullscreen(); return; }
-            if (hostFull) { hostFull = false; frame.classList.remove('is-fullscreen'); actions.fullscreen(false); return; }
-            if (reduced) toggleMini();
-            try { await frame.requestFullscreen(); }
-            catch (_) { hostFull = true; frame.classList.add('is-fullscreen'); actions.fullscreen(true); }
+        function setFullscreen(enabled, notifyHost = true) {
+            if (hostFull === enabled) return;
+            if (enabled && reduced) toggleMini();
+            hostFull = enabled;
+            frame.classList.toggle('is-fullscreen', enabled);
+            controls.querySelector('[data-video-fullscreen]').setAttribute('aria-pressed', String(enabled));
+            if (notifyHost) actions.fullscreen(enabled);
+            reveal();
         }
         function toggleMini() {
-            if (document.fullscreenElement === frame || hostFull) return;
+            if (hostFull) return;
             reduced = !reduced;
             frame.classList.toggle('vp-mini', reduced);
             const control = controls.querySelector('[data-action="mini"]');
@@ -670,7 +672,7 @@
             case 'time': preferences.remaining = !preferences.remaining; describeTime(); scheduleSave(); break;
             case 'cc': toggleCaptions(); break;
             case 'mini': toggleMini(); break;
-            case 'fullscreen': await fullscreen(); break;
+            case 'fullscreen': setFullscreen(!hostFull); break;
             case 'pip':
                 if (document.pictureInPictureElement === video) await document.exitPictureInPicture();
                 else await video.requestPictureInPicture();
@@ -708,7 +710,7 @@
             if (key === ' ' && target.closest?.('button, [role=button], media-play-button, media-mute-button')) return;
             const direct = { ' ': 'play', k: 'play', j: 'back', l: 'forward', m: 'mute', f: 'fullscreen', c: 'cc', i: 'mini', '?': 'help' }[key];
             const handled = direct || ['arrowleft','arrowright','arrowup','arrowdown','home','end','.',',','<','>','contextmenu'].includes(key) ||
-                (key === 'f10' && event.shiftKey) || /^[0-9]$/.test(key) || (key === 'escape' && (hostFull || document.fullscreenElement === frame));
+                (key === 'f10' && event.shiftKey) || /^[0-9]$/.test(key) || (key === 'escape' && hostFull);
             if (!handled) return;
             event.preventDefault(); event.stopImmediatePropagation(); reveal();
             if (direct === 'mute') { mute.click(); return; }
@@ -725,7 +727,7 @@
             case ',': stepFrame(-1); break;
             case '<': setRate(rates.findLast(rate => rate < video.playbackRate) || rates[0]); break;
             case '>': setRate(rates.find(rate => rate > video.playbackRate) || rates.at(-1)); break;
-            case 'escape': fullscreen().catch(() => {}); break;
+            case 'escape': setFullscreen(false); break;
             default: openPanel('context', frame);
             }
         }
@@ -760,13 +762,7 @@
         listen(frame, 'focusin', reveal);
         listen(frame, 'pointerleave', clearHover);
         listen(video, 'click', () => { clearTimeout(clickTimer); clickTimer = setTimeout(() => play.click(), 220); });
-        listen(video, 'dblclick', () => { clearTimeout(clickTimer); fullscreen().catch(() => {}); });
-        listen(document, 'fullscreenchange', () => {
-            const full = document.fullscreenElement === frame;
-            frame.classList.toggle('is-fullscreen', full || hostFull);
-            actions.fullscreen(full || hostFull);
-            reveal();
-        });
+        listen(video, 'dblclick', () => { clearTimeout(clickTimer); setFullscreen(!hostFull); });
         listen(seek, 'input', () => {
             dragging = true;
             describeTime();
@@ -872,7 +868,7 @@
         describeTime();
         reveal();
         return { host, frame, onError, clearError, qualityFinished, statsReady, captureReady,
-            waiting: reason => showWait(reason, false), isMini: () => reduced,
+            waiting: reason => showWait(reason, false), isMini: () => reduced, exitFullscreen: () => setFullscreen(false, false),
             focus: () => frame.focus({ preventScroll: true }),
             dispose() {
                 if (saveTimer) save();
@@ -882,7 +878,6 @@
                     clearTimeout(timer);
                 if (frameHandle != null) video.cancelVideoFrameCallback(frameHandle);
                 if (document.pictureInPictureElement === video) document.exitPictureInPicture().catch(() => {});
-                if (document.fullscreenElement === frame) document.exitFullscreen().catch(() => {});
                 if (hostFull) actions.fullscreen(false);
                 if (reduced) actions.mini(false);
                 resetThumbnail();

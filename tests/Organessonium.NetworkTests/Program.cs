@@ -125,6 +125,7 @@ internal static partial class Program
         ("generatedMediaHiddenBrowser", GeneratedMediaHiddenBrowserAsync),
         ("webViewVirtualVideoPlayback", WebViewVirtualVideoPlaybackAsync),
         ("videoPlayerControlsHidden", VideoPlayerControlsHiddenAsync),
+        ("desktopNavigationHidden", DesktopNavigationHiddenAsync),
         ("encryptedFileRangeRoundTrip", EncryptedFileRangeRoundTripAsync),
         ("encryptedFileRangeUsesCallerOwnedBuffers", EncryptedFileRangeUsesCallerOwnedBuffersAsync),
         ("encryptedPayloadMessageProtocol", EncryptedPayloadMessageProtocolAsync),

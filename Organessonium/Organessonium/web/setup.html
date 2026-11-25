@@ -22,7 +22,7 @@
         <div id="form-area">
             <section id="setup-token-step" class="setup-screen" aria-label="Token do bot">
             <div class="field">
-                <label>Token do Bot</label>
+                <label for="inp-token">Token do Bot</label>
                 <div class="input-wrap">
                     <input id="inp-token" type="password" placeholder="MTIzNDU2Nzg5..." autocomplete="off"/>
                     <button id="btn-toggle-token" class="eye-btn" type="button" title="Mostrar/ocultar" aria-label="Mostrar/ocultar"></button>
@@ -175,6 +175,11 @@
             <button id="setup-recovery-confirm" class="btn-connect" type="button">Continuar</button>
         </div>
     </div>
+</div>
+<div id="token-edit-menu" class="token-edit-menu hidden" role="menu" aria-label="Editar token">
+    <button type="button" role="menuitem" data-token-edit="paste" data-setup-text="tokenPaste">Colar</button>
+    <button type="button" role="menuitem" data-token-edit="cut" data-setup-text="tokenCut">Recortar</button>
+    <button type="button" role="menuitem" data-token-edit="select" data-setup-text="tokenSelectAll">Selecionar tudo</button>
 </div>
 <script src="bridge.js"></script>
 <script src="icons.js"></script>

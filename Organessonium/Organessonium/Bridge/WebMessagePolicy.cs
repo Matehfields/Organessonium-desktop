@@ -24,6 +24,7 @@ internal static class WebMessagePolicy
         ["pauseSync"] = "B", ["resolveSyncConflict"] = "SSSB", ["setSyncPreferences"] = "BB",
         ["connect"] = "SSSSSBSS", ["logout"] = "", ["openGuide"] = "", ["setCurrentPath"] = "SSb",
         ["loadApps"] = "", ["loadFavorites"] = "b", ["loadSynchronizedDevices"] = "b", ["setFavorite"] = "SB",
+        ["searchLibrary"] = "NS",
         ["refreshCurrentFolder"] = "", ["refreshServerIndex"] = "b", ["loadVisibleThumbnails"] = "SS",
         ["loadVisibleFolderStatistics"] = "S", ["requestPreview"] = "SS", ["requestVideoQuality"] = "SSS",
         ["closePreview"] = "S", ["videoPlayback"] = "SSNNBBB", ["clearPreviewCache"] = "", ["getPreviewCacheSize"] = "",

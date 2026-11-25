@@ -78,7 +78,12 @@
                 <button id="btn-forward" class="btn-nav" disabled><span data-icon="arrow_forward" data-size="20"></span></button>
                 <div class="search-wrap">
                     <span class="search-icon-wrap" data-icon="search" data-size="18"></span>
-                    <input id="search-input" type="text" placeholder="Pesquisar em Organessônium..." autocomplete="off"/>
+                    <input id="search-input" type="text" role="combobox" aria-label="Pesquisar na biblioteca" aria-autocomplete="list" aria-expanded="false" aria-controls="library-search-results" placeholder="Pesquisar em Organessônium..." autocomplete="off" maxlength="255"/>
+                    <button id="library-search-clear" class="library-search-clear" type="button" aria-label="Limpar busca" title="Limpar busca" hidden><span data-icon="close" data-size="18"></span></button>
+                    <div id="library-search-popup" class="library-search-popup" hidden>
+                        <div id="library-search-results" role="listbox" aria-label="Resultados da busca"></div>
+                        <div id="library-search-status" role="status" hidden></div>
+                    </div>
                 </div>
                 <div id="titlebar-drag-region" class="titlebar-drag-region" aria-hidden="true"></div>
             </div>
@@ -717,6 +722,7 @@
 <script type="module" src="vendor/videojs/ui/mute-button.js"></script>
 <script src="video-inspection.js"></script>
 <script src="video-player.js"></script>
+<script src="library-search.js"></script>
 <script src="app.js"></script>
 <script src="appearance.js"></script>
 <script src="file-details.js"></script>

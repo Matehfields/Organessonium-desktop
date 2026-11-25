@@ -44,7 +44,8 @@ public partial class MainWindow : Window
     private WindowState _savedWindowState;
     private WindowStyle _savedWindowStyle;
     private ResizeMode _savedResizeMode;
-    private bool _savedTopmost;
+    private Rect _savedWindowBounds;
+    private bool _maximizeAfterRestore;
     private bool _shutdownInProgress;
     private bool _closeConfirmationPending;
     private bool _transferCloseApproved;
@@ -86,7 +87,7 @@ public partial class MainWindow : Window
         if (_windowsColors != null) _windowsColors.ColorValuesChanged += OnSystemAccentChanged;
         SourceInitialized += OnSourceInitialized;
         SizeChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
-        StateChanged += (_, _) => _ = PublishNativeTitleBarMetricsAsync();
+        StateChanged += OnHostWindowStateChanged;
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
@@ -513,25 +514,65 @@ public partial class MainWindow : Window
 
         if (enabled)
         {
+            var handle = new WindowInteropHelper(this).Handle;
+            if (handle == IntPtr.Zero) return;
+            var monitor = System.Windows.Forms.Screen.FromHandle(handle).Bounds;
             _savedWindowState = WindowState;
             _savedWindowStyle = WindowStyle;
             _savedResizeMode = ResizeMode;
-            _savedTopmost = Topmost;
+            _savedWindowBounds = RestoreBounds;
 
             _isWebViewFullscreen = true;
+            ApplyNativeTitleBarDragRectangles([]);
+            if (_nativeTitleBar != null) _nativeTitleBar.ExtendsContentIntoTitleBar = false;
+            WindowState = WindowState.Normal;
             WindowStyle = WindowStyle.None;
-            ResizeMode = ResizeMode.NoResize;
-            WindowState = WindowState.Maximized;
-            Topmost = true;
+            ResizeMode = ResizeMode.CanMinimize;
+            const uint frameChanged = 0x20, noZOrder = 0x04, noActivate = 0x10;
+            if (!SetWindowPos(handle, IntPtr.Zero, monitor.X, monitor.Y, monitor.Width, monitor.Height,
+                frameChanged | noZOrder | noActivate))
+            {
+                SetWebViewFullscreen(false);
+                _ = _bridge?.CallAsync("_onHostFullscreenEnded");
+            }
             return;
         }
 
+        var minimized = WindowState == WindowState.Minimized;
         _isWebViewFullscreen = false;
-        Topmost = _savedTopmost;
         WindowStyle = _savedWindowStyle;
         ResizeMode = _savedResizeMode;
-        WindowState = _savedWindowState;
+        if (_nativeTitleBar != null) _nativeTitleBar.ExtendsContentIntoTitleBar = true;
+        if (!_savedWindowBounds.IsEmpty)
+        {
+            Left = _savedWindowBounds.Left;
+            Top = _savedWindowBounds.Top;
+            Width = _savedWindowBounds.Width;
+            Height = _savedWindowBounds.Height;
+        }
+        if (minimized) _maximizeAfterRestore = _savedWindowState == WindowState.Maximized;
+        else WindowState = _savedWindowState;
+        _ = PublishNativeTitleBarMetricsAsync(force: true);
     }
+
+    private void OnHostWindowStateChanged(object? sender, EventArgs e)
+    {
+        if (_isWebViewFullscreen && WindowState == WindowState.Minimized)
+        {
+            SetWebViewFullscreen(false);
+            _ = _bridge?.CallAsync("_onHostFullscreenEnded");
+        }
+        else if (_maximizeAfterRestore && WindowState != WindowState.Minimized)
+        {
+            _maximizeAfterRestore = false;
+            WindowState = WindowState.Maximized;
+        }
+        _ = PublishNativeTitleBarMetricsAsync();
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
 
     private async Task RecoverWebViewAsync()
     {
@@ -812,7 +853,13 @@ public partial class MainWindow : Window
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
     {
-        e.State = CoreWebView2PermissionState.Deny;
+        var setupClipboard = e.PermissionKind == CoreWebView2PermissionKind.ClipboardRead && e.IsUserInitiated &&
+            Uri.TryCreate(e.Uri, UriKind.Absolute, out var origin) && origin.Scheme == Uri.UriSchemeHttps &&
+            origin.Host == LocalWebHost && origin.IsDefaultPort && string.IsNullOrEmpty(origin.UserInfo) &&
+            Uri.TryCreate(WebView.CoreWebView2?.Source, UriKind.Absolute, out var source) &&
+            WebMessagePolicy.IsLocalDocument(source) && source.AbsolutePath == "/setup.html";
+        e.State = setupClipboard ? CoreWebView2PermissionState.Allow : CoreWebView2PermissionState.Deny;
+        e.SavesInProfile = false;
         e.Handled = true;
     }
 

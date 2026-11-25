@@ -175,6 +175,12 @@ input[type="number"]{width:100%;background:var(--setup-input);border:1px solid v
 .loading p{color:var(--setup-muted);font-size:13px;text-align:center;}
 .spinner{width:32px;height:32px;border:3px solid var(--setup-border);
     border-top-color:var(--setup-muted);border-radius:50%;animation:spin .7s linear infinite;}
+.token-edit-menu{position:fixed;z-index:20;min-width:164px;padding:5px;border:1px solid var(--setup-border);
+    border-radius:9px;background:var(--setup-card);box-shadow:var(--setup-shadow);}
+.token-edit-menu button{display:block;width:100%;padding:7px 10px;text-align:left;border:0;border-radius:5px;
+    color:var(--setup-text);background:transparent;font:inherit;cursor:pointer;}
+.token-edit-menu button:hover:not(:disabled),.token-edit-menu button:focus-visible{background:var(--setup-input);}
+.token-edit-menu button:disabled{opacity:.45;cursor:default;}
 @keyframes spin{to{transform:rotate(360deg)}}
 :focus-visible{outline:2px solid var(--setup-muted);outline-offset:2px;}
 .hidden{display:none!important;}

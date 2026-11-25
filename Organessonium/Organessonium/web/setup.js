@@ -1,4 +1,63 @@
 const inpToken = document.getElementById('inp-token');
+const tokenEditMenu = document.getElementById('token-edit-menu');
+
+function openTokenEditMenu(x, y) {
+    tokenEditMenu.querySelector('[data-token-edit="cut"]').disabled = inpToken.selectionStart === inpToken.selectionEnd;
+    tokenEditMenu.querySelector('[data-token-edit="select"]').disabled = !inpToken.value;
+    tokenEditMenu.classList.remove('hidden');
+    tokenEditMenu.style.left = Math.max(0, Math.min(x, innerWidth - tokenEditMenu.offsetWidth - 4)) + 'px';
+    tokenEditMenu.style.top = Math.max(0, Math.min(y, innerHeight - tokenEditMenu.offsetHeight - 4)) + 'px';
+    tokenEditMenu.querySelector('button').focus({ preventScroll: true });
+}
+
+inpToken.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    openTokenEditMenu(event.clientX, event.clientY);
+});
+inpToken.addEventListener('keydown', event => {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+    event.preventDefault();
+    const bounds = inpToken.getBoundingClientRect();
+    openTokenEditMenu(bounds.left, bounds.bottom);
+});
+document.addEventListener('pointerdown', event => {
+    if (!tokenEditMenu.contains(event.target)) tokenEditMenu.classList.add('hidden');
+});
+tokenEditMenu.addEventListener('keydown', event => {
+    if (event.key === 'Escape' || event.key === 'Tab') {
+        tokenEditMenu.classList.add('hidden');
+        inpToken.focus({ preventScroll: true });
+        if (event.key === 'Escape') event.preventDefault();
+        return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    const choices = [...tokenEditMenu.querySelectorAll('button:not(:disabled)')];
+    const current = choices.indexOf(document.activeElement);
+    choices[(current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length]?.focus();
+});
+tokenEditMenu.addEventListener('click', async event => {
+    const action = event.target.closest('[data-token-edit]')?.dataset.tokenEdit;
+    if (!action) return;
+    const start = inpToken.selectionStart, end = inpToken.selectionEnd;
+    const original = inpToken.value;
+    tokenEditMenu.classList.add('hidden');
+    inpToken.focus({ preventScroll: true });
+    if (action === 'select') { inpToken.select(); return; }
+    try {
+        let replacement = '';
+        if (action === 'paste') replacement = await navigator.clipboard.readText();
+        else await navigator.clipboard.writeText(original.slice(start, end));
+        if (!inpToken.disabled && document.activeElement === inpToken && inpToken.value === original) {
+            inpToken.setRangeText(replacement, start, end, 'end');
+            inpToken.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    } catch (_) {
+        const error = document.getElementById('setup-token-error');
+        error.textContent = setupText('tokenClipboardError');
+        error.classList.remove('hidden');
+    }
+});
 const inpNames = document.getElementById('inp-names');
 const inpFolders = document.getElementById('inp-folders');
 const inpForum = document.getElementById('inp-forum');
@@ -34,6 +93,8 @@ const SETUP_I18N = {
         title:'Organessônium - Configuração',
         subtitle:'Configure a conexão com o Discord para começar',
         token:'Token do Bot',
+        tokenPaste:'Colar', tokenCut:'Recortar', tokenSelectAll:'Selecionar tudo',
+        tokenClipboardError:'Não foi possível acessar a área de transferência.',
         toggle:'Mostrar/ocultar',
         tokenHint:'Developer Portal → Seu App → Bot → Reset Token',
         tokenSavedPlaceholder:'Token salvo. Deixe em branco para manter.',
@@ -98,6 +159,8 @@ const SETUP_I18N = {
         title:'Organessônium - Setup',
         subtitle:'Configure the Discord connection to get started',
         token:'Bot Token',
+        tokenPaste:'Paste', tokenCut:'Cut', tokenSelectAll:'Select all',
+        tokenClipboardError:'The clipboard could not be accessed.',
         toggle:'Show/hide',
         tokenHint:'Developer Portal → Your App → Bot → Reset Token',
         tokenSavedPlaceholder:'Token saved. Leave blank to keep it.',

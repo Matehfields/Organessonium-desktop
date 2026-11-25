@@ -217,27 +217,28 @@ img{
     letter-spacing:.6px;text-transform:uppercase;
 }
 .sidebar-storage-line{
-    display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;width:100%;
+    display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;width:100%;
 }
 .sidebar-storage-value{
     display:block;
     margin:0;
     color:var(--text-primary);font-size:16px;font-weight:700;
-    font-variant-numeric:tabular-nums;
+    font-variant-numeric:tabular-nums;line-height:20px;
     white-space:nowrap;
 }
 .sidebar-item-count{
-    min-width:0;margin-left:auto;display:inline-flex;align-items:baseline;justify-content:flex-end;gap:4px;
-    color:var(--text-muted);font-size:11px;white-space:nowrap;
+    min-width:0;margin-left:auto;display:inline-flex;align-items:center;justify-content:flex-end;gap:4px;
+    color:var(--text-muted);font-size:11px;line-height:20px;white-space:nowrap;
 }
 .sidebar-item-count strong{color:var(--text-secondary);font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;}
-.server-read-status{display:inline-flex;align-items:center;justify-content:center;color:var(--accent);}
+.server-read-status,.server-read-status>[data-icon]{display:inline-flex;align-items:center;justify-content:center;}
+.server-read-status{color:var(--accent);flex:none;}
 .server-read-status .svg-icon{animation:serverReadSpin .9s linear infinite;}
 @keyframes serverReadSpin{to{transform:rotate(-360deg);}}
 .item-favorite{display:inline-flex;align-items:center;justify-content:center;color:var(--accent);flex:0 0 auto;}
 .card-footer .item-favorite{margin-left:auto;}
 .folder-card .item-favorite{margin-left:2px;}
-.sidebar-footer .sidebar-nav-item{align-items:center;line-height:1;}
+.sidebar-footer .sidebar-nav-item{align-items:center;line-height:20px;}
 .sidebar-footer{margin-top:0;padding-top:2px;border-top:0;}
 .sidebar-header .brand-name,
 .app-sidebar [data-sidebar-label],
@@ -334,10 +335,31 @@ html[data-integrated-titlebar="true"] .titlebar-drag-region{display:block;}
 .search-wrap:focus-within{border-color:var(--accent);background:var(--surface);}
 .search-icon-wrap{position:absolute;left:10px;color:var(--text-muted);display:flex;pointer-events:none;}
 #search-input{
-    flex:1;background:none;border:none;outline:none;
+    flex:1;min-width:0;background:none;border:none;outline:none;
     color:var(--text-primary);font-size:13px;font-family:inherit;
 }
 #search-input::placeholder{color:var(--text-muted);}
+.search-wrap:has(.library-search-popup:not([hidden])){border-radius:18px 18px 0 0;z-index:1;}
+.nav-search-group:has(.library-search-popup:not([hidden])){overflow:visible;}
+.library-search-clear{
+    display:grid;place-items:center;flex:none;width:28px;height:28px;margin-right:-6px;padding:0;
+    border:0;border-radius:6px;background:transparent;color:var(--text-secondary);cursor:pointer;
+}
+.library-search-clear:hover{background:var(--surface3);}
+.library-search-clear[hidden],.library-search-popup[hidden]{display:none;}
+.library-search-popup{
+    position:absolute;top:100%;inset-inline:-1px;z-index:2;padding:5px;max-height:min(420px,65vh);overflow:auto;
+    border:1px solid var(--border-hover);border-radius:0 0 14px 14px;background:var(--surface);
+    box-shadow:0 9px 24px rgb(0 0 0 / .26);
+}
+.library-search-option{
+    display:grid;grid-template-columns:24px minmax(0,1fr) minmax(0,36%);align-items:center;gap:8px;
+    min-height:38px;padding:5px 8px;border-radius:7px;color:var(--text-primary);font-size:13px;cursor:pointer;
+}
+.library-search-option:hover,.library-search-option[aria-selected="true"]{background:var(--surface3);}
+.library-search-option strong,.library-search-option small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.library-search-option small{text-align:right;color:var(--text-secondary);font-size:11px;}
+#library-search-status{padding:9px 10px;color:var(--text-secondary);font-size:13px;}
 
 .topbar-actions{display:flex;align-items:center;gap:5px;flex:0 0 auto;margin-left:auto;position:relative;z-index:130;}
 .workspace-tabs{

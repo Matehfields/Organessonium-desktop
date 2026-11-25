@@ -435,6 +435,52 @@ public sealed class SettingsStore : IEncryptionSecretStore
 
     public List<AppEntry> LoadCachedEntriesForFolder(string folderId) => LoadCachedEntriesForFolder(folderId, null);
 
+    internal sealed record LibrarySearchResult(
+        [property: System.Text.Json.Serialization.JsonPropertyName("name")] string Name,
+        [property: System.Text.Json.Serialization.JsonPropertyName("type")] string Type,
+        [property: System.Text.Json.Serialization.JsonPropertyName("path")] string Path,
+        [property: System.Text.Json.Serialization.JsonPropertyName("folderId")] string FolderId,
+        [property: System.Text.Json.Serialization.JsonPropertyName("requestId")] string RequestId,
+        [property: System.Text.Json.Serialization.JsonPropertyName("sizeBytes")] long SizeBytes);
+
+    internal List<LibrarySearchResult> SearchCachedLibrary(string query)
+    {
+        var results = new List<LibrarySearchResult>();
+        if (string.IsNullOrWhiteSpace(query) || query.Length > 255) return results;
+        lock (_lock)
+        {
+            using var connection = Open();
+            var comparison = System.Globalization.CultureInfo.InvariantCulture.CompareInfo;
+            const System.Globalization.CompareOptions options = System.Globalization.CompareOptions.IgnoreCase |
+                System.Globalization.CompareOptions.IgnoreNonSpace;
+            connection.CreateFunction<string, string, int>("name_position",
+                (name, term) => comparison.IndexOf(name, term, options), isDeterministic: true);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                WITH RECURSIVE trash_tree(folder_id) AS (
+                    VALUES('trash')
+                    UNION
+                    SELECT entry.folder_id FROM app_entries entry JOIN trash_tree
+                        ON entry.parent_folder_id = trash_tree.folder_id
+                    WHERE entry.type = 'folder' AND entry.folder_id <> ''
+                )
+                SELECT name, type, COALESCE(NULLIF(path, ''), '/'), folder_id,
+                       COALESCE(NULLIF(names_message_id, ''), NULLIF(file_id, ''), thread_id), size_bytes
+                FROM app_entries
+                WHERE name_position(name, $term) >= 0 AND path NOT IN ('/@trash', '/@favorites')
+                  AND path NOT LIKE '/@trash/%' AND type IN ('file', 'folder')
+                  AND (parent_folder_id IS NULL OR parent_folder_id NOT IN (SELECT folder_id FROM trash_tree))
+                ORDER BY name_position(name, $term), name COLLATE NOCASE, path, names_message_id
+                LIMIT 12
+                """;
+            command.Parameters.AddWithValue("$term", query.Trim());
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) results.Add(new LibrarySearchResult(reader.GetString(0), reader.GetString(1),
+                reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt64(5)));
+        }
+        return results;
+    }
+
     internal AppEntry? LoadCachedFileEntry(string folderId, string metadataMessageId) =>
         LoadCachedEntriesForFolder(folderId, metadataMessageId).FirstOrDefault();
 

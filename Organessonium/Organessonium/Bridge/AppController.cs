@@ -278,6 +278,7 @@ public sealed partial class AppController : IAsyncDisposable
                 if (!ArgBool(args, 2, false)) _ = RunAsync(() => LoadFolderAtPathAsync(requestedPath, requestedFolderId));
                 return Task.CompletedTask;
             case "loadApps": _ = RunAsync(async () => { await LoadAppsAsync(); await NotifyInterruptedTransfersAsync(); }); return Task.CompletedTask;
+            case "searchLibrary": _ = RunAsync(() => SearchLibraryAsync(ArgInt(args, 0, 0), ArgString(args, 1))); return Task.CompletedTask;
             case "loadFavorites": _ = RunAsync(() => LoadFavoritesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "loadSynchronizedDevices": _ = RunAsync(() => LoadSynchronizedDevicesAsync(ArgBool(args, 0, false))); return Task.CompletedTask;
             case "setFavorite": _ = RunAsync(() => SetFavoriteAsync(ArgString(args, 0), ArgBool(args, 1, false))); return Task.CompletedTask;
@@ -670,6 +671,12 @@ public sealed partial class AppController : IAsyncDisposable
             ? serialExisting[0]
             : await api.CreateGuildChannelAsync(targetGuild.Id, serialName, 0);
         return new ResolvedDiscordChannels(namesChannel.Id, foldersChannel.Id, filesChannel.Id, serialChannel.Id);
+    }
+
+    private async Task SearchLibraryAsync(int request, string query)
+    {
+        var results = await Task.Run(() => _store.SearchCachedLibrary(query));
+        await _bridge.CallAsync("_onLibrarySearchResults", request, results);
     }
 
     private async Task LoadAppsAsync()
@@ -1823,7 +1830,7 @@ public sealed partial class AppController : IAsyncDisposable
         if (exact != null) return exact;
         // A physical thread is a legacy locator only when it identifies one entry.
         var legacy = entries.Where(app => app.ThreadId == threadId && app.Storage?.Shared != true).Take(2).ToList();
-        return legacy.Count == 1 ? legacy[0] : null;
+        return legacy.Count == 1 ? legacy[0] : _store.LoadCachedFileByRequestId(threadId);
     }
 
     private async Task<AppEntry?> FindLoadedFileDetailsAsync(string threadId, CancellationToken cancellationToken = default)

@@ -12,6 +12,12 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 - Novo reprodutor com Video.js embarcado, buffer por faixa, atalhos, navegação quadro a quadro, mini player, legendas e estatísticas de streaming.
 - Miniaturas na linha do tempo aproveitam o cache em RAM. A troca entre original e 480p preserva posição e estado de reprodução.
+- Tela cheia ocupa todo o monitor atual. A janela pode ser minimizada, e a prévia normal usa a área entre os botões de navegação.
+
+### Interface da biblioteca
+
+- A caixa de busca local mostra arquivos e pastas de toda a biblioteca indexada, com a pasta de origem.
+- O campo de token tem um menu com Colar, Recortar e Selecionar tudo. O resumo lateral alinha armazenamento, contagem e ícones.
 
 ### Segurança
 
