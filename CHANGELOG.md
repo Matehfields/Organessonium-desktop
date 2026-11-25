@@ -8,6 +8,10 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 ## [Não lançado]
 
+## [1.0.1] - 2026-11-25
+
+Build 14 do Organessônium Desktop. Esta versão atualiza o reprodutor de vídeo, a busca da biblioteca e a proteção das credenciais locais.
+
 ### Reprodução de vídeo
 
 - Novo reprodutor com Video.js embarcado, buffer por faixa, atalhos, navegação quadro a quadro, mini player, legendas e estatísticas de streaming.
@@ -18,6 +22,11 @@ número de build independente. A fonte única dos dois valores é `Version.props
 
 - A caixa de busca local mostra arquivos e pastas de toda a biblioteca indexada, com a pasta de origem.
 - O campo de token tem um menu com Colar, Recortar e Selecionar tudo. O resumo lateral alinha armazenamento, contagem e ícones.
+
+### Sincronização da biblioteca
+
+- Operações pendentes de mover, renomear, restaurar e enviar à Lixeira podem ser retomadas em outro Desktop pelo serial cifrado. A entrada pendente é removida ao concluir.
+- A publicação de metadados verifica a pasta de destino. A reconciliação preserva referências confirmadas quando um índice está temporariamente vazio.
 
 ### Segurança
 

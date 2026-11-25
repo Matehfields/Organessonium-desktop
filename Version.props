@@ -11,7 +11,7 @@
     Use tools/version.ps1 para alterar estes valores com validação.
   -->
   <PropertyGroup>
-    <OrganessoniumVersion>1.0.0</OrganessoniumVersion>
+    <OrganessoniumVersion>1.0.1</OrganessoniumVersion>
     <OrganessoniumBuild>14</OrganessoniumBuild>
   </PropertyGroup>
 </Project>
